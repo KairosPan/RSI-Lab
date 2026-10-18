@@ -1,0 +1,22 @@
+{
+  "input_state_version": 0,
+  "next_action": "tool_batch",
+  "reason_brief": "已有IC50接近，补充两个不同结构簇候选的预测信号。",
+  "evidence_ids": ["ev_ic50_A", "ev_ic50_B"],
+  "tool_requests": [
+    {
+      "request_id": "req_001",
+      "tool_id": "nesso_affinity",
+      "candidate_ids": ["cmp_A", "cmp_B"],
+      "parameter_profile": "nesso_frozen_v1"
+    }
+  ],
+  "read_evidence_ids": [],
+  "memory_delta": [],
+  "shortlist": [
+    {"candidate_id": "cmp_A", "evidence_ids": ["ev_ic50_A"], "uncertainty": "尚无新计算验证"},
+    {"candidate_id": "cmp_B", "evidence_ids": ["ev_ic50_B"], "uncertainty": "尚无新计算验证"}
+  ],
+  "open_questions": ["新模型信号是否支持当前排序？"],
+  "stop_reason": null
+}

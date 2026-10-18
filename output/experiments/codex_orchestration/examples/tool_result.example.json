@@ -1,0 +1,30 @@
+{
+  "example_only": true,
+  "request_id": "req_001",
+  "tool_id": "nesso_affinity",
+  "parameter_profile": "nesso_frozen_v1",
+  "results": [
+    {
+      "candidate_id": "cmp_A",
+      "status": "succeeded",
+      "evidence_id": "ev_nesso_A",
+      "output": {"demo_affinity_score": -1.1, "unit": "arbitrary_demo_units", "example_semantics_only": true},
+      "output_kind": "model_prediction",
+      "evaluator_pass": null,
+      "artifact_ref": "artifact://demo/nesso_A/raw-output.json",
+      "actual_cost": {"gpu_seconds": 54, "cpu_core_seconds": 11},
+      "error": null
+    },
+    {
+      "candidate_id": "cmp_B",
+      "status": "failed",
+      "evidence_id": "ev_nesso_B_failure",
+      "output": null,
+      "output_kind": "execution_failure",
+      "evaluator_pass": null,
+      "artifact_ref": "artifact://demo/nesso_B/stderr.txt",
+      "actual_cost": {"gpu_seconds": 18, "cpu_core_seconds": 7},
+      "error": {"code": "OOM", "retry_policy_ref": "artifact://protocol-demo/retry"}
+    }
+  ]
+}

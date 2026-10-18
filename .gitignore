@@ -1,0 +1,42 @@
+# Local system and editor files
+.DS_Store
+._*
+.idea/
+.vscode/
+
+# Local credentials and environment files
+.env
+.env.*
+!.env.example
+.aws/
+.codex/
+credentials.json
+secrets/
+*.pem
+*.key
+
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Dependencies, data, model weights and run artifacts
+node_modules/
+data/
+datasets/
+weights/
+checkpoints/
+runs/
+.cache/
+tmp/
+*.log
+
+# Local historical drafts; keep the current proposal and protocol
+output/pdf/
+output/docx/*
+!output/docx/RSI-Lab_Final_Proposal_Revised_v8.docx
+output/experiments/RSI-Lab_Experiment_Plan_v1_zh.md
