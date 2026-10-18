@@ -1,0 +1,14 @@
+{
+  "name": "rsi-lab-workbench",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node server.mjs",
+    "build": "node scripts/build.mjs",
+    "check": "node --check src/app.js && node --check src/data.js && node --check src/icons.js && node --check server.mjs && node --check scripts/build.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -34,6 +34,9 @@ runs/
 .cache/
 tmp/
 *.log
+frontend/dist/
+.playwright-cli/
+output/playwright/
 
 # Local historical drafts; keep the current proposal and protocol
 output/pdf/
