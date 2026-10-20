@@ -2,8 +2,8 @@ const NODE_IDS = [
   "controller",
   "lab",
   "executor",
-  "boltz",
-  "nesso",
+  "gnina",
+  "posecheck",
   "memory",
   "meta",
   "validator",
@@ -24,109 +24,158 @@ export const runtimeNodes = [
   {
     id: "controller",
     name: "Controller",
-    role: "流程编排",
+    role: "Orchestration",
     icon: "grid",
-    description: "组装输入、校验请求、管理预算与执行状态。",
-    input: ["任务与预算", "决策请求", "工具执行记录"],
-    output: ["授权任务", "状态快照", "资源账本"],
+    description:
+      "Prepares inputs, checks requests, and records budget and execution state.",
+    input: ["Task and budget", "Decision requests", "Execution records"],
+    output: ["Authorized jobs", "State snapshots", "Resource ledger"],
     group: "campaign",
   },
   {
     id: "lab",
     name: "Lab Codex",
-    role: "轮内决策",
+    role: "Campaign decisions",
     icon: "flask",
-    description: "根据证据与剩余预算规划下一步，维护候选名单。",
-    input: ["候选与工具目录", "科学记忆", "预算快照"],
-    output: ["下一步请求", "名单与依据", "记忆增量"],
+    description:
+      "Plans calculations from available evidence and maintains the candidate shortlist.",
+    input: ["Candidates and tools", "Scientific memory", "Budget snapshot"],
+    output: ["Action requests", "Shortlist and references", "Memory updates"],
     group: "campaign",
   },
   {
     id: "executor",
     name: "Tool Executor",
-    role: "工具执行",
+    role: "Numerical jobs",
     icon: "terminal",
-    description: "执行 Controller 已授权的任务并记录实际返回状态。",
-    input: ["已授权计算请求", "冻结的工具配置"],
-    output: ["模型任务", "执行日志", "成本记录"],
+    description:
+      "Runs authorized numerical jobs and records results, failures, and resource use.",
+    input: ["Authorized requests", "Frozen tool profiles"],
+    output: ["Numerical jobs", "Execution logs", "Resource records"],
     group: "campaign",
   },
   {
-    id: "boltz",
-    name: "Boltz-2",
-    role: "相互作用预测",
+    id: "gnina",
+    name: "GNINA",
+    role: "Docking and rescoring",
     icon: "molecule",
-    description: "生成工具支持的结构或预测信号，不承担最终生物活性确认。",
-    input: ["受支持的分子输入", "冻结的模型配置"],
-    output: ["预测证据", "置信信息", "执行状态"],
+    description:
+      "Produces docking energy and CNN scores under the fixed computational protocol. These are computational signals, not wet-lab confirmation.",
+    input: ["Prepared ligands", "Receptor and frozen protocol"],
+    output: [
+      "Docked poses",
+      "CNN scores and docking energy",
+      "Execution records",
+    ],
     group: "campaign",
   },
   {
-    id: "nesso",
-    name: "Nesso-1",
-    role: "相互作用预测",
-    icon: "molecule",
-    description: "生成预测信号并保留失败记录；执行失败不能解释为分子无活性。",
-    input: ["受支持的分子输入", "冻结的模型配置"],
-    output: ["预测证据", "缺失或失败记录"],
+    id: "posecheck",
+    name: "PoseBusters",
+    role: "Pose validation",
+    icon: "checkCircle",
+    description:
+      "Checks the validity of generated poses. A failed pose check is not a conclusion about biological activity.",
+    input: ["Generated poses", "Frozen validity checks"],
+    output: ["Pose validity flags", "Check results", "Failure records"],
     group: "campaign",
   },
   {
     id: "memory",
     name: "Scientific Memory",
-    role: "科学记忆",
+    role: "Evidence and interpretation",
     icon: "book",
-    description: "分别保存观测、预测、计算验证与假设，保留来源和历史。",
-    input: ["工具原始结果", "决策依据", "记忆增量"],
-    output: ["带来源的证据", "冲突与未决问题", "开发轨迹"],
+    description:
+      "Keeps source evidence separate from derived interpretations, with review state and history.",
+    input: ["Raw tool records", "Decision references", "Memory updates"],
+    output: [
+      "Traceable evidence",
+      "Conflicts and open questions",
+      "Development traces",
+    ],
     group: "campaign",
   },
   {
     id: "meta",
     name: "Meta Codex",
-    role: "跨轮次改进",
+    role: "Cross-campaign proposals",
     icon: "branch",
-    description: "从允许的开发轨迹诊断问题，产生候选 Harness 修改。",
-    input: ["已完成的开发轨迹", "当前 Harness", "允许修改的范围"],
-    output: ["诊断报告", "候选 diff", "检查记录"],
+    description:
+      "Diagnoses permitted development traces and proposes a candidate Harness change. A proposal is not a released version.",
+    input: [
+      "Completed development traces",
+      "Current Harness",
+      "Allowed change scope",
+    ],
+    output: ["Diagnosis", "Candidate change", "Check records"],
     group: "cross-campaign",
   },
   {
     id: "validator",
     name: "Validation Gate",
-    role: "验证与发布",
+    role: "Validation and release",
     icon: "checkCircle",
-    description: "用固定规则验证候选修改；发布仅影响后续新 campaign。",
-    input: ["候选 Harness", "独立验证集", "冻结的发布规则"],
-    output: ["验证结果", "发布或保留决定"],
+    description:
+      "Applies fixed release rules. A new version can affect future campaigns only after an authorized release.",
+    input: [
+      "Candidate Harness",
+      "Independent validation pools",
+      "Frozen release rules",
+    ],
+    output: ["Validation records", "Release or retain decision"],
     group: "cross-campaign",
   },
 ];
 
 export const runtimeEdges = [
-  { from: "controller", to: "lab", label: "任务与状态", kind: "campaign" },
+  { from: "controller", to: "lab", label: "Task and state", kind: "campaign" },
   {
     from: "lab",
     to: "executor",
-    label: "经 Controller 校验的请求",
+    label: "Controller-authorized requests",
     kind: "campaign",
   },
-  { from: "executor", to: "boltz", label: "预测任务", kind: "campaign" },
-  { from: "executor", to: "nesso", label: "预测任务", kind: "campaign" },
-  { from: "boltz", to: "memory", label: "预测与执行记录", kind: "campaign" },
-  { from: "nesso", to: "memory", label: "预测或失败记录", kind: "campaign" },
-  { from: "memory", to: "lab", label: "证据反馈", kind: "campaign" },
+  {
+    from: "executor",
+    to: "gnina",
+    label: "Docking and rescoring jobs",
+    kind: "campaign",
+  },
+  {
+    from: "gnina",
+    to: "posecheck",
+    label: "Generated poses",
+    kind: "campaign",
+  },
+  {
+    from: "gnina",
+    to: "memory",
+    label: "Scores and execution records",
+    kind: "campaign",
+  },
+  {
+    from: "posecheck",
+    to: "memory",
+    label: "Pose validity evidence",
+    kind: "campaign",
+  },
+  { from: "memory", to: "lab", label: "Evidence feedback", kind: "campaign" },
   {
     from: "memory",
     to: "meta",
-    label: "已完成的开发轨迹",
+    label: "Completed development traces",
     kind: "cross-campaign",
   },
-  { from: "meta", to: "validator", label: "候选版本", kind: "cross-campaign" },
+  {
+    from: "meta",
+    to: "validator",
+    label: "Candidate change",
+    kind: "cross-campaign",
+  },
   {
     from: "validator",
     to: "controller",
-    label: "后续 campaign 使用的版本",
+    label: "Authorized version for future campaigns",
     kind: "cross-campaign",
   },
 ];
@@ -137,7 +186,7 @@ function isRecord(value) {
 
 function boundedText(value, limit, name) {
   if (typeof value !== "string")
-    throw new Error(`运行状态字段格式错误：${name}`);
+    throw new Error(`Invalid runtime field: ${name}`);
   return value
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
     .trim()
@@ -146,13 +195,13 @@ function boundedText(value, limit, name) {
 
 function requiredText(value, limit, name) {
   const text = boundedText(value, limit, name);
-  if (!text) throw new Error(`运行状态缺少字段：${name}`);
+  if (!text) throw new Error(`Missing runtime field: ${name}`);
   return text;
 }
 
 function arrayField(value, limit, name) {
   if (!Array.isArray(value) || value.length > limit)
-    throw new Error(`运行状态列表格式错误：${name}`);
+    throw new Error(`Invalid runtime list: ${name}`);
   return value;
 }
 
@@ -162,43 +211,51 @@ function timestamp(value, now, name) {
     value.length > 32 ||
     !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(value)
   ) {
-    throw new Error(`运行状态时间格式错误：${name}`);
+    throw new Error(`Invalid runtime timestamp: ${name}`);
   }
   const time = Date.parse(value);
-  if (!Number.isFinite(time)) throw new Error(`运行状态时间格式错误：${name}`);
+  if (!Number.isFinite(time))
+    throw new Error(`Invalid runtime timestamp: ${name}`);
   const iso = new Date(time).toISOString();
   // Reject date rollover such as February 30 instead of silently normalizing it.
   if (iso.slice(0, 19) !== value.slice(0, 19))
-    throw new Error(`运行状态时间格式错误：${name}`);
-  if (time > now) throw new Error(`运行状态包含未来时间：${name}`);
+    throw new Error(`Invalid runtime timestamp: ${name}`);
+  if (time > now)
+    throw new Error(`Runtime timestamp is in the future: ${name}`);
   return { time, iso };
 }
 
 /**
  * Normalize an externally produced snapshot into the fixed eight-node topology.
  * Missing nodes and unfamiliar statuses are unknown. Structural mistakes reject
- * the entire snapshot; stale data can never retain a running/healthy status.
+ * the entire snapshot. Only live data is subject to heartbeat expiry; recorded
+ * completion is historical evidence and never establishes process liveness.
  */
 export function normalizeRuntime(payload, now = Date.now()) {
-  if (!Number.isFinite(now) || now < 0) throw new Error("运行状态校验时间无效");
-  if (!isRecord(payload) || !["live", "demo"].includes(payload.source)) {
-    throw new Error("运行状态快照格式错误");
+  if (!Number.isFinite(now) || now < 0)
+    throw new Error("Invalid runtime validation time");
+  if (
+    !isRecord(payload) ||
+    !["live", "demo", "recorded"].includes(payload.source)
+  ) {
+    throw new Error("Invalid runtime snapshot");
   }
   const campaignId = requiredText(payload.campaignId, 64, "campaignId");
   const harness = requiredText(payload.harness, 64, "harness");
   const observed = timestamp(payload.observedAt, now, "observedAt");
-  const stale = now - observed.time > MAX_SNAPSHOT_AGE;
+  const isLive = payload.source === "live";
+  const stale = isLive && now - observed.time > MAX_SNAPSHOT_AGE;
   const byId = new Map();
   const ignoredNodeIds = [];
 
   for (const node of arrayField(payload.nodes, 64, "nodes")) {
-    if (!isRecord(node)) throw new Error("运行节点格式错误");
+    if (!isRecord(node)) throw new Error("Invalid runtime node");
     const rawId = requiredText(node.id, 64, "node.id");
     if (!NODE_IDS.includes(rawId)) {
       ignoredNodeIds.push(rawId);
       continue;
     }
-    if (byId.has(rawId)) throw new Error("运行节点重复");
+    if (byId.has(rawId)) throw new Error("Duplicate runtime node");
     const rawStatus = requiredText(node.status, 32, "node.status");
     const detail = boundedText(node.detail, 400, "node.detail");
     const task = boundedText(node.task, 200, "node.task");
@@ -207,15 +264,26 @@ export function normalizeRuntime(payload, now = Date.now()) {
         ? null
         : timestamp(node.heartbeatAt, now, "node.heartbeatAt");
     if (heartbeat && heartbeat.time > observed.time) {
-      throw new Error("节点心跳晚于快照时间");
+      throw new Error("Node heartbeat is later than the snapshot");
     }
-    let status = NODE_STATUSES.has(rawStatus) ? rawStatus : "unknown";
-    if (!heartbeat) status = "unknown";
-    if (stale || (heartbeat && now - heartbeat.time > MAX_HEARTBEAT_AGE))
+    if (isLive && rawStatus === "completed") {
+      throw new Error(
+        "Completed is a recorded-result status, not a live process state",
+      );
+    }
+    let status =
+      NODE_STATUSES.has(rawStatus) || (!isLive && rawStatus === "completed")
+        ? rawStatus
+        : "unknown";
+    if (isLive && !heartbeat) status = "unknown";
+    if (
+      isLive &&
+      (stale || (heartbeat && now - heartbeat.time > MAX_HEARTBEAT_AGE))
+    )
       status = "offline";
     const metrics = arrayField(node.metrics, 12, "node.metrics").map(
       (metric) => {
-        if (!isRecord(metric)) throw new Error("运行指标格式错误");
+        if (!isRecord(metric)) throw new Error("Invalid runtime metric");
         const label = requiredText(metric.label, 48, "metric.label");
         const value =
           typeof metric.value === "number"
@@ -223,16 +291,18 @@ export function normalizeRuntime(payload, now = Date.now()) {
               ? metric.value
               : null
             : boundedText(metric.value, 100, "metric.value");
-        if (value === null) throw new Error("运行指标数值无效");
+        if (value === null) throw new Error("Invalid runtime metric value");
         return { label, value };
       },
     );
     const events = arrayField(node.events, 20, "node.events").map((event) => {
-      if (!isRecord(event)) throw new Error("运行事件格式错误");
+      if (!isRecord(event)) throw new Error("Invalid runtime event");
       const time = timestamp(event.time, now, "event.time");
-      if (time.time > observed.time) throw new Error("运行事件晚于快照时间");
+      if (time.time > observed.time)
+        throw new Error("Runtime event is later than the snapshot");
       const level = requiredText(event.level, 16, "event.level");
-      if (!EVENT_LEVELS.has(level)) throw new Error("运行事件级别无效");
+      if (!EVENT_LEVELS.has(level))
+        throw new Error("Invalid runtime event level");
       return {
         time: time.iso,
         message: requiredText(event.message, 400, "event.message"),
@@ -248,6 +318,13 @@ export function normalizeRuntime(payload, now = Date.now()) {
       metrics,
       events,
     };
+    if (!isLive && node.statusLabel !== undefined) {
+      normalized.statusLabel = requiredText(
+        node.statusLabel,
+        40,
+        "node.statusLabel",
+      );
+    }
     if (node.progress !== undefined) {
       if (
         typeof node.progress !== "number" ||
@@ -255,7 +332,7 @@ export function normalizeRuntime(payload, now = Date.now()) {
         node.progress < 0 ||
         node.progress > 100
       ) {
-        throw new Error("运行进度必须介于 0 到 100");
+        throw new Error("Runtime progress must be between 0 and 100");
       }
       normalized.progress = node.progress;
     }
@@ -268,8 +345,8 @@ export function normalizeRuntime(payload, now = Date.now()) {
         id,
         status: stale ? "offline" : "unknown",
         detail: stale
-          ? "快照已过期，当前状态不可确认。"
-          : "快照未报告此节点，当前状态未知。",
+          ? "The snapshot is stale; current state is unconfirmed."
+          : "This node was not reported; its state is unknown.",
         heartbeatAt: null,
         task: "",
         metrics: [],
@@ -288,98 +365,227 @@ export function normalizeRuntime(payload, now = Date.now()) {
   };
 }
 
+/** Build a historical readout. No node heartbeat or process liveness is inferred. */
+export function recordedRuntime(experiment, armId = "H1") {
+  const arm = experiment?.arms?.find((item) => item.id === armId);
+  if (!arm) throw new Error(`Recorded experiment arm not found: ${armId}`);
+  const timestamp = new Date(
+    arm.completedAt || experiment.generatedAt,
+  ).toISOString();
+  const readoutTime = new Date(experiment.generatedAt).toISOString();
+  const numerical = arm.numerical;
+  const metric = (label, value, suffix = "") => ({
+    label,
+    value:
+      value === null || value === undefined
+        ? "Not recorded"
+        : `${typeof value === "number" ? value.toLocaleString("en-US", { maximumFractionDigits: 2 }) : value}${suffix}`,
+  });
+  const jobsComplete =
+    numerical.jobs > 0 && numerical.completedJobs === numerical.jobs;
+  const poseCount = `${numerical.poseValidJobs} / ${numerical.completedJobs}`;
+  const pending = arm.pendingMemoryCount ?? 0;
+  const meta = experiment.meta;
+  const records = {
+    controller: {
+      status: "completed",
+      task: "Campaign closed",
+      detail: `Recorded ${arm.id} campaign completed. Its shortlist and execution records are archived.`,
+      metrics: [
+        metric(
+          "Shortlist",
+          arm.shortlist.length,
+          ` / ${experiment.shortlistSize}`,
+        ),
+        metric("Protocol", experiment.protocolId),
+      ],
+    },
+    lab: {
+      status: arm.usage.calls > 0 ? "completed" : "idle",
+      statusLabel: arm.usage.calls > 0 ? "Completed" : "Not used",
+      task: arm.usage.calls > 0 ? "Shortlist submitted" : "Rule-based baseline",
+      detail:
+        arm.usage.calls > 0
+          ? `${arm.usage.calls} Codex calls are recorded for this arm. No agent liveness is inferred from these results.`
+          : "The rule-based baseline did not invoke Lab Codex. Its shortlist is recorded without an agent call.",
+      metrics: [
+        metric("Codex calls", arm.usage.calls),
+        metric("Tokens", arm.usage.totalTokens),
+        metric("LLM wall time", arm.usage.llmWallSeconds, " s"),
+      ],
+    },
+    executor: {
+      status: jobsComplete ? "completed" : "error",
+      task: "Numerical batch recorded",
+      detail: `${numerical.completedJobs} of ${numerical.jobs} physical jobs completed; ${numerical.terminalJobs} terminal-evaluation jobs are recorded.`,
+      metrics: [
+        metric(
+          "Completed jobs",
+          `${numerical.completedJobs} / ${numerical.jobs}`,
+        ),
+        metric("CPU time", numerical.cpuSeconds, " s"),
+        metric("GPU-observed jobs", numerical.gpuObservedJobs),
+      ],
+    },
+    gnina: {
+      status: jobsComplete ? "completed" : "error",
+      task: "Docking and rescoring recorded",
+      detail: `GNINA outputs are available for the completed numerical jobs. Scores describe this computational protocol, not wet-lab activity.`,
+      metrics: [
+        metric("Numerical jobs", numerical.completedJobs),
+        metric("Online candidates", numerical.onlineCandidates),
+        metric("Batch wall time", numerical.batchWallSeconds, " s"),
+      ],
+    },
+    posecheck: {
+      status: jobsComplete ? "completed" : "error",
+      task: "Pose validity checks recorded",
+      detail: `${poseCount} completed jobs passed pose checks. A pose check failure is not an inactivity label.`,
+      metrics: [
+        metric("Valid poses / jobs", poseCount),
+        metric(
+          "Valid shortlist",
+          arm.quality.validCount,
+          ` / ${arm.quality.shortlistSize}`,
+        ),
+      ],
+    },
+    memory: {
+      status: pending ? "queued" : "completed",
+      statusLabel: pending ? "Pending review" : "Archived",
+      task: "Scientific memory archived",
+      detail: `${arm.memoryCount} memory entries are recorded; ${pending} remain pending review. This is a historical review state, not a live queue.`,
+      metrics: [
+        metric("Memory entries", arm.memoryCount),
+        metric("Pending review", pending),
+      ],
+    },
+    meta: {
+      status: "queued",
+      statusLabel: "Proposed",
+      task: "Cross-arm candidate proposal",
+      detail:
+        meta.summary ||
+        "A candidate change was proposed. No release is implied.",
+      metrics: [
+        metric("Proposal status", meta.status),
+        metric("Meta tokens", meta.totalTokens),
+        metric("Meta wall time", meta.wallSeconds, " s"),
+      ],
+    },
+    validator: {
+      status: "idle",
+      statusLabel: meta.releaseAuthorized
+        ? "Release authorized"
+        : "Not released",
+      task: meta.releaseAuthorized
+        ? "Release authorization recorded"
+        : "Release not authorized",
+      detail: meta.releaseAuthorized
+        ? "The experiment record includes release authorization; this does not report an active process."
+        : "The recorded proposal has not been authorized for release. Audit success is not a Harness release decision.",
+      metrics: [
+        metric("Release authorized", meta.releaseAuthorized ? "Yes" : "No"),
+        metric(
+          "Record audit",
+          experiment.audit.passed ? "Passed" : "Not passed",
+        ),
+      ],
+    },
+  };
+  return {
+    source: "recorded",
+    campaignId: experiment.id,
+    harness: arm.id,
+    observedAt: readoutTime,
+    completedAt: timestamp,
+    stale: false,
+    nodes: NODE_IDS.map((id) => ({
+      id,
+      ...records[id],
+      heartbeatAt: null,
+      events: [
+        {
+          time: readoutTime,
+          message: records[id].detail,
+          level:
+            records[id].status === "error"
+              ? "error"
+              : records[id].status === "queued"
+                ? "warning"
+                : "info",
+        },
+      ],
+    })),
+  };
+}
+
 export function demoRuntime(tick = 0) {
   const now = Date.now();
   const observedAt = new Date(now).toISOString();
   const stage = Math.abs(Math.trunc(Number.isFinite(tick) ? tick : 0)) % 3;
-  const status = {
+  const statuses = {
     controller: "running",
     lab: stage === 0 ? "running" : "idle",
     executor: stage === 1 ? "running" : "queued",
-    boltz: stage === 1 ? "running" : stage === 2 ? "idle" : "queued",
-    nesso: "error",
+    gnina: stage === 1 ? "running" : stage === 2 ? "completed" : "queued",
+    posecheck: "error",
     memory: stage === 2 ? "running" : "idle",
     meta: "queued",
     validator: "idle",
   };
   const details = {
-    controller: "DEV-004 使用已冻结的 H1，正在整理任务状态。",
-    lab: stage === 0 ? "根据证据缺口规划下一批计算。" : "等待工具与记忆反馈。",
+    controller: "Simulated campaign state; no real jobs are started.",
+    lab:
+      stage === 0
+        ? "Planning the next simulated calculation request."
+        : "Waiting for simulated evidence.",
     executor:
-      stage === 1 ? "执行已授权的 Boltz-2 任务。" : "等待下一批已授权请求。",
-    boltz:
       stage === 1
-        ? "CMP-004 的预测任务进行中。"
+        ? "Simulating an authorized GNINA job."
+        : "Waiting for a simulated authorized request.",
+    gnina:
+      stage === 1
+        ? "Simulated docking is in progress."
         : stage === 2
-          ? "模拟预测记录已返回。"
-          : "CMP-004 的预测任务等待执行。",
-    nesso: "CMP-008 任务遇到 OOM；预测缺失，不代表分子无活性。",
+          ? "Simulated docking output returned."
+          : "Simulated docking job is queued.",
+    posecheck:
+      "Simulated pose check failed. This does not establish molecular inactivity.",
     memory:
       stage === 2
-        ? "关联预测与失败证据，更新未决问题。"
-        : "原始证据与派生结论分别保存。",
-    meta: "H2 候选等待独立验证，不修改活动中的 DEV-004。",
-    validator: "尚未开始候选版本的配对验证。",
+        ? "Linking simulated evidence and open questions."
+        : "Keeping simulated evidence separate from interpretations.",
+    meta: "A simulated candidate change awaits independent validation.",
+    validator: "No simulated release has been authorized.",
   };
-  const tasks = {
-    controller: "维护 DEV-004 状态",
-    lab: "补齐候选证据",
-    executor: "等待或分派授权任务",
-    boltz: "CMP-004 · 模拟预测",
-    nesso: "CMP-008 · 模拟失败记录",
-    memory: "证据追溯与冲突保留",
-    meta: "H2 · 失败反馈机制候选修改",
-    validator: "VAL-003 · 待开始",
-  };
-  const nodeMetrics = {
-    controller: { label: "冻结版本（模拟）", value: "H1" },
-    lab: { label: "未决问题（模拟）", value: "2 issues" },
-    executor: {
-      label: "任务队列（模拟）",
-      value: stage === 1 ? "1 running" : "1 queued",
-    },
-    boltz: {
-      label: "预测任务（模拟）",
-      value: stage === 1 ? "48%" : stage === 2 ? "returned" : "queued",
-    },
-    nesso: { label: "执行异常（模拟）", value: "OOM" },
-    memory: { label: "证据记录（模拟）", value: "33 records" },
-    meta: { label: "候选版本（模拟）", value: "H2" },
-    validator: { label: "验证批次（模拟）", value: "VAL-003" },
-  };
-  const eventAges = {
-    nesso: 2_000,
-    lab: 5_000,
-    controller: 8_000,
-    executor: 12_000,
-    boltz: 16_000,
-    memory: 20_000,
-    meta: 24_000,
-    validator: 28_000,
-  };
-  const eventMessages = {
-    nesso: "CMP-008 遇到 OOM，保留失败记录与未知预测，不推断分子无活性。",
-    lab: "已提出补齐 CMP-004 证据的下一批计算计划。",
-    controller: "已校验并授权任务，DEV-004 保持冻结的 H1。",
+  const ages = {
+    posecheck: 2000,
+    lab: 5000,
+    controller: 8000,
+    executor: 12000,
+    gnina: 16000,
+    memory: 20000,
+    meta: 24000,
+    validator: 28000,
   };
   return {
     source: "demo",
-    campaignId: "DEV-004",
-    harness: "H1",
+    campaignId: "DEMO-WORKFLOW",
+    harness: "Demo Harness",
     observedAt,
     nodes: NODE_IDS.map((id) => ({
       id,
-      status: status[id],
+      status: statuses[id],
       detail: details[id],
-      heartbeatAt: observedAt,
-      task: tasks[id],
-      ...(id === "boltz" && stage === 1 ? { progress: 48 } : {}),
-      metrics: [nodeMetrics[id]],
+      heartbeatAt: null,
+      task: "Simulated workflow only",
+      metrics: [{ label: "Demo state", value: statuses[id] }],
       events: [
         {
-          time: new Date(now - eventAges[id]).toISOString(),
-          message: eventMessages[id] ?? details[id],
-          level: id === "nesso" ? "error" : "info",
+          time: new Date(now - ages[id]).toISOString(),
+          message: details[id],
+          level: id === "posecheck" ? "error" : "info",
         },
       ],
     })),
@@ -388,10 +594,12 @@ export function demoRuntime(tick = 0) {
 
 export async function fetchRuntime(signal) {
   if (!globalThis.location || globalThis.location.protocol === "file:") {
-    throw new Error("本地文件预览无法连接实时状态，请通过项目服务器打开页面。");
+    throw new Error(
+      "File previews cannot connect to live telemetry. Open the project server instead.",
+    );
   }
   if (!["http:", "https:"].includes(globalThis.location.protocol)) {
-    throw new Error("当前页面协议不支持实时状态。");
+    throw new Error("This page protocol does not support live telemetry.");
   }
   const response = await fetch("/api/runtime", {
     method: "GET",
@@ -402,18 +610,20 @@ export async function fetchRuntime(signal) {
   if (!response.ok) {
     throw new Error(
       response.status === 503
-        ? "尚未接入可用的运行状态文件。"
-        : "无法读取运行状态，请稍后重试。",
+        ? "No usable runtime snapshot is connected."
+        : "Unable to read runtime state. Try again later.",
     );
   }
   let payload;
   try {
     payload = await response.json();
   } catch {
-    throw new Error("运行状态服务返回了无效数据。");
+    throw new Error("The runtime service returned invalid data.");
   }
   if (!isRecord(payload) || payload.source !== "live") {
-    throw new Error("运行状态服务返回的是演示或未知来源，不能作为真实连接。");
+    throw new Error(
+      "The runtime service did not return a live source; it cannot establish a live connection.",
+    );
   }
   return normalizeRuntime(payload);
 }

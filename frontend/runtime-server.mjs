@@ -54,14 +54,14 @@ export async function handleRuntimeRequest(req, res, options = {}) {
       req,
       res,
       405,
-      { error: "此接口只允许读取运行状态。" },
+      { error: "This endpoint is read-only." },
       { Allow: "GET, HEAD" },
     );
     return;
   }
   const runtimeFile = options.runtimeFile ?? process.env.RSI_LAB_RUNTIME_FILE;
   if (typeof runtimeFile !== "string" || !runtimeFile.trim()) {
-    sendJson(req, res, 503, { error: "尚未配置运行状态来源。" });
+    sendJson(req, res, 503, { error: "No runtime source is configured." });
     return;
   }
   try {
@@ -73,7 +73,8 @@ export async function handleRuntimeRequest(req, res, options = {}) {
   } catch {
     // Never expose file paths, stack traces, or raw producer content in errors.
     sendJson(req, res, 503, {
-      error: "运行状态暂不可用，请检查遥测文件格式与时间。",
+      error:
+        "Runtime telemetry is unavailable. Check the snapshot format and timestamps.",
     });
   }
 }

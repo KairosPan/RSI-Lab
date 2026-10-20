@@ -1,30 +1,28 @@
-# 前端验证记录
+# Frontend verification
 
-2026-10-20，Node.js 22、Chromium，桌面 1440 × 1080、手机 390 × 844。真实接口状态由受控测试夹具提供，没有启动 Codex、模型或 GPU 实验。
+Verified on 2026-10-20. This update imports the completed CDK2 experiment and converts the UI to English. Functional checks use recorded local artifacts or controlled telemetry fixtures; no model or GPU experiment is started.
 
-## 遥测与接口
+## Automated checks
 
-`npm run check`、`npm test`、`npm run build` 通过。
+- JavaScript syntax checks and the self-contained HTML build passed.
+- All **26 automated tests passed**: 10 recorded-data checks and 16 runtime checks.
+- Data checks cover deterministic import, 40 source hashes, recorded hash bindings, post-audit artifact tampering, 20-candidate coverage, 44 evidence records, arm isolation, missing values, shortlist metrics and separate Meta cost accounting.
+- Runtime checks cover schema validation, unknown components, stale heartbeats/snapshots, invalid/future timestamps, read-only HTTP handling, size limits and rejecting recorded/demo data as live telemetry.
+- Fresh-clone behavior was checked without the ignored local experiment archive: 6 portable-snapshot tests pass and 4 source-artifact checks explicitly skip.
+- No Chinese characters remain in frontend text sources or the generated HTML.
 
-14 项 Node 测试涵盖：固定拓扑和缺失节点、未知状态、缺失心跳、30 秒心跳过期、60 秒快照过期、未来或不一致时间、格式错误、文字与指标边界、演示 OOM 语义、GET / HEAD 及写入拒绝、1 MiB 限制、错误脱敏、示例契约，以及服务端/客户端拒绝将 demo 来源当成 live。
+## Browser checks
 
-## 浏览器
+**51 interaction checks passed** against the development preview, plus **12 checks passed** against the final self-contained build served over local HTTP.
 
-27 项交互检查通过：
+Coverage includes recorded canvas state, all three arm selections, actual comparison metrics, 20 candidates, 12 uncomputed candidates per arm, five-compound frozen shortlists, search, evidence isolation, per-seed results, version/gate/protocol dialogs, provenance and arm-specific JSON download. The final build exposes all 40 sources, distinguishing 38 recorded hash bindings and 2 local import roots.
 
-- 8 个节点正确渲染，失败事件可定位，节点详情、输入输出约定与异常聚焦正常。
-- 节点拖动、背景平移、放大缩小、适应与重置正常；拖动不会误选节点，刷新保持布局。
-- 键盘缩放可用；实时心跳刷新保留事件行焦点。
-- 无后端时 8 个节点均未知；受控 live 记录正确显示，缺失节点保持未知。
-- 外部文本经过转义；心跳过期、全快照过期与 demo 冒充 live 均正确处理。
-- 离开首页后停止轮询；其他页面的候选搜索仍正常。
-- 手机页面无整体横向溢出，下拉框可切换全部组件；导航抽屉背景隔离和焦点恢复正常。
-- 没有 JavaScript 页面异常。未配置遥测时的 HTTP 503 是预期故障用例，不是可用服务的成功响应。
+All five views and their result dialogs were checked for English content. Desktop screenshots were reviewed at 1440 × 1080. Mobile workbench, comparison and candidate views were checked at 390 × 844 with no page-level horizontal overflow; the component canvas intentionally supports panning. Mobile navigation makes the page background inert.
 
-另有 9 项独立构建检查通过：HTTP 200、内嵌脚本样式、完整节点、演示推进与暂停、手机聚焦可读节点、无横向溢出、适应视图覆盖全部节点、服务缺失边界和无页面异常。合计 36 项浏览器检查。
+The unavailable live endpoint correctly returns 503 and leaves all eight components unknown. Switching back restores the historical results. There were no JavaScript exceptions; the expected 503 request is recorded during the disconnection check.
 
-桌面与手机截图保存在 `docs/`，单文件构建已通过本地 HTTP 验证。
+Current screenshots: [Workbench](docs/workbench.png), [Run comparison](docs/comparison.png), [Mobile](docs/mobile.png).
 
-## 限制
+## Scope
 
-未验证实际 Controller 心跳生产、远端 GPU 连通性、端到端分子计算或实验结论。历史实验产物不构成实时进程存活证明。独立 HTML 不提供本机遥测；浏览器工具通过 HTTP 检查单文件构建，不声称已经测试 `file:` 协议。
+The default snapshot is historical evidence, not current process telemetry. No heartbeat producer has been added to the experiment controllers. Model/GPU execution, remote availability, authorization, biological outcomes and statistical claims are outside this frontend verification. Self-contained HTML is browser-tested over local HTTP; direct `file:` automation is not claimed.

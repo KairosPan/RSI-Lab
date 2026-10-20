@@ -1,8 +1,10 @@
 import { icon } from "./icons.js";
+import { experiment } from "./experiment-data.js";
 import {
   runtimeNodes,
   runtimeEdges,
   demoRuntime,
+  recordedRuntime,
   fetchRuntime,
   normalizeRuntime,
 } from "./runtime.js";
@@ -11,22 +13,23 @@ const canvasPositions = {
   controller: [28, 132],
   lab: [290, 132],
   executor: [552, 132],
-  boltz: [814, 38],
-  nesso: [814, 234],
+  gnina: [814, 38],
+  posecheck: [814, 234],
   memory: [552, 408],
   meta: [290, 408],
   validator: [28, 408],
 };
 const canvasLabels = {
-  running: "运行中",
-  queued: "等待中",
-  idle: "空闲",
-  error: "执行异常",
-  offline: "心跳过期",
-  unknown: "状态未知",
+  running: "Running",
+  queued: "Queued",
+  idle: "Idle",
+  error: "Error",
+  offline: "Stale heartbeat",
+  unknown: "Unknown",
+  completed: "Completed",
 };
 const canvasState = {
-  mode: "demo",
+  mode: "recorded",
   selected: "lab",
   tab: "overview",
   problems: false,
@@ -44,36 +47,39 @@ const canvasEscape = (v) =>
   );
 const canvasTime = (v) =>
   Number.isFinite(Date.parse(v))
-    ? new Date(v).toLocaleTimeString("zh-CN", { hour12: false })
+    ? new Date(v).toLocaleTimeString("en-GB", {
+        hour12: false,
+        timeZone: "UTC",
+      }) + " UTC"
     : "—";
-const canvasBadge = (s) =>
-  `<span class="runtime-status status-${s}"><i></i>${canvasLabels[s] || "状态未知"}</span>`;
+const canvasBadge = (s, label) =>
+  `<span class="runtime-status status-${s}"><i></i>${canvasEscape(label || canvasLabels[s] || "Unknown")}</span>`;
 const canvasButton = (action, label, glyph, extra = "") =>
   `<button type="button" class="canvas-icon-btn" data-canvas="${action}" aria-label="${label}" title="${label}" ${extra}>${icon(glyph)}</button>`;
 
-export function workbenchPage() {
-  return `<section class="runtime-workbench" aria-label="组件运行工作台">
-    <div class="page-heading canvas-heading"><div><div class="eyebrow">LAB OBSERVATORY</div><h1>运行工作台<span class="heading-dot"></span></h1><p>从一次决策到一次改进，看见实验的每个环节。</p></div><div class="monitor-source"><span class="source-caption">状态来源</span><select id="runtime-source" aria-label="状态来源"><option value="demo" ${canvasState.mode === "demo" ? "selected" : ""}>演示拓扑</option><option value="live" ${canvasState.mode === "live" ? "selected" : ""}>本地遥测</option></select><button class="btn" data-canvas="refresh">${icon("refresh")}刷新状态</button></div></div>
-    <div class="monitor-context"><div class="monitor-campaign">${icon("flask")}<strong data-runtime-campaign>DEV-004</strong><span class="context-divider"></span><span data-runtime-harness>Harness H1</span></div><div class="monitor-connection" role="status" data-runtime-connection></div></div>
+export function workbenchPage(armId = "H1") {
+  return `<section class="runtime-workbench" aria-label="Experiment workbench">
+    <div class="page-heading canvas-heading"><div><div class="eyebrow">LAB OBSERVATORY</div><h1>Experiment workbench<span class="heading-dot"></span></h1><p>Trace the completed experiment, from decisions to recorded evidence.</p></div><div class="monitor-source"><span class="source-caption">Data source</span><select id="runtime-source" aria-label="Data source"><option value="recorded" ${canvasState.mode === "recorded" ? "selected" : ""}>Recorded experiment</option><option value="live" ${canvasState.mode === "live" ? "selected" : ""}>Live telemetry</option><option value="demo" ${canvasState.mode === "demo" ? "selected" : ""}>Demo workflow</option></select><button class="btn" data-canvas="refresh">${icon("refresh")}Refresh</button></div></div>
+    <div class="monitor-context"><div class="monitor-campaign">${icon("flask")}<strong data-runtime-campaign>${canvasEscape(experiment.id)}</strong><span class="context-divider"></span><span data-runtime-harness>Arm ${canvasEscape(armId)}</span></div><div class="monitor-connection" role="status" data-runtime-connection></div></div>
     <div class="monitor-summary" data-runtime-summary></div>
     <div class="canvas-workspace">
-      <section class="canvas-board" aria-label="运行拓扑">
-        <div class="canvas-toolbar"><div class="canvas-view-label">${icon("grid")}<strong>运行拓扑</strong><span class="canvas-count">08 COMPONENTS</span></div><button class="canvas-filter" data-canvas="problems" aria-pressed="${canvasState.problems}">${icon("filter")}关注异常 <span data-problem-count>1</span></button></div>
-        <div class="graph-viewport" tabindex="0" role="region" aria-label="可交互组件画布" aria-describedby="canvas-help">
-          <div class="graph-world"><div class="graph-lane lane-main"><span>01 / LAB HARNESS</span><small>单轮实验 · 决策与证据</small></div><div class="graph-lane lane-meta"><span>02 / META HARNESS</span><small>跨轮次 · 诊断与验证</small></div><svg class="graph-edges" width="1060" height="580" aria-hidden="true"><defs><marker id="canvas-arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0 7 3.5 0 7" fill="none" stroke="currentColor"/></marker></defs><g data-edges></g></svg><div data-graph-nodes></div></div>
+      <section class="canvas-board" aria-label="Component graph">
+        <div class="canvas-toolbar"><div class="canvas-view-label">${icon("grid")}<strong>Component graph</strong><span class="canvas-count">08 COMPONENTS</span></div><button class="canvas-filter" data-canvas="problems" aria-pressed="${canvasState.problems}">${icon("filter")}Needs attention <span data-problem-count>1</span></button></div>
+        <div class="graph-viewport" tabindex="0" role="region" aria-label="Interactive component canvas" aria-describedby="canvas-help">
+          <div class="graph-world"><div class="graph-lane lane-main"><span>01 / LAB HARNESS</span><small>Campaign decisions and evidence</small></div><div class="graph-lane lane-meta"><span>02 / META HARNESS</span><small>Cross-campaign diagnosis and validation</small></div><svg class="graph-edges" width="1060" height="580" aria-hidden="true"><defs><marker id="canvas-arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0 7 3.5 0 7" fill="none" stroke="currentColor"/></marker></defs><g data-edges></g></svg><div data-graph-nodes></div></div>
           <div class="canvas-map" aria-hidden="true"><span>WORKSPACE</span><svg viewBox="0 0 1060 580" data-mini-map></svg></div>
-          <div class="canvas-controls">${canvasButton("zoom-out", "缩小画布", "minus")}<output data-zoom aria-label="缩放比例">100%</output>${canvasButton("zoom-in", "放大画布", "plus")}<span></span>${canvasButton("fit", "适应画布（0）", "fit")}${canvasButton("reset", "重置节点布局", "refresh")}</div>
+          <div class="canvas-controls">${canvasButton("zoom-out", "Zoom out", "minus")}<output data-zoom aria-label="Zoom level">100%</output>${canvasButton("zoom-in", "Zoom in", "plus")}<span></span>${canvasButton("fit", "Fit graph (0)", "fit")}${canvasButton("reset", "Reset layout", "refresh")}</div>
         </div>
-        <div class="canvas-legend"><span><i class="legend-line"></i>单轮消息</span><span><i class="legend-line dashed"></i>跨轮次交接</span><span class="canvas-mobile-hint">拖动画布 · 下方切换组件</span><span id="canvas-help">拖动节点或空白处 · + / − 缩放 · 0 适应</span></div>
+        <div class="canvas-legend"><span><i class="legend-line"></i>Campaign messages</span><span><i class="legend-line dashed"></i>Cross-campaign handoff</span><span class="canvas-mobile-hint">Drag to pan · Choose a component below</span><span id="canvas-help">Drag nodes or canvas · + / − zoom · 0 fit</span></div>
       </section>
-      <aside class="runtime-inspector" aria-label="组件详情"><div class="inspector-header"><span class="eyebrow">INSPECTOR</span><label class="sr-only" for="runtime-node-select">选择组件</label><select id="runtime-node-select">${runtimeNodes.map((n) => `<option value="${n.id}" ${n.id === canvasState.selected ? "selected" : ""}>${canvasEscape(n.name)}</option>`).join("")}</select></div><div data-node-heading></div><div class="inspector-tabs" role="group" aria-label="详情视图"><button data-canvas="tab" data-tab="overview" aria-pressed="true">运行概况</button><button data-canvas="tab" data-tab="io" aria-pressed="false">输入 / 输出</button></div><div data-node-detail></div><div class="inspector-foot">${icon("lock")}只读观察 · 不触发实验或重启</div></aside>
+      <aside class="runtime-inspector" aria-label="Component details"><div class="inspector-header"><span class="eyebrow">INSPECTOR</span><label class="sr-only" for="runtime-node-select">Select a component</label><select id="runtime-node-select">${runtimeNodes.map((n) => `<option value="${n.id}" ${n.id === canvasState.selected ? "selected" : ""}>${canvasEscape(n.name)}</option>`).join("")}</select></div><div data-node-heading></div><div class="inspector-tabs" role="group" aria-label="Inspector view"><button data-canvas="tab" data-tab="overview" aria-pressed="true">Overview</button><button data-canvas="tab" data-tab="io" aria-pressed="false">Input / output</button></div><div data-node-detail></div><div class="inspector-foot" data-inspector-mode>${icon("lock")}Recorded results · Not a live heartbeat</div></aside>
     </div>
-    <section class="runtime-events"><div class="runtime-events-head"><div>${icon("terminal")}<h2>事件流</h2><span data-event-source>演示事件</span></div><div><span class="event-poll" data-poll-label></span><button class="btn text" data-canvas="play">${icon("play")}播放演示</button></div></div><div data-runtime-events></div></section>
-    <div class="runtime-note">${icon("info")}<span data-runtime-note>演示状态用于预览工作流，不代表真实 Agent 正在运行。</span></div>
+    <section class="runtime-events"><div class="runtime-events-head"><div>${icon("terminal")}<h2>Event log</h2><span data-event-source>Demo events</span></div><div><span class="event-poll" data-poll-label></span><button class="btn text" data-canvas="play">${icon("play")}Play demo</button></div></div><div data-runtime-events></div></section>
+    <div class="runtime-note">${icon("info")}<span data-runtime-note>Recorded results are historical evidence, not a live heartbeat.</span></div>
   </section>`;
 }
 
-export function mountWorkbench(root) {
+export function mountWorkbench(root, armId = "H1") {
   const host = root.querySelector(".runtime-workbench");
   if (!host) return () => {};
   const viewport = host.querySelector(".graph-viewport");
@@ -82,9 +88,18 @@ export function mountWorkbench(root) {
   const select = (selector) => host.querySelector(selector);
   const camera = { x: 0, y: 0, scale: 1 };
   let snapshot =
-    canvasState.mode === "demo" ? demoRuntime(canvasState.tick) : null;
+    canvasState.mode === "recorded"
+      ? recordedRuntime(experiment, armId)
+      : canvasState.mode === "demo"
+        ? demoRuntime(canvasState.tick)
+        : null;
   let lastPayload = null;
-  let connection = canvasState.mode === "demo" ? "demo" : "waiting";
+  let connection =
+    canvasState.mode === "recorded"
+      ? "recorded"
+      : canvasState.mode === "demo"
+        ? "demo"
+        : "waiting";
   let problem = "";
   let disposed = false;
   let fetching = false;
@@ -99,7 +114,7 @@ export function mountWorkbench(root) {
     runtimeNodes.map((n) => ({
       id: n.id,
       status: "unknown",
-      detail: "尚未收到组件遥测。",
+      detail: "No telemetry has been received for this component.",
       task: "—",
       metrics: [],
       events: [],
@@ -108,7 +123,9 @@ export function mountWorkbench(root) {
   const nodeState = (id) =>
     currentNodes().find((n) => n.id === id) ||
     unknownNodes().find((n) => n.id === id);
-  const isProblem = (n) => ["error", "offline", "unknown"].includes(n.status);
+  const isProblem = (n) =>
+    ["error", "offline", "unknown"].includes(n.status) ||
+    (canvasState.mode === "recorded" && n.status === "queued");
 
   nodesHost.innerHTML = runtimeNodes
     .map(
@@ -186,7 +203,13 @@ export function mountWorkbench(root) {
           x2 = tx + (left ? 208 : 0),
           y2 = ty + 63;
         let path;
-        if (vertical) {
+        if (edge.from === "gnina" && edge.to === "posecheck") {
+          x1 = sx + 104;
+          y1 = sy + 126;
+          x2 = tx + 104;
+          y2 = ty;
+          path = `M ${x1} ${y1} C ${x1} ${y1 + 30}, ${x2} ${y2 - 30}, ${x2} ${y2}`;
+        } else if (vertical) {
           x1 = sx + 104;
           y1 = sy;
           x2 = tx + 104;
@@ -214,7 +237,7 @@ export function mountWorkbench(root) {
     const n = nodeState(meta.id);
     select("#runtime-node-select").value = n.id;
     select("[data-node-heading]").innerHTML =
-      `<div class="inspector-node-title"><span class="inspector-icon">${icon(meta.icon)}</span><div><h2>${canvasEscape(meta.name)}</h2><span>${canvasEscape(meta.role)}</span></div></div><div class="inspector-node-status">${canvasBadge(n.status)}<span class="mono">${canvasEscape(meta.id)}</span></div>`;
+      `<div class="inspector-node-title"><span class="inspector-icon">${icon(meta.icon)}</span><div><h2>${canvasEscape(meta.name)}</h2><span>${canvasEscape(meta.role)}</span></div></div><div class="inspector-node-status">${canvasBadge(n.status, n.statusLabel)}<span class="mono">${canvasEscape(meta.id)}</span></div>`;
     host
       .querySelectorAll("[data-canvas='tab']")
       .forEach((button) =>
@@ -232,8 +255,8 @@ export function mountWorkbench(root) {
       canvasState.tab === "overview"
         ? `
       <p class="inspector-description">${canvasEscape(meta.description)}</p>
-      <div class="inspector-task ${isProblem(n) ? "task-warning" : ""}"><span class="eyebrow">CURRENT TASK</span><strong>${canvasEscape(n.task || "暂无任务信息")}</strong><p>${canvasEscape(n.detail)}</p></div>
-      <dl class="inspector-facts"><div><dt>Campaign</dt><dd>${canvasEscape(snapshot?.campaignId || "—")}</dd></div><div><dt>Harness</dt><dd>${canvasEscape(snapshot?.harness || "—")}</dd></div><div><dt>${canvasState.mode === "demo" ? "心跳示例" : "最近心跳"}</dt><dd>${canvasState.mode === "demo" ? "演示时间" : age === null ? "尚未上报" : age < 60 ? `${age} 秒前` : `${Math.floor(age / 60)} 分钟前`}</dd></div>${(
+      <div class="inspector-task ${isProblem(n) ? "task-warning" : ""}"><span class="eyebrow">${canvasState.mode === "recorded" ? "RECORDED ACTIVITY" : "CURRENT TASK"}</span><strong>${canvasEscape(n.task || "No task information")}</strong><p>${canvasEscape(n.detail)}</p></div>
+      <dl class="inspector-facts"><div><dt>Campaign</dt><dd>${canvasEscape(snapshot?.campaignId || "—")}</dd></div><div><dt>${canvasState.mode === "recorded" ? "Arm" : "Harness"}</dt><dd>${canvasEscape(snapshot?.harness || "—")}</dd></div><div><dt>${canvasState.mode === "recorded" ? "Arm completed" : canvasState.mode === "demo" ? "Demo time" : "Last heartbeat"}</dt><dd>${canvasState.mode === "recorded" ? canvasEscape(new Date(snapshot.completedAt).toLocaleString("en-US", { timeZoneName: "short" })) : canvasState.mode === "demo" ? "Simulated timestamp" : age === null ? "Not reported" : age < 60 ? `${age} seconds ago` : `${Math.floor(age / 60)} minutes ago`}</dd></div>${(
         n.metrics || []
       )
         .slice(0, 3)
@@ -242,19 +265,19 @@ export function mountWorkbench(root) {
             `<div><dt>${canvasEscape(m.label)}</dt><dd>${canvasEscape(m.value)}</dd></div>`,
         )
         .join("")}</dl>
-      <div class="node-recent"><h3>最近事件</h3>${
+      <div class="node-recent"><h3>${canvasState.mode === "recorded" ? "Recorded summary" : "Recent records"}</h3>${
         n.events?.length
           ? n.events
               .slice(0, 2)
               .map(
                 (event) =>
-                  `<div><i class="event-dot ${event.level === "error" ? "error" : ""}"></i><p>${canvasEscape(event.message)}<small class="mono">${canvasTime(event.time)}${canvasState.mode === "demo" ? " · 演示" : ""}</small></p></div>`,
+                  `<div><i class="event-dot ${event.level === "error" ? "error" : ""}"></i><p>${canvasEscape(event.message)}<small class="mono">${canvasTime(event.time)}${canvasState.mode === "recorded" ? " · Readout time" : canvasState.mode === "demo" ? " · Demo" : ""}</small></p></div>`,
               )
               .join("")
-          : '<p class="inspector-empty">尚无事件，等待组件上报。</p>'
+          : '<p class="inspector-empty">No events reported.</p>'
       }</div>`
         : `
-      <p class="inspector-description">下方为接口约定；实时消息内容以组件事件为准。</p><div class="io-section"><h3>${icon("arrow")}输入约定</h3><p>${canvasEscape(textList(meta.input))}</p></div><div class="io-section"><h3>${icon("external")}输出约定</h3><p>${canvasEscape(textList(meta.output))}</p></div><div class="io-section"><h3>${icon("branch")}消息关系</h3>${runtimeEdges
+      <p class="inspector-description">These are interface contracts; observed messages are recorded separately.</p><div class="io-section"><h3>${icon("arrow")}Input contract</h3><p>${canvasEscape(textList(meta.input))}</p></div><div class="io-section"><h3>${icon("external")}Output contract</h3><p>${canvasEscape(textList(meta.output))}</p></div><div class="io-section"><h3>${icon("branch")}Message relationships</h3>${runtimeEdges
         .filter((edge) => edge.from === n.id || edge.to === n.id)
         .map(
           (edge) =>
@@ -271,34 +294,46 @@ export function mountWorkbench(root) {
       ]),
     );
     select("[data-runtime-campaign]").textContent =
-      snapshot?.campaignId || "等待遥测";
+      snapshot?.campaignId || "Waiting for telemetry";
     select("[data-runtime-harness]").textContent = snapshot
-      ? `Harness ${snapshot.harness}`
+      ? `${canvasState.mode === "recorded" ? "Arm" : "Harness"} ${snapshot.harness}`
       : "Harness —";
     select("[data-runtime-connection]").innerHTML =
-      connection === "demo"
-        ? '<i class="source-dot demo"></i>演示快照 <span>· 不代表实际运行</span>'
-        : connection === "connected"
-          ? `<i class="source-dot ${snapshot.stale ? "disconnected" : ""}"></i>${snapshot.stale ? "快照已过期" : "遥测已连接"} <span>· 采集于 ${canvasTime(snapshot.observedAt)}</span>`
-          : `<i class="source-dot disconnected"></i>${connection === "loading" ? "正在读取遥测…" : connection === "waiting" ? "等待连接" : "遥测未连接"}<span>· 组件状态未确认</span>`;
+      connection === "recorded"
+        ? '<i class="source-dot demo"></i>Recorded results <span>· Not a live heartbeat</span>'
+        : connection === "demo"
+          ? '<i class="source-dot demo"></i>Demo snapshot <span>· Not actual execution</span>'
+          : connection === "connected"
+            ? `<i class="source-dot ${snapshot.stale ? "disconnected" : ""}"></i>${snapshot.stale ? "Snapshot stale" : "Telemetry connected"} <span>· Observed at ${canvasTime(snapshot.observedAt)}</span>`
+            : `<i class="source-dot disconnected"></i>${connection === "loading" ? "Reading telemetry…" : connection === "waiting" ? "Waiting for connection" : "Telemetry disconnected"}<span>· Component state unconfirmed</span>`;
     select("[data-runtime-summary]").innerHTML =
-      `<span class="summary-total"><strong>08</strong>个组件</span>${[
-        ["running", "运行中"],
-        ["queued", "等待中"],
-        ["idle", "空闲"],
-        ["error", "执行异常"],
-        ["offline", "心跳过期"],
-        ["unknown", "未知"],
-      ]
+      `<span class="summary-total"><strong>08</strong> components</span>${(canvasState.mode ===
+      "recorded"
+        ? [
+            ["completed", "Completed"],
+            ["queued", "Review / proposal"],
+            ["idle", "Not active"],
+            ["error", "Incomplete"],
+            ["unknown", "Unknown"],
+          ]
+        : [
+            ["running", "Running"],
+            ["queued", "Queued"],
+            ["idle", "Idle"],
+            ["completed", "Completed"],
+            ["error", "Error"],
+            ["offline", "Stale"],
+            ["unknown", "Unknown"],
+          ]
+      )
         .map(
           ([key, label]) =>
             `<span class="summary-status status-${key}"><i></i>${label}<strong>${counts[key]}</strong></span>`,
         )
         .join(
           "",
-        )}<span class="summary-caption">${canvasState.mode === "demo" ? "SIMULATED SNAPSHOT" : "READ-ONLY TELEMETRY"}</span>`;
-    select("[data-problem-count]").textContent =
-      counts.error + counts.offline + counts.unknown;
+        )}<span class="summary-caption">${canvasState.mode === "recorded" ? "RECORDED RESULTS" : canvasState.mode === "demo" ? "SIMULATED SNAPSHOT" : "READ-ONLY TELEMETRY"}</span>`;
+    select("[data-problem-count]").textContent = nodes.filter(isProblem).length;
     select("[data-canvas='problems']").setAttribute(
       "aria-pressed",
       String(canvasState.problems),
@@ -309,11 +344,14 @@ export function mountWorkbench(root) {
       node.setAttribute("aria-pressed", String(n.id === canvasState.selected));
       node.setAttribute(
         "aria-label",
-        `${runtimeNodes.find((m) => m.id === n.id).name}，${canvasLabels[n.status]}，${n.detail}`,
+        `${runtimeNodes.find((m) => m.id === n.id).name}, ${n.statusLabel || canvasLabels[n.status]}, ${n.detail}`,
       );
       node.querySelector(".node-detail").textContent =
-        n.detail || "等待组件上报";
-      node.querySelector(".node-state").innerHTML = canvasBadge(n.status);
+        n.detail || "Waiting for component telemetry";
+      node.querySelector(".node-state").innerHTML = canvasBadge(
+        n.status,
+        n.statusLabel,
+      );
       node.querySelector(".node-meta").textContent =
         n.metrics?.[0]?.value ?? "—";
     }
@@ -330,7 +368,7 @@ export function mountWorkbench(root) {
               `<button class="runtime-event" data-select-node="${event.node}"><time class="mono">${canvasTime(event.time)}</time><span class="event-actor">${canvasEscape(runtimeNodes.find((n) => n.id === event.node).name)}</span><span class="event-level ${event.level}">${event.level === "error" ? "ERROR" : event.level === "warning" ? "WARN" : "INFO"}</span><span class="event-message">${canvasEscape(event.message)}</span>${icon("arrow")}</button>`,
           )
           .join("")
-      : '<div class="events-empty">尚无事件。接入 Controller 的状态快照后，这里会显示组件上报的记录。</div>';
+      : '<div class="events-empty">No events available. Live component records appear after a telemetry source is connected.</div>';
     const eventContainer = select("[data-runtime-events]");
     if (eventContainer.innerHTML !== eventMarkup) {
       const focusedNode = eventContainer.contains(document.activeElement)
@@ -343,26 +381,43 @@ export function mountWorkbench(root) {
           ?.focus({ preventScroll: true });
     }
     select("[data-event-source]").textContent =
-      canvasState.mode === "demo" ? "演示事件" : "组件上报";
+      canvasState.mode === "recorded"
+        ? "Recorded summaries"
+        : canvasState.mode === "demo"
+          ? "Demo events"
+          : "Component reports";
     select("[data-poll-label]").textContent =
-      canvasState.mode === "demo"
-        ? canvasState.playing
-          ? "每 5 秒推进一次示例"
-          : "固定示例 · 可播放"
-        : "每 5 秒读取";
+      canvasState.mode === "recorded"
+        ? "Historical record · No polling"
+        : canvasState.mode === "demo"
+          ? canvasState.playing
+            ? "Demo advances every 5 s"
+            : "Fixed demo · Play to advance"
+          : "Polling every 5 s";
     select("[data-canvas='play']").hidden = canvasState.mode !== "demo";
     select("[data-canvas='play']").innerHTML =
-      `${icon(canvasState.playing ? "pause" : "play")}${canvasState.playing ? "暂停演示" : "播放演示"}`;
+      `${icon(canvasState.playing ? "pause" : "play")}${canvasState.playing ? "Pause demo" : "Play demo"}`;
     select("[data-canvas='refresh']").disabled = fetching;
     select("[data-runtime-note]").textContent =
-      canvasState.mode === "demo"
-        ? "演示状态用于预览工作流；连线表示消息关系，不代表正在传输。计算异常不等于分子无活性。"
-        : problem ||
-          "只读监测：组件心跳超过 30 秒、快照超过 60 秒标记为过期；缺失心跳显示未知。其他页面仍为演示数据。";
+      canvasState.mode === "recorded"
+        ? "Recorded results from the completed experiment. These are historical summaries, not live heartbeats or a replay of exact event timing. A proposed Meta change is not an authorized release."
+        : canvasState.mode === "demo"
+          ? "Demo workflow only. Edges show message relationships, not active transfers. Computational errors do not establish molecular inactivity."
+          : problem ||
+            "Read-only telemetry: heartbeats expire after 30 s and snapshots after 60 s. Missing heartbeats are unknown. Recorded experiment results remain separate.";
+    select("[data-inspector-mode]").innerHTML =
+      `${icon("lock")}${canvasState.mode === "recorded" ? "Recorded results · Not a live heartbeat" : canvasState.mode === "demo" ? "Demo only · No actual execution" : "Read-only telemetry · No execution or restart"}`;
     detailView();
     drawLayout();
   }
   async function refresh() {
+    if (canvasState.mode === "recorded") {
+      snapshot = recordedRuntime(experiment, armId);
+      connection = "recorded";
+      problem = "";
+      update();
+      return;
+    }
     if (canvasState.mode === "demo") {
       snapshot = demoRuntime(canvasState.tick);
       connection = "demo";
@@ -373,12 +428,13 @@ export function mountWorkbench(root) {
     if (fetching) return;
     const version = generation;
     fetching = true;
-    request = new AbortController();
-    const timeout = setTimeout(() => request?.abort(), 4500);
+    const activeRequest = new AbortController();
+    request = activeRequest;
+    const timeout = setTimeout(() => activeRequest.abort(), 4500);
     connection = snapshot ? connection : "loading";
     update();
     try {
-      const result = await fetchRuntime(request.signal);
+      const result = await fetchRuntime(activeRequest.signal);
       if (disposed || version !== generation) return;
       lastPayload = result;
       snapshot = result;
@@ -389,8 +445,8 @@ export function mountWorkbench(root) {
       connection = "disconnected";
       problem =
         location.protocol === "file:"
-          ? "独立 HTML 仅提供演示。真实遥测请使用 npm run dev 打开本机预览，并配置 RSI_LAB_RUNTIME_FILE。"
-          : "未读取到有效遥测。请在启动预览服务时配置 RSI_LAB_RUNTIME_FILE，由 Controller 持续写入状态快照。界面不会自动启动任务。";
+          ? "Standalone HTML supports recorded results and the demo. For live telemetry, open the local preview server and configure RSI_LAB_RUNTIME_FILE."
+          : "No valid live telemetry was received. Configure RSI_LAB_RUNTIME_FILE and have the Controller write current snapshots. This interface does not start jobs.";
       snapshot = null;
       lastPayload = null;
     } finally {
@@ -588,7 +644,7 @@ export function mountWorkbench(root) {
   const timer = setInterval(() => {
     if (document.hidden || disposed) return;
     if (canvasState.mode === "live") refresh();
-    else if (canvasState.playing) {
+    else if (canvasState.mode === "demo" && canvasState.playing) {
       canvasState.tick++;
       refresh();
     }

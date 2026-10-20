@@ -1,29 +1,29 @@
-# RSI-Lab 画布工作台
+# Recorded experiment workspace
 
-首页以组件运行拓扑为中心。画布呈现单轮 Lab Harness 的决策与证据反馈，以及跨轮次 Meta Harness 的诊断、候选修改、独立验证和后续版本交接。
+The UI uses English throughout and defaults to the completed CDK2 comparison, replacing fictional candidate and version records. The component canvas remains the homepage; the global run-arm selector binds its recorded snapshot to the candidate explorer and evidence ledger.
 
-视觉沿用浅灰白、深青绿和细边框。点阵背景建立画布空间；节点保留图标、角色、状态文字和简短任务信息。运行中用绿色，等待用琥珀色，执行异常用暖棕色，未知用灰色。颜色之外均有文字标注。
+## Information hierarchy
 
-## 信息层次
+1. **Workbench:** a navigable topology with component inspector and explicit recorded/live/demo modes. Completion is a historical fact, not a live heartbeat.
+2. **Run comparison:** three arm summaries, paired-valid quality metrics, numerical and model resources, and separately accounted Meta development cost.
+3. **Candidates:** all 20 compounds, arm-specific results for the eight evaluated candidates, a read-only final shortlist of five, and explicit uncomputed values.
+4. **Evidence:** shared historical measurements and the selected arm's actual computations, with seed-level fields and repository-relative provenance.
+5. **Harness evolution:** H0 expanded JSON, H1 lossless whitespace compaction, the actual Meta cost and the explicit absence of release authorization.
 
-1. 来源选择与连接状态：区分演示快照、真实遥测、连接中断与快照过期。
-2. 组件摘要：运行、等待、空闲、执行异常、心跳过期、未知分别统计，不混用“健康率”。
-3. 运行画布：8 个固定节点、10 条消息关系；实线单轮，虚线跨轮次。节点位置可调整，状态更新保持布局。
-4. 组件详情：当前任务、真实采集时间、心跳年龄、指标、最近事件、输入输出契约。下拉框提供不依赖空间定位的组件选择方式。
-5. 事件流：点击记录定位节点。界面清楚标注事件为演示或组件上报。
+The visual language retains warm white surfaces, muted green, compact typography and a dotted canvas. Status always includes text. Amber indicates a boundary requiring attention rather than implying biological failure.
 
-桌面将详情放在画布右侧；较窄屏幕置于画布下方。手机默认聚焦所选组件，保留平移和整体适应视图，避免只能点微小的节点。键盘支持节点选择和画布平移缩放，状态变化不依赖动画。
+## Interactions
 
-## 运行语义
+Nodes can be dragged independently of background pan; zoom and fit preserve access to all components. The node selector provides an alternative to spatial navigation. The inspector moves below the canvas on small screens. State refresh preserves layout, and switching pages tears down polling.
 
-- 默认是明确标记的演示拓扑，不会伪装成正在运行的实际实验。
-- 当前真实接入方式是服务端读取外部生产者生成的 JSON；不是在浏览器里运行 Codex 或模型。
-- 显示“执行异常”需要组件报告错误；未收到心跳和心跳过期分别显示未知与过期，不等同于任务失败。
-- 页面轮询与源观测时间分开。刷新不能让旧快照重新变新；未接入时不会自动降级成演示绿灯。
-- Lab 到 Executor 的连线代表经过 Controller 校验后的请求，不绕过授权。
-- Meta 只能产生候选修改；固定 Gate 决定验证与发布，发布仅作用于未来的新 campaign。
-- 计算失败不意味着分子无活性；模型预测与计算验证不代表湿实验结果。
+Completed shortlists cannot be edited in the UI. Exporting produces recorded data with provenance; it is not an experiment submission. Candidate search, scoped filters and arm selection remain interactive.
 
-## 范围
+## Evidence semantics
 
-这版实现可交互监测界面和只读遥测契约。生产心跳采集器尚未与现有实验脚本连接；没有实现任务启动、停止、重试、GPU 计费或后端权限隔离。其他页面仍为演示数据，和首页实际遥测明确区分。
+The frontend shows GNINA and PoseBusters because those tools were actually run. It does not retroactively claim Boltz-2 or Nesso-1 use. The 13/16 valid job poses and 5/5 paired-valid final candidates have different denominators. Pose scores, empirical energy and historical IC50 remain separate. Unknown values remain missing.
+
+H1 is evaluated but not released. Its lower observed Lab token count does not recover the Meta cost in this run. A passing artifact audit does not certify scientific interpretation; pending scientific-memory reviews remain pending.
+
+## Data architecture
+
+The importer projects source artifacts into a deterministic, portable JavaScript module. Source hashes and paths identify the exact inputs. Runtime telemetry is a separate contract and is never populated by rewriting old timestamps. All runtime and recorded-state reads remain separate from task execution.

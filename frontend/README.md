@@ -1,21 +1,21 @@
-# RSI-Lab 前端工作台
+# RSI-Lab experiment workbench
 
-中文科研工作台，使用 HTML、CSS 和 JavaScript 模块实现，无第三方运行依赖。
+An English research UI for the completed CDK2 comparison and a component canvas. Built with HTML, CSS and local JavaScript modules; no third-party runtime dependencies.
 
-![RSI-Lab 画布工作台，截图为演示数据](docs/workbench.png)
+![Recorded experiment workbench](docs/workbench.png)
 
-[手机布局](docs/mobile.png) · [设计说明](DESIGN.md) · [验证记录](QA.md)
+[Run comparison](docs/comparison.png) · [Mobile preview](docs/mobile.png) · [Design notes](DESIGN.md) · [Verification](QA.md)
 
-## 本地预览
+## Preview and build
 
-需要 Node.js 20 或更高版本，无需安装软件包：
+Requires Node.js 20 or later. No package installation is needed.
 
 ```sh
 cd frontend
 npm run dev
 ```
 
-打开 `http://127.0.0.1:4173`。端口可通过 `PORT` 调整。
+Open `http://127.0.0.1:4173`. Set `PORT` to use a different port.
 
 ```sh
 npm run check
@@ -23,73 +23,57 @@ npm test
 npm run build
 ```
 
-构建生成独立的 `dist/index.html`，可以直接用浏览器打开。独立文件支持演示模式；真实遥测需要通过 HTTP 预览服务器访问。
+The build produces a self-contained `dist/index.html`. Recorded results and the demo work offline; live telemetry requires the local HTTP server.
 
-## 画布工作台
+## Recorded experiment
 
-首页展示 Controller、Lab Codex、Tool Executor、Boltz-2、Nesso-1、Scientific Memory、Meta Codex、Validation Gate 八个组件。实线表示单轮消息关系，虚线表示跨轮次交接；连线不代表此刻正在传输。
+The default view uses the completed `lab_comparison_v2` experiment, generated from local source artifacts:
 
-- 拖动节点调整布局，拖动空白处平移；工具栏支持缩放、适应视图、重置布局。
-- 点击节点，或用详情面板下拉框选择组件，查看状态、任务、心跳、指标、最近事件与输入输出约定。
-- “关注异常”突出执行失败、心跳过期与未知节点；点击事件可定位相关组件。
-- 聚焦画布后使用方向键平移，`+` / `-` 缩放，`0` 适应视图；Ctrl / Command + 滚轮也可缩放。
-- 手机默认聚焦所选组件，可拖动查看其他部分，或使用下拉框切换。选择“适应画布”可查看整体关系。
-- “播放演示”每 5 秒切换示例状态；不启动实验、不调用模型、不消耗 GPU。
+- 20 CDK2 compounds from assay `CHEMBL1250281`.
+- Fixed baseline, H0 and H1: 8 evaluated candidates and 16 independent physical jobs per arm.
+- Actual tools: GNINA 1.3.3 and PoseBusters 0.6.5. Boltz-2 and Nesso-1 were not used in this comparison.
+- Frozen five-compound shortlists, per-seed results, historical IC50, pose checks, measured resource use and evidence references.
+- H1 is an evaluated compact-JSON candidate, **not authorized for release**. Meta development cost is reported separately.
 
-## 接入真实遥测
+The global arm selector updates the canvas, candidate results and evidence scope. Candidate selection is read-only because these are completed, frozen experimental results. Exports preserve source hashes and interpretation limits.
 
-“状态来源”可以切换至“本地遥测”。页面每 5 秒只读访问同源 `GET /api/runtime`，服务端读取指定 JSON 文件：
+`src/experiment-data.js` is a portable, committed snapshot. It contains 20 candidates, 44 evidence records and a source manifest. It does not depend on the ignored `runs/` directory at runtime. To reimport after a new local readout is available:
+
+```sh
+npm run import:experiment
+npm run check
+npm test
+npm run build
+```
+
+Importing reads existing files only; it never starts a model or GPU job. The readout timestamp comes from the source, rather than the import clock. The importer checks critical source references, retains missing values and projects only the fields needed for the UI. Source entries distinguish verified recorded hash bindings from local import roots. Source-artifact tests run when the local archive is available and explicitly skip on a fresh clone; snapshot checks always run. Repository-relative source paths identify the original artifacts; the full experiment archive is not copied into the frontend.
+
+## Canvas and data modes
+
+The canvas supports node dragging, background panning, zoom, fit, layout reset, a node selector and an inspector with task, input/output contract and event information. Keyboard controls: focus the canvas, then use arrows to pan, `+`/`-` to zoom and `0` to fit. Ctrl/Command + wheel also zooms.
+
+- **Recorded experiment** is the default. Completion and pending review describe the imported run; they are not current heartbeats.
+- **Live telemetry** polls the read-only endpoint every five seconds. It never falls back to demo data on failure.
+- **Demo workflow** is explicitly simulated and never starts tasks.
+
+The real topology uses Controller, Lab Codex, Tool Executor, GNINA, PoseBusters, Scientific Memory, Meta Codex and Validation Gate. Edges describe message relationships, not proof of an in-flight message.
+
+## Live telemetry integration
+
+The existing read-only bridge reads a JSON file written by a genuine external producer:
 
 ```sh
 RSI_LAB_RUNTIME_FILE=/absolute/path/to/runtime.json npm run dev
 ```
 
-Controller 或独立采集器负责从实际运行系统生成该文件，建议每 5–10 秒通过临时文件加原子重命名更新。前端不扫描进程，也不从历史 `running` 字段猜测进程是否存活。当前仓库已有的实验结果文件未自动转换为心跳源。
+The producer should use actual observations and atomically replace the file every 5–10 seconds. The browser does not infer liveness from historical `running` fields. Existing experiment scripts have not been modified to produce heartbeats.
 
-完整字段见 [runtime.example.json](runtime.example.json)。该文件刻意标记 `source: "demo"`，实时接口会拒绝它；只有实际采集器生成的记录应使用 `source: "live"`。
+See `runtime.example.json` for the contract. The example deliberately declares `source: "demo"`; the live endpoint rejects it. Only an actual producer should emit `source: "live"` with real timestamps.
 
-```text
-source: "live"
-campaignId: 当前 campaign 标识
-harness: 活动 Harness 版本
-observedAt: 本次采集的 UTC ISO 时间
-nodes[]:
-  id: controller | lab | executor | boltz | nesso | memory | meta | validator
-  status: running | queued | idle | error | offline | unknown
-  detail, task: 状态说明与当前任务（字符串）
-  heartbeatAt: 实际心跳的 UTC ISO 时间，未收到时为 null
-  metrics: [{label, value}]
-  events: [{time, message, level: info | success | warning | error}]
-  progress: 可选，0–100
-```
+Heartbeats older than 30 seconds and snapshots older than 60 seconds are stale. Missing components remain unknown. Invalid data or a disconnected endpoint clears current status rather than displaying healthy demo nodes. The endpoint accepts GET/HEAD, caps snapshots at 1 MiB, hides configured file paths in errors, and listens on the loopback interface. It is not an authenticated public service.
 
-判断规则：
+## Scientific interpretation
 
-- 心跳超过 30 秒标记“心跳过期”；快照超过 60 秒时全部标记过期。
-- 未上报的节点或心跳显示“未知”。任务失败与心跳过期分别显示。
-- 接口中断、格式错误或演示来源被拒绝时，清除当前运行状态并显示未知，不回退为演示。
-- 源时间不会被刷新请求改写。将来的时间、重复节点、无效字段会被拒绝。
-- 仅接受 GET / HEAD；快照限制为 1 MiB，错误响应不暴露文件路径。页面只显示固定八类节点。
-- `source: "live"` 是生产者契约，不是系统对进程存活的独立证明；采集器需要如实报告心跳。该接口没有鉴权，只监听回环地址，不能直接用作公网服务。
+Paired-valid shortlist coverage is a pose-validity readout, not biological hit rate. CNNscore is not activity probability. Qualified values use two valid seed results; uncomputed or unqualified values are never filled with zero. Historical IC50 was visible to the Lab. GPU active time and dollar cost are unknown; numerical wall time is not GPU billing time.
 
-## 其他页面与数据边界
-
-候选分子、实验列表、证据库与 Harness 演进继续使用虚构演示数据，不会随首页遥测自动切换。`DEV-004`、CDK2、测量、预测、预算和版本均为 UI 示例。
-
-支持候选搜索与排序、证据追溯、名单选择与锁定、JSON 导出、实验草稿和版本查看。名单与草稿保存在当前浏览器。OOM 表示执行失败与预测缺失，不解释为分子无活性。H2 是候选版本，不替换活动 campaign 的 H1。
-
-## 文件组织
-
-```text
-src/app.js             页面、导航与本地状态
-src/workbench.js       画布、节点详情、遥测订阅与清理
-src/runtime.js         拓扑定义、演示状态、严格校验与获取适配
-src/styles.css         视觉与响应式布局
-src/data.js            其他页面的演示数据
-src/icons.js           本地 SVG 图标
-server.mjs             回环地址预览服务器
-runtime-server.mjs     只读遥测文件接口
-runtime.example.json   示例契约（不可当成真实遥测）
-tests/runtime.test.mjs  遥测与接口边界测试
-scripts/build.mjs      生成独立 HTML
-```
+This is one pool and one model trajectory per agent arm, run in a fixed order. Two docking seeds are not independent agent repetitions. H1 has a slightly higher mean CNNscore and a less favorable mean empirical energy; the results do not establish generalization, statistical significance, biological efficacy or a release-ready improvement. The Meta call must be included when considering development cost.

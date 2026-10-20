@@ -1,120 +1,68 @@
-import {
-  demoMeta,
-  candidates,
-  campaigns,
-  events,
-  harnessVersions,
-  evidenceRecords,
-  toolCatalog,
-} from "./data.js";
+import { experiment } from "./experiment-data.js";
 import { icon } from "./icons.js";
 import { workbenchPage, mountWorkbench } from "./workbench.js";
 
 const app = document.querySelector("#app");
 const dialog = document.querySelector("#detail-dialog");
-const storageKey = "rsi-lab-workbench-demo-v1";
-const activeCampaign = campaigns.find(
-  (c) => c.id === demoMeta.activeCampaignId,
-);
 const routes = ["overview", "campaigns", "candidates", "evidence", "evolution"];
 const nav = [
-  ["overview", "grid", "运行工作台"],
-  ["campaigns", "flask", "实验运行"],
-  ["candidates", "molecule", "候选分子"],
-  ["evidence", "layers", "证据库"],
-  ["evolution", "branch", "Harness 演进"],
+  ["overview", "grid", "Workbench"],
+  ["campaigns", "flask", "Run comparison"],
+  ["candidates", "molecule", "Candidates"],
+  ["evidence", "layers", "Evidence"],
+  ["evolution", "branch", "Harness evolution"],
 ];
-const saved = loadState();
 const state = {
   route: getRoute(),
+  arm: "H1",
   query: "",
-  verification: "all",
-  candidateTab: "all",
+  scope: "all",
   sort: "id",
   evidenceKind: "all",
-  selected: new Set(
-    saved.selected || candidates.filter((c) => c.shortlisted).map((c) => c.id),
-  ),
-  locked: saved.locked === true,
-  paused: saved.paused === true,
-  step: Number.isInteger(saved.step) ? Math.max(0, Math.min(3, saved.step)) : 1,
-  drafts: Array.isArray(saved.drafts)
-    ? saved.drafts.filter(
-        (d) =>
-          typeof d?.id === "string" &&
-          typeof d?.name === "string" &&
-          d.status === "draft" &&
-          Number.isFinite(d.poolSize) &&
-          Number.isFinite(d.shortlistSize) &&
-          Number.isFinite(d.gpuBudget),
-      )
-    : [],
 };
 let unmountWorkbench;
+let returnFocus;
 let toastTimeout;
-let returnFocusId;
-
-function loadState() {
-  try {
-    const value = JSON.parse(localStorage.getItem(storageKey));
-    if (!value || typeof value !== "object") return {};
-    if (Array.isArray(value.selected))
-      value.selected = value.selected.filter((id) =>
-        candidates.some((c) => c.id === id),
-      );
-    else delete value.selected;
-    return value;
-  } catch {
-    return {};
-  }
-}
-function persist() {
-  try {
-    localStorage.setItem(
-      storageKey,
-      JSON.stringify({
-        selected: [...state.selected],
-        locked: state.locked,
-        paused: state.paused,
-        step: state.step,
-        drafts: state.drafts,
-      }),
-    );
-  } catch {
-    /* The demo remains usable when browser storage is unavailable. */
-  }
-}
-function escapeHtml(value) {
-  return String(value ?? "").replace(
+const e = (value) =>
+  String(value ?? "").replace(
     /[&<>"']/g,
     (char) =>
       ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[
         char
       ],
   );
-}
-const e = escapeHtml;
-const num = (value) => Number(value).toLocaleString("en-US");
+const number = (value, digits = 0) =>
+  value === null || value === undefined || !Number.isFinite(value)
+    ? "—"
+    : value.toLocaleString("en-US", {
+        maximumFractionDigits: digits,
+        minimumFractionDigits: digits,
+      });
+const time = (value) =>
+  Number.isFinite(Date.parse(value))
+    ? new Date(value).toLocaleString("en-GB", {
+        timeZone: "UTC",
+        year: "numeric",
+        month: "short",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+      }) + " UTC"
+    : "Not recorded";
+const arm = () => experiment.arms.find((a) => a.id === state.arm);
+const result = (candidate) => candidate.results[state.arm];
+const pill = (label, tone = "gray") =>
+  `<span class="pill ${tone}">${e(label)}</span>`;
+const button = (label, action, glyph = "", style = "", extra = "") =>
+  `<button class="btn ${style}" type="button" data-action="${action}" ${extra}>${glyph ? icon(glyph) : ""}${label}</button>`;
+const closeButton = () => button("Close", "close-dialog");
 function getRoute() {
-  const route = location.hash.slice(1);
-  return routes.includes(route) ? route : "overview";
+  const id = location.hash.slice(1);
+  return routes.includes(id) ? id : "overview";
 }
-function pill(label, tone = "gray", glyph = "") {
-  return `<span class="pill ${tone}">${glyph ? icon(glyph) : ""}${e(label)}</span>`;
-}
-function verificationBadge(status) {
-  return {
-    passed: pill("计算验证通过", "green", "check"),
-    pending: pill("待验证", "orange", "clock"),
-    failed: pill("协议未通过", "red"),
-  }[status];
-}
-function button(label, action, glyph = "", style = "", extra = "") {
-  return `<button class="btn ${style}" type="button" data-action="${action}" ${extra}>${glyph ? icon(glyph) : ""}${label}</button>`;
-}
-function go(route) {
-  if (state.route === route) render();
-  else location.hash = route;
+function heading(title, subtitle, actions = "") {
+  return `<div class="page-heading"><div><div class="eyebrow">COMPARISON V2 / RECORDED RESULTS</div><h1>${title}</h1><p>${subtitle}</p></div><div class="heading-actions">${actions}</div></div>`;
 }
 function toast(message) {
   const node = document.querySelector("#toast");
@@ -123,162 +71,167 @@ function toast(message) {
   clearTimeout(toastTimeout);
   toastTimeout = setTimeout(() => node.classList.remove("visible"), 3500);
 }
-function moleculeArt() {
-  return `<svg class="hero-art" viewBox="0 0 280 250" fill="none" aria-hidden="true"><defs><radialGradient id="orb"><stop stop-color="#e8efdb"/><stop offset="1" stop-color="#f2f5eb"/></radialGradient></defs><circle cx="161" cy="121" r="91" fill="url(#orb)"/><ellipse class="orbital" cx="161" cy="121" rx="110" ry="80" transform="rotate(-28 161 121)"/><ellipse class="orbital" cx="161" cy="121" rx="100" ry="102" transform="rotate(28 161 121)"/><g stroke="#9bb77d" stroke-width="1.4"><path d="m94 69 49-18 46 31-1 55-48 25-46-31zM94 69l-27-15m0 0-29 16m151 12 45-16 30 29m-76 42 37 33m-85-8-6 43m-40-74-37 26M143 51l5-27M225 170l-10 36m10-36 35 2"/><path d="m103 74 38-14m39 26v44m-42 23-34-21" stroke="#bed0a6"/></g><g fill="#e1ebd3" stroke="#9ab67c" stroke-width="1.3"><circle cx="94" cy="69" r="8"/><circle cx="143" cy="51" r="11"/><circle cx="189" cy="82" r="7"/><circle cx="188" cy="137" r="11"/><circle cx="140" cy="162" r="7"/><circle cx="94" cy="131" r="6"/><circle cx="225" cy="170" r="7"/><circle cx="67" cy="54" r="5"/></g><circle cx="188" cy="137" r="4" fill="#628b48"/><circle cx="143" cy="51" r="4" fill="#759853"/><g fill="#9db785"><circle cx="38" cy="70" r="3"/><circle cx="148" cy="24" r="3"/><circle cx="234" cy="66" r="4"/><circle cx="264" cy="95" r="3"/><circle cx="134" cy="205" r="4"/><circle cx="57" cy="157" r="3"/><circle cx="215" cy="206" r="4"/><circle cx="260" cy="172" r="3"/></g></svg>`;
-}
 function shell(content) {
-  const currentTitle = nav.find((n) => n[0] === state.route)[2];
-  return `<div class="app-shell"><button class="mobile-backdrop" data-action="close-nav" aria-label="关闭导航"></button>
-    <aside class="sidebar" aria-label="主导航"><a class="brand" href="#overview" aria-label="RSI-Lab 首页"><span class="brand-mark">${icon("molecule")}</span><span class="brand-name">RSI<span>—</span>Lab</span></a>
-      <button class="workspace-switch" data-action="about"><span class="workspace-icon">${icon("flask")}</span><span class="workspace-copy"><strong>Compound Discovery</strong><small>研究工作区 · Demo</small></span>${icon("down")}</button>
-      <div class="nav-caption">WORKSPACE</div><nav class="nav-list">${nav.map(([id, glyph, label]) => `<a href="#${id}" class="nav-link ${id === state.route ? "active" : ""}" ${id === state.route ? 'aria-current="page"' : ""}>${icon(glyph)}${label}${id === "campaigns" ? `<span class="nav-count">${campaigns.length + state.drafts.length}</span>` : id === "evolution" ? '<span class="nav-count">3</span>' : ""}</a>`).join("")}</nav>
-      <div class="sidebar-bottom"><button class="nav-link" data-action="protocol">${icon("settings")}协议与工具</button><div class="sidebar-note"><div class="note-title">${icon("branch")}持续学习，有据可循</div><p>每一次改进，都从可追溯的实验经验开始。</p><a class="small-link" href="#evolution">查看演进路径 ${icon("arrow")}</a></div><div class="profile"><span class="avatar">RL</span><div><strong>RSI-Lab Research</strong><small>LOCAL DEMO WORKSPACE</small></div>${icon("lock")}</div></div>
-    </aside><div class="page-shell"><header class="topbar"><div class="breadcrumbs"><button class="icon-button mobile-menu" data-action="toggle-nav" aria-label="打开导航">${icon("menu")}</button><span>工作空间</span>${icon("chevron")}<strong>${currentTitle}</strong></div><div class="topbar-right"><span class="demo-badge"><i class="demo-dot"></i>${state.route === "overview" ? "本地工作区 · 研究预览" : "演示工作区 · 示例数据"}</span><span class="topbar-line"></span><button class="icon-button" data-action="about" aria-label="关于此原型">${icon("info")}</button><span class="avatar">RL</span></div></header>
-      <main class="main" id="main-content" tabindex="-1">${content}<footer class="app-footer"><span>${icon("lock")}${state.route === "overview" ? "状态来源以画布为准 · 只读观察" : "本地交互原型 · 示例数据"}</span><span>RSI-LAB / RESEARCH PREVIEW 01</span></footer></main></div></div>`;
-}
-function heading(title, subtitle, actions = "") {
-  return `<div class="page-heading"><div><h1>${title}</h1><p>${subtitle}</p></div><div class="heading-actions">${actions}</div></div>`;
+  const title = nav.find((item) => item[0] === state.route)[2];
+  return `<div class="app-shell"><button class="mobile-backdrop" data-action="close-nav" aria-label="Close navigation"></button>
+  <aside class="sidebar" aria-label="Main navigation"><a class="brand" href="#overview" aria-label="RSI-Lab home"><span class="brand-mark">${icon("molecule")}</span><span class="brand-name">RSI<span>—</span>Lab</span></a>
+  <button class="workspace-switch" data-action="sources"><span class="workspace-icon">${icon("flask")}</span><span class="workspace-copy"><strong>CDK2 Discovery</strong><small>20 compounds · 3 arms</small></span>${icon("down")}</button>
+  <div class="nav-caption">RESEARCH WORKSPACE</div><nav class="nav-list">${nav.map(([id, glyph, label]) => `<a class="nav-link ${state.route === id ? "active" : ""}" href="#${id}" ${state.route === id ? 'aria-current="page"' : ""}>${icon(glyph)}${label}${id === "campaigns" ? '<span class="nav-count">3</span>' : ""}</a>`).join("")}</nav>
+  <div class="sidebar-bottom"><button class="nav-link" data-action="protocol">${icon("settings")}Protocol & tools</button><div class="sidebar-note"><div class="note-title">${icon("checkCircle")}Evidence, in context</div><p>One completed comparison.<br>Every result has a source.</p><button class="small-link" data-action="sources">View provenance ${icon("arrow")}</button></div><div class="profile"><span class="avatar">RL</span><div><strong>RSI-Lab Research</strong><small>LOCAL EXPERIMENT RECORDS</small></div>${icon("lock")}</div></div></aside>
+  <div class="page-shell"><header class="topbar"><div class="breadcrumbs"><button class="icon-button mobile-menu" data-action="toggle-nav" aria-label="Open navigation">${icon("menu")}</button><span>Workspace</span>${icon("chevron")}<strong>${title}</strong></div><div class="topbar-right"><label class="arm-picker">Run arm<select id="arm-select" aria-label="Run arm">${experiment.arms.map((a) => `<option value="${a.id}" ${a.id === state.arm ? "selected" : ""}>${e(a.label)}</option>`).join("")}</select></label><span class="demo-badge"><i class="demo-dot"></i>Local research workspace</span><button class="icon-button" data-action="sources" aria-label="Experiment provenance">${icon("info")}</button></div></header>
+  <main class="main ${state.route === "overview" ? "canvas-main" : ""}" id="main-content" tabindex="-1">${content}<footer class="app-footer"><span>${icon("lock")}Read-only records · ${e(experiment.id)}</span><span>RSI-LAB / EXPERIMENT WORKSPACE</span></footer></main></div></div>`;
 }
 function contextStrip() {
-  return `<div class="context-strip"><span>${icon("flask")}<strong>DEV-004</strong></span><span>CDK2 · 示例靶点</span><span>开发集</span><span>Harness H1</span><span class="mono">VERIFY-DEMO-01</span><span class="push-right">${icon(state.locked ? "lock" : "clock")}${state.locked ? "演示名单已锁定" : "暂定名单，可调整"}</span></div>`;
+  return `<div class="context-strip"><span>${icon("flask")}<strong>${e(arm().label)}</strong></span><span>CDK2</span><span class="mono">${e(experiment.assayId)}</span><span>${experiment.poolSize} candidates</span><span class="push-right">${icon("lock")}Final shortlist frozen · ${experiment.shortlistSize} compounds</span></div>`;
 }
-function budgetCard() {
-  const c = activeCampaign;
-  return `<section class="panel budget-panel" aria-label="演示 GPU 预算"><div class="budget-header"><h2 class="panel-title">算力预算</h2><span class="eyebrow">GPU HOURS</span></div><div class="budget-total">${c.gpuUsed.toFixed(1)}<small>/ ${c.gpuBudget.toFixed(1)} h</small></div><div class="budget-meter" role="img" aria-label="已用7.2，已预留1.2，可用3.6 GPU小时"><span class="meter-used" style="width:60%"></span><span class="meter-reserved" style="width:10%"></span></div><dl class="budget-key"><dt><i class="key-dot used"></i>已使用</dt><dd>7.2 h</dd><dt><i class="key-dot reserved"></i>已预留</dt><dd>1.2 h</dd><dt><i class="key-dot"></i>可分配</dt><dd>3.6 h</dd></dl><div class="budget-caption">当前 campaign 的在线计算 · 演示快照</div></section>`;
-}
-function stats() {
-  const statsData = [
-    ["候选池", "300", "个", "molecule", "12 条记录可交互预览"],
-    [
-      "暂定短名单",
-      state.selected.size,
-      "/ 20",
-      "layers",
-      state.locked ? "已在本地锁定演示名单" : "当前人工探索视图 · 可调整",
-    ],
-    [
-      "计算验证完成",
-      "9",
-      "/ 12",
-      "checkCircle",
-      "7 通过 · 2 未通过 · 演示子集",
-    ],
-    ["当前 Harness", "H1", "", "branch", "运行版本冻结 · H2 待验证"],
-  ];
-  return `<div class="stats">${statsData.map(([label, value, suffix, glyph, foot], i) => `<section class="panel stat"><div class="stat-label">${label}${icon(glyph)}</div><div class="stat-value">${value}<small>${suffix}</small>${i === 0 ? '<span class="stat-mini-bars" aria-hidden="true"><i style="height:10px"></i><i style="height:16px"></i><i style="height:12px"></i><i style="height:20px"></i><i style="height:17px"></i><i style="height:25px"></i><i style="height:21px"></i></span>' : ""}</div><p class="stat-foot">${i === 3 ? icon("lock") : ""}${foot}</p></section>`).join("")}</div>`;
-}
-function flowPanel() {
-  const steps = [
-    ["terminal", "实验规划", "Lab Codex"],
-    ["cpu", "工具执行", "Boltz-2 / Nesso-1"],
-    ["layers", "证据整合", "Scientific Memory"],
-    ["checkCircle", "候选提交", "固定评测协议"],
-  ];
-  const notes = [
-    "读取公开证据，提出下一批计算请求。",
-    "固定演示快照：正在补齐候选的计算证据。",
-    "区分预测、验证与执行失败，保留来源引用。",
-    "提交前保留不确定性；演示流程不会运行真实计算。",
-  ];
-  return `<section class="panel flow-panel"><div class="panel-head"><div><h2 class="panel-title">实验执行链</h2><p class="panel-subtitle">由 Lab 决策，Controller 调度</p></div><span class="flow-head-meta">STEP 0${state.step + 1} / 04</span></div><div class="flow-nodes">${steps.map(([glyph, title, subtitle], i) => `<div class="flow-node ${i === state.step ? "active" : i < state.step ? "done" : ""}"><div class="flow-icon">${icon(glyph)}${i === state.step ? '<i class="flow-live"></i>' : ""}</div><div class="flow-title">${title}</div><div class="flow-subtitle">${subtitle}</div></div>`).join("")}</div><div class="flow-note">${icon("info")}${notes[state.step]}</div><div class="panel-footer"><span>仅切换流程示意，不新增结果或资源消耗</span>${button("模拟下一步", "next-step", "arrow", "text", state.paused ? "disabled" : "")}</div></section>`;
-}
-function activityPanel() {
-  const visible = events
-    .filter((event) => event.campaignId === activeCampaign.id)
-    .slice(0, 4);
-  return `<section class="panel activity-panel"><div class="panel-head"><div><h2 class="panel-title">最近活动</h2><p class="panel-subtitle">DEV-004 · 固定演示轨迹</p></div>${icon("clock")}</div><div class="activity-list">${visible.map((event) => `<button class="activity-item" type="button" data-action="event" data-id="${event.id}" style="width:100%;text-align:left"><span class="activity-icon ${event.tone === "warning" ? "orange" : ""}">${icon(event.type === "failure" ? "info" : event.type === "verification" ? "check" : event.type === "memory" ? "layers" : "terminal")}</span><span class="activity-copy"><strong>${e(event.title)}</strong>${e(event.actor)}<span class="activity-time mono" style="display:block">${event.time}</span></span></button>`).join("")}</div><div class="panel-footer"><span>结果保留原始来源</span>${button("查看证据", "go-evidence", "arrow", "text")}</div></section>`;
-}
-function candidateRows(items, compact = false) {
-  if (!items.length)
-    return `<tr><td colspan="${compact ? 6 : 8}"><div class="empty-state">${icon("search")}<strong>没有匹配的候选</strong><p>换一个编号，或调整验证状态筛选。</p></div></td></tr>`;
-  return items
-    .map(
-      (c) =>
-        `<tr>${compact ? "" : `<td><input class="table-check" type="checkbox" data-candidate="${c.id}" aria-label="将 ${c.id} 加入暂定名单" ${state.selected.has(c.id) ? "checked" : ""} ${state.locked ? "disabled" : ""}></td>`}<td><button class="compound-cell" type="button" data-action="candidate" data-id="${c.id}"><span class="compound-glyph">${icon("molecule")}</span><span><span class="compound-name mono">${c.id}</span><span class="compound-id">${e(c.scaffold.split(" · ")[0])}</span></span></button></td><td class="number">${num(c.ic50Nm)} <span class="muted">nM</span></td>${compact ? "" : `<td>${e(c.tool)}</td><td class="number">${c.prediction.value === null ? '<span title="执行失败，结果未知">—</span>' : c.prediction.value.toFixed(2)}</td>`}<td>${verificationBadge(c.verification)}</td><td>${compact ? `<span class="selected-tag">${icon(state.selected.has(c.id) ? "check" : "plus")}${state.selected.has(c.id) ? "已选入" : "未选入"}</span>` : `<span class="mono">${c.evidence.length} 条</span>`}</td>${compact ? `<td class="number">${e(c.tool)}</td>` : ""}<td><button class="table-action" data-action="candidate" data-id="${c.id}" aria-label="查看 ${c.id} 详情">${icon("arrow")}</button></td></tr>`,
-    )
-    .join("");
-}
-function shortlistPreview() {
-  const selected = candidates
-    .filter((c) => state.selected.has(c.id))
-    .slice(0, 4);
-  return `<section class="panel table-panel section-space"><div class="panel-head"><div><h2 class="panel-title">候选短名单 <span class="title-count">${state.selected.size} / 20</span></h2><p class="panel-subtitle">${state.locked ? "已锁定的本地演示名单" : "当前暂定 · 持续积累证据"}</p></div>${button("全部候选", "go-candidates", "arrow", "text")}</div><div class="table-wrap"><table aria-label="短名单预览"><thead><tr><th>候选分子</th><th>历史 IC50</th><th>计算验证</th><th>短名单</th><th>预测工具</th><th><span class="sr-only">详情</span></th></tr></thead><tbody>${candidateRows(selected, true)}</tbody></table></div><div class="panel-footer"><span>显示 ${selected.length} 条 · 数值与结果均为演示</span><span class="lock-state">${icon("layers")}证据可追溯</span></div></section>`;
+function metric(label, value, foot, glyph = "chart") {
+  return `<section class="panel stat"><div class="stat-label">${label}${icon(glyph)}</div><div class="stat-value">${value}</div><p class="stat-foot">${foot}</p></section>`;
 }
 function overview() {
-  return workbenchPage();
+  const a = arm();
+  return `${workbenchPage(state.arm)}<section class="recorded-readout"><div class="panel-head"><div><h2 class="panel-title">${e(a.label)} · completed run readout</h2><p class="panel-subtitle">Historical results, not live process telemetry</p></div><a class="btn text" href="#campaigns">Compare all arms ${icon("arrow")}</a></div><div class="stats recorded-stats">${metric("Paired-valid final candidates", `${a.quality.validCount}<small>/ ${a.quality.shortlistSize}</small>`, "Two docking seeds with valid poses", "checkCircle")}${metric("Mean qualified CNNscore", number(a.quality.meanCnn, 6), "Mean of candidate medians · pose score")}${metric("Observed Lab tokens", number(a.usage.totalTokens), `${a.usage.calls} calls · Meta cost reported separately`, "terminal")}${metric("Physical jobs", `${a.numerical.jobs}<small>/ 16</small>`, `${a.numerical.onlineCandidates} candidates · seeds 17 and 43`, "cpu")}</div><div class="info-banner">${icon("info")}This is one development comparison. Pose validity and CNNscore do not establish biological activity or a validated affinity pass rate.</div></section>`;
 }
-
-function campaignsPage() {
-  const all = [...state.drafts, ...campaigns];
-  return `${heading("实验运行", "从独立的实验上下文出发，追踪每一轮探索。", button("新建实验", "new-campaign", "plus", "primary"))}<div class="info-banner">${icon("info")}当前为演示工作区。新建操作只保存本地草稿，不会调用模型或启动计算任务。</div><div class="campaign-grid">${all.map((c) => `<article class="panel campaign-card"><div class="campaign-card-head"><span class="eyebrow">${e(c.id)}</span>${pill(c.status === "draft" ? "本地草稿" : `${c.statusLabel} · 示例`, c.status === "running" ? "green" : c.status === "queued" ? "orange" : "gray")}</div><div class="eyebrow">${e(c.target)} / ${e(c.phaseLabel)}</div><h2>${e(c.name)}</h2><p class="description">${c.status === "draft" ? "实验参数已保存在当前浏览器，等待后端接入。" : c.id === "DEV-004" ? "根据当前证据，自适应安排下一批计算。" : c.id === "VAL-003" ? "相同数据快照与预算，独立比较候选版本。" : "保留失败反馈，形成可追溯的开发轨迹。"}</p><dl class="campaign-card-meta"><div><dt>候选池 / 目标名单</dt><dd>${num(c.poolSize)} / ${c.shortlistSize}</dd></div><div><dt>Harness</dt><dd>${e(c.harness)}</dd></div><div><dt>GPU 预算</dt><dd>${c.gpuBudget} h${c.phase === "validation" ? " / 分支" : ""}</dd></div><div><dt>数据快照</dt><dd class="mono">${e(c.snapshot)}</dd></div></dl>${button(c.status === "draft" ? "查看草稿" : "查看实验", "campaign", "arrow", c.id === "DEV-004" ? "soft" : "", `data-id="${e(c.id)}"`)}</article>`).join("")}</div>`;
-}
-function filteredCandidates() {
-  return candidates
-    .filter(
-      (c) =>
-        `${c.id} ${c.label} ${c.scaffold} ${c.tool}`
-          .toLowerCase()
-          .includes(state.query.toLowerCase()) &&
-        (state.verification === "all" ||
-          c.verification === state.verification) &&
-        (state.candidateTab !== "shortlist" || state.selected.has(c.id)),
-    )
-    .sort((a, b) =>
-      state.sort === "ic50-asc"
-        ? a.ic50Nm - b.ic50Nm
-        : state.sort === "ic50-desc"
-          ? b.ic50Nm - a.ic50Nm
-          : a.id.localeCompare(b.id),
-    );
-}
-function candidateTableBody() {
-  return candidateRows(filteredCandidates());
-}
-function candidatesPage() {
-  return `${heading("候选分子", "保留每一项证据，也保留尚未解决的不确定性。", button("导出 JSON", "export", "download") + button(state.locked ? "名单已锁定" : "锁定演示名单", "lock", "lock", "primary", state.locked || !state.selected.size ? "disabled" : ""))}${contextStrip()}<section class="panel table-panel"><div class="toolbar"><label class="search-box">${icon("search")}<input id="candidate-search" type="search" placeholder="搜索编号、骨架簇或工具…" aria-label="搜索候选" value="${e(state.query)}"></label><select class="filter-select" id="verification-filter" aria-label="计算验证状态"><option value="all">全部验证状态</option><option value="passed" ${state.verification === "passed" ? "selected" : ""}>计算验证通过</option><option value="pending" ${state.verification === "pending" ? "selected" : ""}>待验证</option><option value="failed" ${state.verification === "failed" ? "selected" : ""}>协议未通过</option></select><select class="filter-select" id="sort-filter" aria-label="候选排序"><option value="id">按候选编号</option><option value="ic50-asc" ${state.sort === "ic50-asc" ? "selected" : ""}>IC50 从低到高</option><option value="ic50-desc" ${state.sort === "ic50-desc" ? "selected" : ""}>IC50 从高到低</option></select><span class="toolbar-spacer"></span><div class="tab-group" role="group" aria-label="名单范围"><button class="tab ${state.candidateTab === "all" ? "active" : ""}" data-action="candidate-tab" data-tab="all" aria-pressed="${state.candidateTab === "all"}">全部 12</button><button class="tab ${state.candidateTab === "shortlist" ? "active" : ""}" data-action="candidate-tab" data-tab="shortlist" aria-pressed="${state.candidateTab === "shortlist"}">已选 ${state.selected.size}</button></div></div><div class="table-wrap"><table aria-label="候选分子与演示证据"><thead><tr><th><span class="sr-only">选入名单</span></th><th>候选分子</th><th>历史 IC50 · 示例</th><th>预测来源</th><th>模拟预测分</th><th>计算验证</th><th>来源证据</th><th><span class="sr-only">详情</span></th></tr></thead><tbody id="candidate-body">${candidateTableBody()}</tbody></table></div><div class="table-summary"><span id="candidate-count">显示 ${filteredCandidates().length} / 12 条演示记录</span><span>已选 ${state.selected.size} / 20 · ${state.locked ? "已锁定" : "暂定名单"}</span></div></section><p class="download-note">模拟预测分为无量纲 UI 示例，不是工具原生输出，不用于跨模型比较。候选池 300 为场景规模，此处只提供 12 条演示记录。</p>`;
-}
-function evidencePage() {
-  const rows = evidenceRecords.filter(
-    (record) =>
-      state.evidenceKind === "all" || record.kind === state.evidenceKind,
-  );
-  const categories = [
-    ["all", "全部证据"],
-    ["measurement", "历史测量"],
-    ["prediction", "模型预测"],
-    ["verification", "计算验证"],
-    ["execution_failure", "执行失败"],
+function comparisonTable() {
+  const rows = [
+    [
+      "Final paired-valid coverage",
+      (a) => `${a.quality.validCount} / ${a.quality.shortlistSize}`,
+    ],
+    ["Mean qualified CNNscore", (a) => number(a.quality.meanCnn, 6)],
+    [
+      "Mean empirical energy · kcal/mol",
+      (a) => number(a.quality.meanEnergy, 5),
+    ],
+    ["Mean CNNscore seed range", (a) => number(a.quality.meanCnnRange, 6)],
+    ["Maximum CNNscore seed range", (a) => number(a.quality.maxCnnRange, 6)],
+    [
+      "Online candidates / physical jobs",
+      (a) => `${a.numerical.onlineCandidates} / ${a.numerical.jobs}`,
+    ],
+    [
+      "Valid job poses / completed jobs",
+      (a) => `${a.numerical.poseValidJobs} / ${a.numerical.completedJobs}`,
+    ],
+    ["Lab calls", (a) => number(a.usage.calls)],
+    ["Input + output tokens", (a) => number(a.usage.totalTokens)],
+    ["Model wall time · s", (a) => number(a.usage.llmWallSeconds, 3)],
+    [
+      "Numerical batch wall time · s",
+      (a) => number(a.numerical.batchWallSeconds, 3),
+    ],
+    ["Worker CPU time · CPU-s", (a) => number(a.numerical.cpuSeconds, 3)],
+    ["Terminal jobs", (a) => number(a.numerical.terminalJobs)],
+    [
+      "Actual cost · USD",
+      (a) =>
+        a.usage.costUsd === null ? "Unknown" : number(a.usage.costUsd, 2),
+    ],
   ];
-  return `${heading("证据库", "原始记录与派生解读分开保存，让结论有迹可循。", button("科学记忆示例", "memory", "book"))}${contextStrip()}<div class="toolbar" style="border:0;padding:0 0 19px"><div class="tab-group" role="group" aria-label="证据类型">${categories.map(([kind, label]) => `<button class="tab ${state.evidenceKind === kind ? "active" : ""}" data-action="evidence-tab" data-kind="${kind}" aria-pressed="${state.evidenceKind === kind}">${label}</button>`).join("")}</div><span class="toolbar-spacer"></span><span class="muted" style="font-size:10px">${rows.length} 条记录 · DEV-004 演示子集</span></div><div class="evidence-list">${rows.map((record) => `<article class="panel evidence-card"><span class="evidence-kind-icon">${icon(record.kind === "measurement" ? "file" : record.kind === "prediction" ? "cpu" : record.kind === "verification" ? "checkCircle" : "info")}</span><div class="evidence-body"><h2 class="evidence-title">${e(record.candidateId)} · ${e(record.title)} ${pill(record.kindLabel.split(" · ")[0], record.kind === "execution_failure" ? "orange" : record.kind === "verification" ? "green" : "gray")}</h2><p>${e(record.source)}${record.value !== null && record.kind !== "verification" ? ` · ${e(record.value)} ${e(record.unit)}` : ""}</p><div class="evidence-ref mono">${e(record.id)} / ${record.kind}</div></div>${button("查看", "evidence", "arrow", "text", `data-id="${e(record.id)}"`)}</article>`).join("")}</div>`;
+  return `<div class="table-wrap"><table class="comparison-table" aria-label="Three-arm experiment comparison"><thead><tr><th>Readout</th>${experiment.arms.map((a) => `<th class="${a.id === state.arm ? "highlight-col" : ""}">${e(a.label)}</th>`).join("")}</tr></thead><tbody>${rows.map(([label, get]) => `<tr><td>${label}</td>${experiment.arms.map((a) => `<td class="mono ${a.id === state.arm ? "highlight-col" : ""}">${get(a)}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
 }
-function evolutionPage() {
-  return `${heading("Harness 演进", "改进机制，验证收益，再交给下一轮实验。", button("发布规则", "gate", "lock"))}<div class="info-banner">${icon("info")}DEV-004 始终使用冻结的 H1。H2 是待验证候选，只有通过固定发布规则后才可用于新的实验。</div><div class="version-layout"><div class="version-list">${[
-    ...harnessVersions,
+function campaignsPage() {
+  const h0 = experiment.arms.find((a) => a.id === "H0"),
+    h1 = experiment.arms.find((a) => a.id === "H1");
+  const total = h1.usage.totalTokens + experiment.meta.totalTokens;
+  return `${heading("Run comparison", "A completed, prospective comparison on one 20-compound CDK2 pool.", button("Export experiment", "export", "download"))}<div class="campaign-grid">${experiment.arms.map((a) => `<article class="panel campaign-card"><div class="campaign-card-head"><span class="eyebrow">${e(a.id)}</span>${pill("Completed", "green")}</div><h2>${e(a.label)}</h2><p class="description">${a.id === "baseline" ? "Fixed IC50 top-8 selection, followed by the frozen computational ranking rule." : a.id === "H0" ? "Adaptive Lab decisions with the original expanded JSON input presentation." : "Adaptive Lab decisions with lossless compact JSON input presentation."}</p><dl class="campaign-card-meta"><div><dt>Final paired-valid coverage</dt><dd>${a.quality.validCount} / ${a.quality.shortlistSize}</dd></div><div><dt>Observed Lab tokens</dt><dd>${number(a.usage.totalTokens)}</dd></div><div><dt>Online candidate slots</dt><dd>${a.numerical.onlineCandidates} / 8</dd></div><div><dt>Input presentation</dt><dd class="mono">${e(a.presentationMode)}</dd></div></dl>${button("Inspect this arm", "select-arm", "arrow", a.id === state.arm ? "soft" : "", `data-arm="${a.id}"`)}</article>`).join("")}</div><section class="panel comparison-panel"><div class="panel-head"><div><h2 class="panel-title">Quality and measured resource use</h2><p class="panel-subtitle">Equal opportunity limits; independent physical executions</p></div>${pill("Descriptive · n = 1 per arm")}</div>${comparisonTable()}<div class="comparison-footnote">Quality means use only paired-valid shortlisted candidates. Missing results are not zero-filled. Seed ranges are not confidence intervals. Numerical wall time includes CPU search, GPU rescoring and checks; it is not active GPU time.</div></section><div class="readout-grid"><section class="panel cost-panel"><div class="panel-head"><div><h2 class="panel-title">Include the cost of improvement</h2><p class="panel-subtitle">Observed CLI input + output tokens</p></div>${icon("terminal")}</div><div class="cost-bars">${[
+    ["H0 Lab", h0.usage.totalTokens, ""],
+    ["H1 Lab", h1.usage.totalTokens, ""],
+    ["Meta + H1", total, "meta-total"],
   ]
-    .reverse()
     .map(
-      (v) =>
-        `<article class="panel version-card"><div class="version-top"><div class="version-id">${v.id}${pill(v.statusLabel, v.status === "candidate" ? "orange" : v.status === "released" ? "green" : "gray")}</div><span class="eyebrow">${v.parent ? `${v.parent} → ${v.id}` : "BASELINE"}</span></div><h3>${e(v.name)}</h3><p>${e(v.summary)}</p><div class="version-chain">${["诊断", "修改", "基础检查", "配对验证", "发布"].map((label, i) => `${i ? icon("chevron") : ""}<span class="${v.status === "released" || (v.status === "candidate" && i < 3) ? "completed" : ""}">${label}</span>`).join("")}</div><div class="version-footer"><small>${e(v.validation)}</small>${button("查看版本", "version", "arrow", "text", `data-id="${v.id}"`)}</div></article>`,
+      ([label, value, cls]) =>
+        `<div><span>${label}</span><div class="cost-track"><i class="${cls}" style="width:${(value / total) * 100}%"></i></div><strong>${number(value)}</strong></div>`,
     )
     .join(
       "",
-    )}</div><aside class="panel principle-panel"><h3>改进的边界</h3><div class="principle-row">${icon("terminal")}<div><strong>修改运行机制</strong><p>提示词、证据整理与失败反馈可以演进。</p></div></div><div class="principle-row">${icon("lock")}<div><strong>保持评测独立</strong><p>模型权重、预算计量与发布条件保持冻结。</p></div></div><div class="principle-row">${icon("layers")}<div><strong>保留每次尝试</strong><p>失败补丁也记录原因、验证与资源开销。</p></div></div><div class="gate-summary">Meta 提交候选修改。<br>固定 Validator / Gate 决定是否发布。<br><br>本页为版本演进示例，未执行真实验证。</div></aside></div>`;
+    )}</div><p>H1 used ${number(h0.usage.totalTokens - h1.usage.totalTokens)} fewer Lab tokens. Including the single Meta call, Meta + H1 used ${number(total - h0.usage.totalTokens)} more tokens than H0. Development overhead has not been recovered in this comparison.</p></section><section class="panel interpretation-panel"><h2 class="panel-title">Read the differences together</h2><p>All three final shortlists have paired-valid coverage of 5/5. H1 has a slightly higher mean CNNscore and a less favorable mean empirical energy, with one different final candidate.</p><p>Baseline and H0 overlap in 5/5 candidates; H0 and H1 overlap in 4/5. These are descriptive observations, not evidence of equivalence or a stable improvement.</p>${button("View frozen protocol", "protocol", "arrow", "text")}</section></div>`;
+}
+function filteredCandidates() {
+  return experiment.candidates
+    .filter(
+      (c) =>
+        `${c.id} ${c.scaffold} ${c.smiles}`
+          .toLowerCase()
+          .includes(state.query.toLowerCase()) &&
+        (state.scope === "all" ||
+          (state.scope === "shortlist" && result(c)?.shortlisted) ||
+          (state.scope === "computed" && result(c)) ||
+          (state.scope === "uncomputed" && !result(c))),
+    )
+    .sort((a, b) =>
+      state.sort === "ic50"
+        ? a.ic50Nm - b.ic50Nm
+        : state.sort === "cnn"
+          ? (result(b)?.cnnMedian ?? -Infinity) -
+              (result(a)?.cnnMedian ?? -Infinity) || a.id.localeCompare(b.id)
+          : a.id.localeCompare(b.id),
+    );
+}
+function candidateRows() {
+  const rows = filteredCandidates();
+  return rows.length
+    ? rows
+        .map((c) => {
+          const r = result(c);
+          return `<tr><td><button class="compound-cell" data-action="candidate" data-id="${c.id}"><span class="compound-glyph">${icon("molecule")}</span><span><span class="compound-name mono">${c.id}</span><span class="compound-id">${e(c.scaffold)}</span></span></button></td><td class="mono">${number(c.ic50Nm, 1)} <small>nM</small></td><td class="mono">${number(r?.cnnMedian, 6)}</td><td class="mono">${number(r?.energyMedian, 4)}</td><td>${r ? pill(`${r.validRepeats} / 2 valid poses`, r.pairedValid ? "green" : "orange") : pill("Not computed")}</td><td>${r?.shortlisted ? pill(`Final #${r.rank}`, "green") : '<span class="muted">—</span>'}</td><td>${button("Details", "candidate", "arrow", "text", `data-id="${c.id}"`)}</td></tr>`;
+        })
+        .join("")
+    : '<tr><td colspan="7"><div class="empty-state"><strong>No matching candidates</strong><p>Try another ID or selection filter.</p></div></td></tr>';
+}
+function candidatesPage() {
+  return `${heading("Candidate explorer", "Historical assay measurements and computational evidence, kept separate.", button("Export arm results", "export-arm", "download"))}${contextStrip()}<section class="panel table-panel"><div class="toolbar"><label class="search-box">${icon("search")}<input id="candidate-search" type="search" placeholder="Search compound, scaffold or SMILES…" aria-label="Search candidates" value="${e(state.query)}"></label><select class="filter-select" id="scope-filter" aria-label="Candidate scope">${[
+    ["all", "All 20 candidates"],
+    ["shortlist", "Final shortlist · 5"],
+    ["computed", "Computed · 8"],
+    ["uncomputed", "Not computed · 12"],
+  ]
+    .map(
+      ([id, label]) =>
+        `<option value="${id}" ${state.scope === id ? "selected" : ""}>${label}</option>`,
+    )
+    .join(
+      "",
+    )}</select><select class="filter-select" id="sort-filter" aria-label="Candidate sorting">${[
+    ["id", "Compound ID"],
+    ["ic50", "Historical IC50: low first"],
+    ["cnn", "Qualified CNNscore: high first"],
+  ]
+    .map(
+      ([id, label]) =>
+        `<option value="${id}" ${state.sort === id ? "selected" : ""}>${label}</option>`,
+    )
+    .join(
+      "",
+    )}</select></div><div class="table-wrap"><table aria-label="Candidates for selected experiment arm"><thead><tr><th>Compound</th><th>Historical IC50</th><th>Qualified CNNscore</th><th>Energy · kcal/mol</th><th>Two-seed pose checks</th><th>Frozen shortlist</th><th><span class="sr-only">Details</span></th></tr></thead><tbody id="candidate-body">${candidateRows()}</tbody></table></div><div class="table-summary"><span id="candidate-count">Showing ${filteredCandidates().length} / ${experiment.poolSize} candidates</span><span>${e(arm().label)} · Read-only final results</span></div></section><p class="download-note">Scores and energies are medians across seeds 17 and 43, qualified only when both poses are valid. Uncomputed or unqualified values stay blank. Historical IC50 was available to the Lab; it is not a hidden outcome.</p>`;
+}
+function visibleEvidence() {
+  return experiment.evidence.filter(
+    (r) =>
+      (!r.arm || r.arm === "shared" || r.arm === state.arm) &&
+      (state.evidenceKind === "all" || r.kind === state.evidenceKind),
+  );
+}
+function evidencePage() {
+  const rows = visibleEvidence();
+  const kinds = [...new Set(experiment.evidence.map((r) => r.kind))];
+  return `${heading("Evidence ledger", "Inspect recorded measurements and the actual outputs behind each decision.", button("Source manifest", "sources", "file"))}${contextStrip()}<div class="toolbar evidence-toolbar"><div class="tab-group" role="group" aria-label="Evidence type"><button class="tab ${state.evidenceKind === "all" ? "active" : ""}" data-action="evidence-tab" data-kind="all" aria-pressed="${state.evidenceKind === "all"}">All records</button>${kinds.map((kind) => `<button class="tab ${state.evidenceKind === kind ? "active" : ""}" data-action="evidence-tab" data-kind="${e(kind)}" aria-pressed="${state.evidenceKind === kind}">${kindLabel(kind)}</button>`).join("")}</div><span class="toolbar-spacer"></span><span class="muted">${rows.length} records</span></div><div class="evidence-list">${rows.map((r) => `<article class="panel evidence-card"><span class="evidence-kind-icon">${icon(r.kind.includes("measurement") ? "file" : "cpu")}</span><div class="evidence-body"><h2 class="evidence-title">${e(r.candidateId)} · ${e(r.title)}</h2><p>${e(r.detail)}</p><div class="evidence-ref mono">${e(r.source)}</div></div>${button("Inspect", "evidence", "arrow", "text", `data-id="${e(r.id)}"`)}</article>`).join("")}</div>`;
+}
+function kindLabel(kind) {
+  return kind.includes("measurement")
+    ? "Historical measurements"
+    : kind.includes("features")
+      ? "Structure features"
+      : "Computational results";
+}
+function evolutionPage() {
+  const m = experiment.meta;
+  return `${heading("Harness evolution", "One proposed presentation change, evaluated in a new-pool development comparison.", button("Release boundary", "gate", "lock"))}<div class="info-banner">${icon("lock")}H1 was evaluated in this comparison. It is not authorized for release. No H2 version is part of this experiment.</div><div class="version-layout"><div class="version-list"><article class="panel version-card"><div class="version-top"><div class="version-id">H1 ${pill("Evaluated · not released", "orange")}</div><span class="eyebrow">H0 → H1</span></div><h3>Lossless compact JSON presentation</h3><p>${e(m.summary)}</p><div class="version-chain"><span class="completed">Diagnosed</span>${icon("chevron")}<span class="completed">Proposed</span>${icon("chevron")}<span class="completed">Compared</span>${icon("chevron")}<span>Not released</span></div><div class="detail-section">${m.changes.map((change) => `<p class="change-line">${icon("check")}${e(change)}</p>`).join("")}</div><div class="version-footer"><small>Input presentation only · frozen scientific and budget rules</small>${button("Inspect change", "version", "arrow", "text")}</div></article><article class="panel version-card"><div class="version-top"><div class="version-id">H0 ${pill("Reference harness")}</div><span class="eyebrow">EXPANDED_JSON_V1</span></div><h3>Original task input presentation</h3><p>The same task data and response contract, using expanded JSON. Lab decisions and memory updates remain adaptive within the run.</p><div class="version-footer"><small>4 Lab calls · 162,096 observed tokens</small>${button("Inspect H0 results", "select-arm", "arrow", "text", 'data-arm="H0"')}</div></article></div><aside class="panel principle-panel"><h3>Meta development cost</h3><div class="meta-token-value">${number(m.totalTokens)}<small>observed tokens · one call</small></div><dl class="metadata"><dt>Input tokens</dt><dd>${number(m.inputTokens)}</dd><dt>Output tokens</dt><dd>${number(m.outputTokens)}</dd><dt>Wall time</dt><dd>${number(m.wallSeconds, 3)} s</dd><dt>USD cost</dt><dd>Unknown</dd><dt>Release authorized</dt><dd>${m.releaseAuthorized ? "Yes" : "No"}</dd></dl><div class="gate-summary">Meta used old-pool development material. It did not read the new comparison pool. One trajectory per arm is insufficient to establish a stable improvement.</div></aside></div><section class="panel limitations-panel"><h2 class="panel-title">Interpretation limits</h2><ul>${experiment.limitations.map((item) => `<li>${e(item)}</li>`).join("")}</ul></section>`;
 }
 function render() {
-  const focused = document.activeElement;
-  let focusSelector;
-  if (focused && app.contains(focused)) {
-    if (focused.id) focusSelector = `#${CSS.escape(focused.id)}`;
-    else if (focused.dataset.candidate)
-      focusSelector = `[data-candidate="${CSS.escape(focused.dataset.candidate)}"]`;
-    else if (focused.dataset.action) {
-      focusSelector = `[data-action="${CSS.escape(focused.dataset.action)}"]`;
-      for (const key of ["id", "tab", "kind"])
-        if (focused.dataset[key])
-          focusSelector += `[data-${key}="${CSS.escape(focused.dataset[key])}"]`;
-    }
-  }
-  document.title = `RSI-Lab · ${nav.find((n) => n[0] === state.route)[2]}`;
+  const active = document.activeElement;
+  const focusId = active && app.contains(active) ? active.id : null;
+  unmountWorkbench?.();
+  document.title = `RSI-Lab · ${nav.find((item) => item[0] === state.route)[2]}`;
   const views = {
     overview,
     campaigns: campaignsPage,
@@ -286,23 +239,18 @@ function render() {
     evidence: evidencePage,
     evolution: evolutionPage,
   };
-  unmountWorkbench?.();
   app.innerHTML = shell(views[state.route]());
-  app
-    .querySelector(".main")
-    .classList.toggle("canvas-main", state.route === "overview");
   unmountWorkbench =
-    state.route === "overview" ? mountWorkbench(app) : undefined;
+    state.route === "overview" ? mountWorkbench(app, state.arm) : undefined;
   setNav(false, false);
-  if (focusSelector)
-    app.querySelector(focusSelector)?.focus({ preventScroll: true });
+  if (focusId) document.getElementById(focusId)?.focus({ preventScroll: true });
 }
 function setNav(open, moveFocus = true) {
-  const mobile = window.matchMedia("(max-width: 760px)").matches;
+  const mobile = matchMedia("(max-width: 760px)").matches;
   const isOpen = mobile && open;
-  const sidebar = document.querySelector(".sidebar");
-  const page = document.querySelector(".page-shell");
-  const toggle = document.querySelector('[data-action="toggle-nav"]');
+  const sidebar = app.querySelector(".sidebar"),
+    page = app.querySelector(".page-shell"),
+    toggle = app.querySelector('[data-action="toggle-nav"]');
   document.body.classList.toggle("nav-open", isOpen);
   sidebar.id = "workspace-nav";
   sidebar.inert = mobile && !isOpen;
@@ -316,153 +264,105 @@ function setNav(open, moveFocus = true) {
 function openDialog(
   title,
   body,
-  footer = "",
-  eyebrow = "RESEARCH PREVIEW / DEMO",
+  footer = closeButton(),
+  eyebrow = "RECORDED EXPERIMENT",
 ) {
-  returnFocusId = document.activeElement;
-  dialog.innerHTML = `<div class="dialog-head"><div><div class="eyebrow">${eyebrow}</div><h2 id="dialog-title">${e(title)}</h2></div><button class="icon-button" data-action="close-dialog" aria-label="关闭弹窗" autofocus>${icon("close")}</button></div><div class="dialog-body">${body}</div>${footer ? `<div class="dialog-bottom">${footer}</div>` : ""}`;
+  if (!dialog.open) returnFocus = document.activeElement;
+  dialog.innerHTML = `<div class="dialog-head"><div><div class="eyebrow">${e(eyebrow)}</div><h2 id="dialog-title">${e(title)}</h2></div><button class="icon-button" data-action="close-dialog" aria-label="Close dialog" autofocus>${icon("close")}</button></div><div class="dialog-body">${body}</div><div class="dialog-bottom">${footer}</div>`;
   if (!dialog.open) dialog.showModal();
   dialog.scrollTop = 0;
 }
-function closeDialog() {
-  dialog.close();
-  if (returnFocusId?.isConnected) returnFocusId.focus();
-}
 function candidateDialog(id) {
-  const c = candidates.find((candidate) => candidate.id === id);
+  const c = experiment.candidates.find((c) => c.id === id);
   if (!c) return;
+  const r = result(c);
+  const refs = experiment.evidence.filter(
+    (record) =>
+      record.candidateId === c.id &&
+      (!record.arm || record.arm === "shared" || record.arm === state.arm),
+  );
   openDialog(
-    "候选证据详情",
-    `<div class="detail-header"><span class="compound-glyph">${icon("molecule")}</span><div><h3 class="mono">${c.id}</h3><p>${e(c.scaffold)} · DEV-004</p></div></div><div class="detail-metrics"><div class="detail-metric"><span>历史 IC50 · 模拟</span><strong>${num(c.ic50Nm)} <small style="display:inline">nM</small></strong><small>独立的公开测量示例</small></div><div class="detail-metric"><span>模型预测 · 模拟</span><strong>${c.prediction.value === null ? "未知" : c.prediction.value.toFixed(2)}</strong><small>${e(c.tool)} · 无量纲演示分</small></div><div class="detail-metric"><span>固定计算验证 · 模拟</span><strong>${verificationBadge(c.verification)}</strong><small>VERIFY-DEMO-01</small></div></div><div class="detail-section"><h4>当前解释与不确定性</h4><p>${e(c.note)}</p></div><div class="detail-section"><h4>原始证据引用</h4>${c.evidence
-      .map((id) => {
-        const r = evidenceRecords.find((record) => record.id === id);
-        return `<button class="source-row" data-action="evidence" data-id="${id}"><span><span class="mono">${id}</span> · ${e(r.kindLabel)}</span>${icon("arrow")}</button>`;
-      })
-      .join(
-        "",
-      )}</div><p class="detail-notice">${e(demoMeta.verificationNotice)} 所有记录均为虚构演示数据。</p>`,
-    button("关闭", "close-dialog") +
-      button(
-        state.selected.has(c.id) ? "移出暂定名单" : "加入暂定名单",
-        "toggle-candidate",
-        state.selected.has(c.id) ? "close" : "plus",
-        "primary",
-        `data-id="${id}" ${state.locked ? "disabled" : ""}`,
-      ),
-    `CANDIDATE / ${id}`,
+    c.id,
+    `<div class="detail-header"><span class="compound-glyph">${icon("molecule")}</span><div><h3>${e(arm().label)} · ${r?.shortlisted ? `Final rank ${r.rank}` : "Not in final shortlist"}</h3><p>Assay ${e(c.assayId)} · ${e(c.scaffold)}</p></div></div><div class="detail-metrics"><div class="detail-metric"><span>Historical IC50</span><strong>${number(c.ic50Nm, 1)} <small>nM</small></strong><small>Public input, not a hidden label</small></div><div class="detail-metric"><span>Qualified CNNscore median</span><strong>${number(r?.cnnMedian, 6)}</strong><small>Pose score · not biological activity</small></div><div class="detail-metric"><span>Two-seed valid poses</span><strong>${r ? `${r.validRepeats} / 2` : "Not computed"}</strong><small>${r ? `${r.completedRepeats} completed seed jobs` : "No score imputed"}</small></div></div><dl class="metadata"><dt>Energy median</dt><dd>${number(r?.energyMedian, 5)} kcal/mol</dd><dt>CNNscore seed range</dt><dd>${number(r?.cnnRange, 6)}</dd><dt>Activity IDs</dt><dd>${e(c.activityIds.join(", "))}</dd><dt>Document IDs</dt><dd>${e(c.documentIds.join(", "))}</dd></dl><div class="detail-section"><h4>Recorded seed jobs</h4>${r?.jobs?.length ? `<pre class="code-block">${e(JSON.stringify(r.jobs, null, 2))}</pre>` : "<p>No computational job result in this arm.</p>"}</div><div class="detail-section"><h4>Evidence references</h4>${refs.map((record) => `<button class="source-row" data-action="evidence" data-id="${e(record.id)}"><span>${e(record.title)}<small class="source-path">${e(record.source)}</small></span>${icon("arrow")}</button>`).join("")}</div><div class="detail-section"><h4>Recorded SMILES</h4><pre class="code-block">${e(c.smiles)}</pre></div><p class="detail-notice">A completed job, a valid pose and a biological result are different outcomes. Official affinity pass thresholds remain uncalibrated.</p>`,
+    closeButton(),
+    `CANDIDATE / ${state.arm}`,
   );
 }
 function evidenceDialog(id) {
-  const record = evidenceRecords.find((r) => r.id === id);
+  const record = experiment.evidence.find((r) => r.id === id);
   if (!record) return;
   openDialog(
     record.title,
-    `<dl class="metadata"><dt>证据 ID</dt><dd class="mono">${record.id}</dd><dt>候选</dt><dd>${record.candidateId}</dd><dt>记录类型</dt><dd>${e(record.kindLabel)}</dd><dt>来源</dt><dd>${e(record.source)}</dd><dt>值 / 状态</dt><dd>${record.value === null ? "无可用数值" : `${e(record.value)} ${e(record.unit)}`}${record.errorCode ? ` · ${record.errorCode}` : ""}</dd><dt>协议</dt><dd>${e(record.protocol || "不适用；此记录不是固定协议终评")}</dd><dt>数据性质</dt><dd>演示 fixture · 非真实工具输出</dd></dl><div class="detail-section"><h4>记录说明</h4><p>${e(record.detail)}</p></div><div class="detail-section"><h4>结构化原始示例</h4><pre class="code-block">${e(JSON.stringify(record, null, 2))}</pre></div>`,
+    `<dl class="metadata"><dt>Compound</dt><dd>${e(record.candidateId)}</dd><dt>Arm</dt><dd>${e(record.arm || "Shared historical input")}</dd><dt>Evidence kind</dt><dd>${kindLabel(record.kind)}</dd><dt>Source artifact</dt><dd class="mono source-path">${e(record.source)}</dd></dl><div class="detail-section"><h4>Interpretation</h4><p>${e(record.detail)}</p></div><div class="detail-section"><h4>Recorded fields</h4><pre class="code-block">${e(JSON.stringify(record.record, null, 2))}</pre></div>`,
     button(
-      "返回候选",
+      "Back to compound",
       "candidate",
       "arrow",
       "",
-      `data-id="${record.candidateId}"`,
-    ) + button("关闭", "close-dialog"),
+      `data-id="${e(record.candidateId)}"`,
+    ) + closeButton(),
     `EVIDENCE / ${record.id}`,
   );
 }
-function campaignDialog(id) {
-  const c = [...campaigns, ...state.drafts].find((c) => c.id === id);
-  if (!c) return;
+function sourcesDialog() {
   openDialog(
-    c.name,
-    `<dl class="metadata"><dt>Campaign</dt><dd class="mono">${e(c.id)}</dd><dt>阶段</dt><dd>${e(c.phaseLabel)}</dd><dt>靶点</dt><dd>${e(c.target)} · 示例</dd><dt>Harness</dt><dd>${e(c.harness)}</dd><dt>候选池 / 名单</dt><dd>${c.poolSize} / ${c.shortlistSize}</dd><dt>预算上限</dt><dd>${c.gpuBudget} GPU·h${c.phase === "validation" ? " / 每个配对分支" : ""}</dd><dt>消耗 / 预留</dt><dd>${c.gpuUsed} / ${c.gpuReserved} GPU·h</dd><dt>数据快照</dt><dd class="mono">${e(c.snapshot)}</dd><dt>固定协议</dt><dd class="mono">${e(c.protocol)}</dd><dt>状态</dt><dd>${e(c.statusLabel)} · ${c.status === "draft" ? "本地未执行草稿" : "演示记录"}</dd></dl><p class="detail-notice">${c.id === activeCampaign.id ? "工作台、候选与证据库对应本 campaign 的演示子集。" : "本原型仅提供此 campaign 的元数据；未加载它的候选与证据，不会混用 DEV-004 的结果。"}</p>`,
-    button("关闭", "close-dialog") +
-      (c.id === activeCampaign.id
-        ? button("打开工作台", "campaign-overview", "arrow", "primary")
-        : ""),
-  );
-}
-function newCampaignDialog() {
-  openDialog(
-    "新建实验草稿",
-    `<div class="message-box">配置会保存在当前浏览器。此原型不运行 Codex、预测工具或 GPU 任务。</div><form id="campaign-form"><div class="form-grid"><div class="field full"><label for="campaign-name">实验名称</label><input id="campaign-name" name="name" required maxlength="60" placeholder="例如：失败反馈策略验证" autocomplete="off"></div><div class="field"><label for="campaign-target">蛋白靶点</label><input id="campaign-target" value="CDK2 · 演示靶点" readonly><small>正式靶点由 pilot 确定</small></div><div class="field"><label for="campaign-phase">实验阶段</label><select id="campaign-phase" name="phase"><option value="development">开发 Development</option><option value="validation">验证 Validation</option></select></div><div class="field"><label for="campaign-pool">候选池规模</label><input id="campaign-pool" name="pool" type="number" value="300" min="1" max="10000" step="1" required></div><div class="field"><label for="campaign-shortlist">目标名单大小</label><input id="campaign-shortlist" name="shortlist" type="number" value="20" min="1" max="100" step="1" required></div><div class="field"><label for="campaign-budget">GPU 预算（小时 / 分支）</label><input id="campaign-budget" name="budget" type="number" value="12" min="1" max="100" step="0.5" required></div><div class="field"><label for="campaign-harness">Harness</label><input id="campaign-harness" value="开发 H1 / 验证 H1 对 H2" readonly><small>H2 仅作为配对验证候选</small></div></div><div class="form-error" id="form-error" role="alert"></div></form>`,
-    button("取消", "close-dialog") +
-      '<button class="btn primary" type="submit" form="campaign-form">保存演示草稿</button>',
-    "CAMPAIGN / NEW DRAFT",
-  );
-}
-function versionDialog(id) {
-  const v = harnessVersions.find((v) => v.id === id);
-  if (!v) return;
-  const diff =
-    id === "H2"
-      ? "- retry every failed request\n+ classify execution failure separately from verification failure\n+ preserve evidence and resource cost for every attempt\n+ retry only when a justified recovery action is available"
-      : id === "H1"
-        ? "- store a single candidate conclusion\n+ store measurement, prediction and verification separately\n+ link ranking claims to evidence IDs\n+ retain conflicts and unresolved questions"
-        : "Baseline H0\nFixed mechanisms across campaigns\nAdaptive decisions and memory updates within each campaign";
-  openDialog(
-    `${v.id} · ${v.name}`,
-    `<div class="tag-row">${pill(v.statusLabel, v.status === "candidate" ? "orange" : "green")}${pill(`父版本 ${v.parent || "无"}`, "gray")}</div><div class="detail-section"><h4>机制变化</h4><p>${e(v.summary)}</p>${v.changes.map((change) => `<div class="source-row">${icon("check")}<span style="flex:1;margin-left:8px">${e(change)}</span></div>`).join("")}</div><div class="detail-section"><h4>变更意图示例 · 非可执行 patch</h4><pre class="code-block">${e(diff)}</pre></div><div class="detail-section"><h4>验证与生效范围</h4><p>${e(v.validation)}。${e(v.releaseScope)}。</p></div><p class="detail-notice">版本记录均为演示。Meta 提出修改，固定 Gate 决定发布；当前 DEV-004 不会切换 Harness。</p>`,
-    button("发布规则", "gate", "lock") + button("关闭", "close-dialog"),
-    `HARNESS / ${v.id}`,
+    "Experiment provenance",
+    `<div class="message-box">Imported from completed local experiment artifacts. This snapshot preserves recorded result values; it does not certify current process health.</div><dl class="metadata"><dt>Comparison</dt><dd>${e(experiment.id)}</dd><dt>Readout generated</dt><dd>${time(experiment.generatedAt)}</dd><dt>Target / assay</dt><dd>${e(experiment.target)} / ${e(experiment.assayId)}</dd><dt>Model / effort</dt><dd>${e(experiment.model)} / ${e(experiment.effort)}</dd><dt>Artifact audit</dt><dd>${experiment.audit.passed ? "Passed" : "Not confirmed"} · not a biological validation</dd><dt>Protocol SHA-256</dt><dd class="mono source-path">${e(experiment.protocolHash)}</dd></dl><div class="detail-section"><h4>Source manifest</h4><p>Paths are relative to the repository root. Hashes identify the exact imported files.</p><p>${e(experiment.audit.sourceHashScope)}</p>${experiment.sources.map((source) => `<div class="manifest-row"><strong class="mono">${e(source.path)}</strong><small>${source.verification === "recorded_binding" ? "Recorded hash binding checked" : "Local import root · import hash only"}</small><small class="mono">${e(source.sha256)}</small></div>`).join("")}</div>`,
+    button("Export snapshot", "export", "download") + closeButton(),
   );
 }
 function protocolDialog() {
   openDialog(
-    "协议与计算工具",
-    `<div class="message-box">VERIFY-DEMO-01 为界面占位协议。工具版本、权重、参数及通过门槛仍需在正式实验前标定并冻结。</div><div class="protocol-list">${toolCatalog.map((tool) => `<div class="protocol-item"><div style="display:flex;justify-content:space-between;gap:10px"><strong>${e(tool.name)}</strong>${pill(tool.category, "gray")}</div><p>${e(tool.description)}</p></div>`).join("")}</div><div class="detail-section"><h4>预算记账</h4><p>上限 12.0 = 已用 7.2 + 已预留 1.2 + 可分配 3.6 GPU·h。此处仅为在线计算演示快照；Meta 与终评费用应独立记录，本原型未提供其结果。</p></div>`,
-    button("关闭", "close-dialog"),
+    "Frozen protocol & actual tools",
+    `<div class="message-box">${e(experiment.protocolId)} · 20 candidates · final shortlist of 5 per arm</div><div class="protocol-list"><div class="protocol-item"><strong>GNINA 1.3.3 + PoseBusters 0.6.5</strong><p>Docking and rescoring with seeds 17 and 43, plus pose-validity checks. RDKit 2025.9.6 supplies molecular features. Boltz-2 and Nesso-1 were not run in this comparison.</p></div><div class="protocol-item"><strong>Equal maximum opportunity</strong><p>8 online candidates / 16 physical jobs per arm; at most 4 candidates per batch. H0 and H1 allow up to 6 Lab calls, 300 seconds per call, and a soft total-token limit of 150,000. A call may cross the soft limit.</p></div><div class="protocol-item"><strong>Independent physical execution</strong><p>Each arm ran its own jobs without cross-arm result reuse. Terminal completion allows up to 5 additional candidates / 10 jobs, with no feedback to the Lab. This comparison used no terminal jobs.</p></div><div class="protocol-item"><strong>Separate scientific readouts</strong><p>CNNscore is a pose score. Empirical energy and historical IC50 remain separate. Affinity thresholds are uncalibrated; no official affinity pass rate is reported.</p></div></div><p class="detail-notice">Artifact audit passed. The single-pool, single-trajectory design does not establish statistical significance, generalization or biological efficacy.</p>`,
   );
 }
-function memoryDialog() {
+function versionDialog() {
   openDialog(
-    "科学记忆 · 派生解读示例",
-    `<div class="message-box">工作记忆是带来源的解释，可以修订；原始证据保持独立、不可覆写。</div><div class="detail-section"><h4>MEM-001 · 观察</h4><p>CMP-007 的预测信号与固定协议结果不一致，分别保留，不将两者合并为单一综合分。</p><button class="source-row" data-action="evidence" data-id="EV-007-P"><span>来源 EV-007-P · 模型预测</span>${icon("arrow")}</button><button class="source-row" data-action="evidence" data-id="EV-007-V"><span>来源 EV-007-V · 计算验证</span>${icon("arrow")}</button></div><div class="detail-section"><h4>MEM-002 · 未决问题</h4><p>CMP-008 因模拟 OOM 未产生预测。未知状态保留，恢复动作仍需额外证据与预算。</p><button class="source-row" data-action="evidence" data-id="EV-008-F"><span>来源 EV-008-F · 执行失败</span>${icon("arrow")}</button></div><p class="detail-notice">这些条目为固定演示内容，不代表已运行的 agent 推理。</p>`,
-    button("关闭", "close-dialog"),
+    "H0 → H1: input presentation only",
+    `<div class="tag-row">${pill("Evaluated", "green")}${pill("Not released", "orange")}</div><div class="detail-section"><h4>Recorded Meta proposal</h4><p>${e(experiment.meta.summary)}</p></div><pre class="code-block">- input_view_mode: expanded_json_v1\n+ input_view_mode: compact_json_v1\n\nOnly whitespace outside JSON strings is removed.\nKeys, order, values, arrays, source references and missingness are preserved.</pre><div class="detail-section"><h4>Scope</h4><p>The response interface, model settings, scientific evidence, tools, ranking objectives and budget accounting stay fixed. This is not a new model weight update.</p></div><dl class="metadata"><dt>Meta source</dt><dd class="source-path mono">${e(experiment.meta.source)}</dd><dt>Release authorized</dt><dd>${experiment.meta.releaseAuthorized ? "Yes" : "No"}</dd></dl>`,
+    button("View release boundary", "gate", "lock") + closeButton(),
   );
 }
 function gateDialog() {
   openDialog(
-    "固定发布规则",
-    `<div class="protocol-list"><div class="protocol-item"><strong>01 · 基础检查</strong><p>修改范围、冻结接口、预算记录和证据来源符合约束。</p></div><div class="protocol-item"><strong>02 · 独立配对验证</strong><p>当前版本与候选版本使用相同 D0、工具与预算，在新的 validation pool 上比较。</p></div><div class="protocol-item"><strong>03 · 预登记的发布条件</strong><p>质量改善；或质量在允许容差内且成本下降。具体门槛须经 pilot 确定，此处不虚构显著性或提升结果。</p></div><div class="protocol-item"><strong>04 · 仅对后续实验生效</strong><p>发布新版本不会修改正在运行的 campaign。H2 当前仍等待验证。</p></div></div>`,
-    button("关闭", "close-dialog"),
+    "Release is not authorized",
+    `<div class="message-box">The recorded release_authorized value is false.</div><div class="detail-section"><h4>What was checked</h4><p>The proposed input compaction passed implementation checks and was evaluated as H1 in this development comparison. Artifact, schema and reversible-presentation checks do not prove every scientific statement is correct.</p></div><div class="detail-section"><h4>What remains unproven</h4><p>One trajectory per arm is insufficient to establish a stable improvement or broad generalization. The comparison does not automatically authorize release. Meta cost must remain part of the resource accounting.</p></div><div class="detail-section"><h4>Scientific memory</h4><p>H0 has 9 memory entries and H1 has 8; all remain pending in the live memory ledger. External statement review does not rewrite that status.</p></div>`,
   );
 }
-function aboutDialog() {
-  openDialog(
-    "RSI-Lab 研究工作台",
-    `<p class="preview-disclaimer">${e(demoMeta.notice)} ${e(demoMeta.targetNotice)}</p><div class="detail-section"><h4>本版可体验</h4><p>查看实验概览、筛选候选、追溯证据、调整与锁定演示名单、导出 JSON、创建本地实验草稿，以及查看 Harness 演进。</p></div><div class="detail-section"><h4>数据与状态</h4><p>演示名单和草稿仅保存在当前浏览器；不会发送到 GitHub、模型接口或外部计算服务。导出文件包含 isDemo 标记。</p></div><div class="reset-row"><p>恢复初始名单、清除本地草稿<br>原始演示证据不变</p>${button("重置本地演示", "reset", "refresh", "danger")}</div>`,
-    button("关闭", "close-dialog"),
+function exportData(selectedArm = false) {
+  const payload = selectedArm
+    ? {
+        source: "recorded_experiment",
+        comparisonId: experiment.id,
+        asOf: experiment.generatedAt,
+        arm: arm(),
+        candidates: experiment.candidates.map((c) => ({
+          ...c,
+          results: c.results[state.arm]
+            ? { [state.arm]: c.results[state.arm] }
+            : {},
+        })),
+        sources: experiment.sources,
+        limitations: experiment.limitations,
+      }
+    : { source: "recorded_experiment", ...experiment };
+  const url = URL.createObjectURL(
+    new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }),
+  );
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `RSI-Lab_${experiment.id}${selectedArm ? `_${state.arm}` : ""}.json`;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1500);
+  toast(
+    "Recorded results exported with source hashes and interpretation limits.",
   );
 }
-function toggleCandidate(id) {
-  if (state.locked || !candidates.some((c) => c.id === id)) return;
-  if (state.selected.has(id)) state.selected.delete(id);
-  else state.selected.add(id);
-  persist();
+function selectArm(id) {
+  if (!experiment.arms.some((a) => a.id === id)) return;
+  state.arm = id;
   render();
-}
-function exportShortlist() {
-  const payload = {
-    isDemo: true,
-    notice: demoMeta.notice,
-    campaignId: activeCampaign.id,
-    protocol: activeCampaign.protocol,
-    harness: activeCampaign.harness,
-    locked: state.locked,
-    targetSize: activeCampaign.shortlistSize,
-    missingSlots: activeCampaign.shortlistSize - state.selected.size,
-    exportedAt: new Date().toISOString(),
-    candidates: candidates.filter((c) => state.selected.has(c.id)),
-  };
-  const blob = new Blob([JSON.stringify(payload, null, 2)], {
-    type: "application/json",
-  });
-  const href = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = href;
-  anchor.download = "RSI-Lab_DEV-004_demo_shortlist.json";
-  anchor.click();
-  setTimeout(() => URL.revokeObjectURL(href), 1500);
-  toast(`已导出 ${state.selected.size} 个演示候选，文件包含来源与演示标记。`);
 }
 
 document.addEventListener("click", (event) => {
@@ -473,170 +373,91 @@ document.addEventListener("click", (event) => {
   }
   const node = event.target.closest("[data-action]");
   if (!node || node.disabled) return;
-  const action = node.dataset.action;
-  if (action === "close-dialog") closeDialog();
-  else if (action === "candidate") candidateDialog(node.dataset.id);
-  else if (action === "evidence") evidenceDialog(node.dataset.id);
-  else if (action === "version") versionDialog(node.dataset.id);
-  else if (action === "campaign") campaignDialog(node.dataset.id);
-  else if (action === "new-campaign") newCampaignDialog();
-  else if (action === "about") aboutDialog();
-  else if (action === "protocol") protocolDialog();
-  else if (action === "memory") memoryDialog();
-  else if (action === "gate") gateDialog();
-  else if (action === "export") exportShortlist();
-  else if (action === "go-candidates") go("candidates");
-  else if (action === "go-evidence") go("evidence");
-  else if (action === "campaign-overview") {
-    closeDialog();
-    go("overview");
-  } else if (action === "toggle-candidate") {
-    toggleCandidate(node.dataset.id);
-    candidateDialog(node.dataset.id);
-  } else if (action === "pause") {
-    state.paused = !state.paused;
-    persist();
-    render();
-    toast(
-      state.paused
-        ? "演示流程已暂停，数据快照保持不变。"
-        : "可继续模拟下一步；不会调用实际工具。",
-    );
-  } else if (action === "next-step") {
-    if (!state.paused) {
-      state.step = (state.step + 1) % 4;
-      persist();
+  switch (node.dataset.action) {
+    case "close-dialog":
+      dialog.close();
+      break;
+    case "candidate":
+      candidateDialog(node.dataset.id);
+      break;
+    case "evidence":
+      evidenceDialog(node.dataset.id);
+      break;
+    case "sources":
+      sourcesDialog();
+      break;
+    case "protocol":
+      protocolDialog();
+      break;
+    case "version":
+      versionDialog();
+      break;
+    case "gate":
+      gateDialog();
+      break;
+    case "export":
+      exportData();
+      break;
+    case "export-arm":
+      exportData(true);
+      break;
+    case "select-arm":
+      selectArm(node.dataset.arm);
+      location.hash = "candidates";
+      break;
+    case "toggle-nav":
+      setNav(!document.body.classList.contains("nav-open"));
+      break;
+    case "close-nav":
+      setNav(false);
+      break;
+    case "evidence-tab":
+      state.evidenceKind = node.dataset.kind;
       render();
-      toast("已切换流程示意。证据和 GPU 用量未改变。");
-    }
-  } else if (action === "toggle-nav")
-    setNav(!document.body.classList.contains("nav-open"));
-  else if (action === "close-nav") setNav(false);
-  else if (action === "candidate-tab") {
-    state.candidateTab = node.dataset.tab;
-    render();
-  } else if (action === "evidence-tab") {
-    state.evidenceKind = node.dataset.kind;
-    render();
-  } else if (action === "event") {
-    const record = events.find((record) => record.id === node.dataset.id);
-    openDialog(
-      record.title,
-      `<dl class="metadata"><dt>事件来源</dt><dd>${e(record.actor)}</dd><dt>Campaign</dt><dd>${record.campaignId}</dd><dt>演示时间</dt><dd>${record.time}</dd><dt>事件类型</dt><dd>${record.type}</dd></dl><div class="detail-section"><h4>记录内容</h4><p>${e(record.detail)}</p></div>${record.evidence.map((id) => `<button class="source-row" data-action="evidence" data-id="${id}"><span>${id}</span>${icon("arrow")}</button>`).join("")}`,
-      button("关闭", "close-dialog"),
-    );
-  } else if (action === "lock") {
-    openDialog(
-      "锁定演示名单",
-      `<p class="preview-disclaimer">当前已选择 <strong>${state.selected.size}</strong> 个候选，目标为 ${activeCampaign.shortlistSize} 个，剩余 <strong>${activeCampaign.shortlistSize - state.selected.size}</strong> 个空位将保留。锁定后当前浏览器的名单只读，仍可导出；可通过“关于此原型”重置演示。</p><div class="detail-section"><p>此操作不向评估器提交，不会补全空位或产生新的计算结果。</p></div>`,
-      button("取消", "close-dialog") +
-        button("确认锁定本地名单", "confirm-lock", "lock", "primary"),
-    );
-  } else if (action === "confirm-lock") {
-    state.locked = true;
-    persist();
-    closeDialog();
-    render();
-    toast("本地演示名单已锁定。");
-  } else if (action === "reset") {
-    state.selected = new Set(candidates.map((c) => c.id));
-    state.drafts = [];
-    state.locked = false;
-    state.paused = false;
-    state.step = 1;
-    state.query = "";
-    state.verification = "all";
-    state.candidateTab = "all";
-    state.sort = "id";
-    state.evidenceKind = "all";
-    persist();
-    closeDialog();
-    render();
-    toast("已恢复初始演示状态。");
+      app
+        .querySelector(
+          `[data-action="evidence-tab"][data-kind="${CSS.escape(state.evidenceKind)}"]`,
+        )
+        ?.focus();
+      break;
   }
 });
 document.addEventListener("input", (event) => {
-  if (event.target.id === "candidate-search") {
-    state.query = event.target.value;
-    document.querySelector("#candidate-body").innerHTML = candidateTableBody();
-    document.querySelector("#candidate-count").textContent =
-      `显示 ${filteredCandidates().length} / 12 条演示记录`;
-  }
+  if (event.target.id !== "candidate-search") return;
+  state.query = event.target.value;
+  document.querySelector("#candidate-body").innerHTML = candidateRows();
+  document.querySelector("#candidate-count").textContent =
+    `Showing ${filteredCandidates().length} / ${experiment.poolSize} candidates`;
 });
 document.addEventListener("change", (event) => {
-  if (event.target.id === "verification-filter") {
-    state.verification = event.target.value;
+  if (event.target.id === "arm-select") selectArm(event.target.value);
+  if (event.target.id === "scope-filter") {
+    state.scope = event.target.value;
     render();
   }
   if (event.target.id === "sort-filter") {
     state.sort = event.target.value;
     render();
   }
-  if (event.target.matches("[data-candidate]"))
-    toggleCandidate(event.target.dataset.candidate);
 });
-document.addEventListener("submit", (event) => {
-  if (event.target.id !== "campaign-form") return;
-  event.preventDefault();
-  const form = new FormData(event.target);
-  const name = form.get("name").trim();
-  const poolSize = Number(form.get("pool")),
-    shortlistSize = Number(form.get("shortlist")),
-    gpuBudget = Number(form.get("budget"));
-  const error = document.querySelector("#form-error");
-  if (!name) {
-    error.textContent = "请输入实验名称。";
-    return;
-  }
-  if (
-    !Number.isInteger(poolSize) ||
-    !Number.isInteger(shortlistSize) ||
-    shortlistSize > poolSize
-  ) {
-    error.textContent = "名单大小需为整数，且不能超过候选池规模。";
-    return;
-  }
-  const phase = form.get("phase");
-  const id = `DRAFT-${String(state.drafts.length + 1).padStart(3, "0")}`;
-  state.drafts.unshift({
-    id,
-    name,
-    phase,
-    phaseLabel: phase === "development" ? "开发" : "验证",
-    target: "CDK2",
-    harness: phase === "development" ? "H1" : "H1 / H2 候选",
-    poolSize,
-    shortlistSize,
-    gpuBudget,
-    gpuUsed: 0,
-    gpuReserved: 0,
-    status: "draft",
-    statusLabel: "本地草稿",
-    snapshot: "待配置",
-    protocol: "VERIFY-DEMO-01",
-    isDemo: true,
-  });
-  persist();
-  closeDialog();
-  go("campaigns");
-  toast(`${id} 已保存在当前浏览器，未启动计算。`);
+dialog.addEventListener("close", () => {
+  if (returnFocus?.isConnected) returnFocus.focus();
 });
 dialog.addEventListener("click", (event) => {
-  if (event.target === dialog) {
-    const rect = dialog.getBoundingClientRect();
-    if (
-      event.clientX < rect.left ||
-      event.clientX > rect.right ||
-      event.clientY < rect.top ||
-      event.clientY > rect.bottom
-    )
-      closeDialog();
-  }
+  if (event.target !== dialog) return;
+  const rect = dialog.getBoundingClientRect();
+  if (
+    event.clientX < rect.left ||
+    event.clientX > rect.right ||
+    event.clientY < rect.top ||
+    event.clientY > rect.bottom
+  )
+    dialog.close();
 });
 window.addEventListener("hashchange", () => {
   state.route = getRoute();
   render();
-  window.scrollTo(0, 0);
+  scrollTo(0, 0);
   document.querySelector("#main-content").focus({ preventScroll: true });
 });
 window.addEventListener("keydown", (event) => {
@@ -645,24 +466,21 @@ window.addEventListener("keydown", (event) => {
     setNav(false);
     return;
   }
-  if (event.key === "Tab") {
-    const nodes = [
-      ...document.querySelectorAll(
-        ".sidebar a, .sidebar button:not(:disabled)",
-      ),
-    ];
-    const first = nodes[0],
-      last = nodes.at(-1);
-    if (event.shiftKey && document.activeElement === first) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && document.activeElement === last) {
-      event.preventDefault();
-      first.focus();
-    }
+  if (event.key !== "Tab") return;
+  const nodes = [
+      ...app.querySelectorAll(".sidebar a, .sidebar button:not(:disabled)"),
+    ],
+    first = nodes[0],
+    last = nodes.at(-1);
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
   }
 });
-window
-  .matchMedia("(max-width: 760px)")
-  .addEventListener("change", () => setNav(false, false));
+matchMedia("(max-width: 760px)").addEventListener("change", () =>
+  setNav(false, false),
+);
 render();

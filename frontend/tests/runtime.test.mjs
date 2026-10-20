@@ -6,10 +6,12 @@ import { join } from "node:path";
 import {
   normalizeRuntime,
   demoRuntime,
+  recordedRuntime,
   runtimeNodes,
   runtimeEdges,
   fetchRuntime,
 } from "../src/runtime.js";
+import { experiment } from "../src/experiment-data.js";
 import { handleRuntimeRequest, MAX_RUNTIME_BYTES } from "../runtime-server.mjs";
 
 const NOW = Date.parse("2026-10-20T12:00:00.000Z");
@@ -17,10 +19,10 @@ const iso = (offset = 0) => new Date(NOW + offset).toISOString();
 const node = (overrides = {}) => ({
   id: "controller",
   status: "running",
-  detail: "编排任务",
+  detail: "Orchestrating requests",
   heartbeatAt: iso(),
-  task: "维护状态",
-  metrics: [{ label: "任务", value: 1 }],
+  task: "Maintain state",
+  metrics: [{ label: "Task", value: 1 }],
   events: [],
   ...overrides,
 });
@@ -102,7 +104,7 @@ test("snapshot older than 60 seconds makes every node offline", () => {
 test("future and inconsistent timestamps are rejected", () => {
   assert.throws(
     () => normalizeRuntime(snapshot({ observedAt: iso(1) }), NOW),
-    /未来时间/,
+    /in the future/,
   );
   assert.throws(
     () =>
@@ -110,11 +112,11 @@ test("future and inconsistent timestamps are rejected", () => {
         snapshot({ nodes: [node({ heartbeatAt: iso(1) })] }),
         NOW,
       ),
-    /未来时间/,
+    /in the future/,
   );
   assert.throws(
     () => normalizeRuntime(snapshot({ observedAt: iso(-1) }), NOW),
-    /心跳晚于/,
+    /heartbeat is later/,
   );
   assert.throws(
     () =>
@@ -128,12 +130,12 @@ test("future and inconsistent timestamps are rejected", () => {
         }),
         NOW,
       ),
-    /未来时间/,
+    /in the future/,
   );
   assert.throws(
     () =>
       normalizeRuntime(snapshot({ observedAt: "2026-02-30T12:00:00Z" }), NOW),
-    /时间格式/,
+    /timestamp/,
   );
 });
 
@@ -191,40 +193,104 @@ test("all producer-controlled text is bounded and unrecognized properties are dr
   assert.equal("html" in entry, false);
 });
 
-test("demo keeps version boundaries and describes OOM as missing evidence", () => {
-  const demo = demoRuntime(1);
-  const normalized = normalizeRuntime(demo);
-  assert.equal(normalized.source, "demo");
-  assert.equal(normalized.harness, "H1");
+test("demo uses the actual tool topology but remains explicitly simulated", () => {
+  const demo = normalizeRuntime(demoRuntime(1));
+  assert.equal(demo.source, "demo");
+  assert.equal(demo.harness, "Demo Harness");
   assert.equal(
-    normalized.nodes.find((item) => item.id === "nesso").status,
+    demo.nodes.find((item) => item.id === "posecheck").status,
     "error",
   );
   assert.match(
-    normalized.nodes.find((item) => item.id === "nesso").detail,
-    /不代表分子无活性/,
+    demo.nodes.find((item) => item.id === "posecheck").detail,
+    /does not establish molecular inactivity/,
   );
   assert.equal(
-    normalized.nodes.every((item) => item.metrics[0].label.includes("模拟")),
+    demo.nodes.every((item) => item.metrics[0].label.includes("Demo")),
     true,
   );
-  assert.equal(
-    normalized.nodes.some((item) => item.detail.startsWith("演示：")),
-    false,
-  );
-  const newestEvents = demo.nodes
-    .flatMap((item) =>
-      item.events.map((event) => ({ ...event, nodeId: item.id })),
-    )
-    .sort((a, b) => Date.parse(b.time) - Date.parse(a.time));
   assert.deepEqual(
-    newestEvents.slice(0, 3).map((event) => event.nodeId),
-    ["nesso", "lab", "controller"],
+    runtimeNodes.map((item) => item.id),
+    [
+      "controller",
+      "lab",
+      "executor",
+      "gnina",
+      "posecheck",
+      "memory",
+      "meta",
+      "validator",
+    ],
   );
-  assert.equal(runtimeNodes.length, 8);
   assert.equal(
     runtimeEdges.filter((edge) => edge.kind === "cross-campaign").length,
     3,
+  );
+});
+
+test("recorded experiment binds each arm's actual counts without claiming a heartbeat", () => {
+  for (const arm of experiment.arms) {
+    const record = recordedRuntime(experiment, arm.id);
+    assert.equal(record.source, "recorded");
+    assert.equal(record.harness, arm.id);
+    assert.equal(record.completedAt, new Date(arm.completedAt).toISOString());
+    assert.ok(record.nodes.every((item) => item.heartbeatAt === null));
+    assert.match(
+      record.nodes.find((item) => item.id === "executor").detail,
+      new RegExp(`${arm.numerical.completedJobs} of ${arm.numerical.jobs}`),
+    );
+    assert.match(
+      record.nodes.find((item) => item.id === "posecheck").detail,
+      new RegExp(
+        `${arm.numerical.poseValidJobs} / ${arm.numerical.completedJobs}`,
+      ),
+    );
+    assert.equal(
+      record.nodes.find((item) => item.id === "validator").statusLabel,
+      "Not released",
+    );
+    assert.equal(
+      record.nodes.find((item) => item.id === "lab").statusLabel,
+      arm.usage.calls ? "Completed" : "Not used",
+    );
+  }
+  assert.throws(() => recordedRuntime(experiment, "missing-arm"), /not found/);
+});
+
+test("historical completion never expires into a live heartbeat failure", () => {
+  const record = recordedRuntime(experiment, "H1");
+  const later = Date.parse(record.observedAt) + 30 * 86400_000;
+  const normalized = normalizeRuntime(record, later);
+  assert.equal(normalized.stale, false);
+  assert.equal(
+    normalized.nodes.find((item) => item.id === "controller").status,
+    "completed",
+  );
+  assert.equal(
+    normalized.nodes.find((item) => item.id === "memory").statusLabel,
+    "Pending review",
+  );
+  assert.equal(
+    normalized.nodes.some((item) => item.status === "offline"),
+    false,
+  );
+  assert.throws(
+    () =>
+      normalizeRuntime(
+        snapshot({ nodes: [node({ status: "completed" })] }),
+        NOW,
+      ),
+    /recorded-result status/,
+  );
+  assert.equal(
+    normalizeRuntime(
+      snapshot({
+        source: "demo",
+        nodes: [node({ status: "completed", heartbeatAt: null })],
+      }),
+      NOW,
+    ).nodes[0].status,
+    "completed",
   );
 });
 
@@ -304,22 +370,24 @@ test("endpoint failures hide configured paths and stack traces", async (t) => {
   }
 });
 
-test("real endpoint rejects demo snapshots even when structurally valid and fresh", async (t) => {
+test("real endpoint rejects historical or demo snapshots even when structurally valid and fresh", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "rsi-runtime-test-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const path = join(directory, "demo.json");
-  const demo = snapshot({ source: "demo" });
-  assert.equal(normalizeRuntime(demo, NOW).source, "demo");
-  await writeFile(path, JSON.stringify(demo));
-  for (const method of ["GET", "HEAD"]) {
-    const response = responseCapture();
-    await handleRuntimeRequest({ method }, response, {
-      runtimeFile: path,
-      now: NOW,
-    });
-    assert.equal(response.status, 503);
-    if (method === "HEAD") assert.equal(response.body, undefined);
-    else assert.deepEqual(Object.keys(JSON.parse(response.body)), ["error"]);
+  for (const source of ["demo", "recorded"]) {
+    const demo = snapshot({ source });
+    assert.equal(normalizeRuntime(demo, NOW).source, source);
+    await writeFile(path, JSON.stringify(demo));
+    for (const method of ["GET", "HEAD"]) {
+      const response = responseCapture();
+      await handleRuntimeRequest({ method }, response, {
+        runtimeFile: path,
+        now: NOW,
+      });
+      assert.equal(response.status, 503);
+      if (method === "HEAD") assert.equal(response.body, undefined);
+      else assert.deepEqual(Object.keys(JSON.parse(response.body)), ["error"]);
+    }
   }
 });
 
@@ -343,7 +411,9 @@ test("fetchRuntime accepts live snapshots and rejects demo without claiming a re
     return { ok: true, json: async () => reply };
   };
   try {
-    await assert.rejects(fetchRuntime(), /不能作为真实连接/);
+    await assert.rejects(fetchRuntime(), /cannot establish a live connection/);
+    reply = recordedRuntime(experiment, "H1");
+    await assert.rejects(fetchRuntime(), /cannot establish a live connection/);
     reply = { ...demoRuntime(), source: "live" };
     assert.equal((await fetchRuntime()).source, "live");
   } finally {
@@ -357,7 +427,7 @@ test("fetchRuntime refuses file previews explicitly", async () => {
   const previous = globalThis.location;
   globalThis.location = { protocol: "file:" };
   try {
-    await assert.rejects(fetchRuntime(), /本地文件预览/);
+    await assert.rejects(fetchRuntime(), /File previews/);
   } finally {
     if (previous === undefined) delete globalThis.location;
     else globalThis.location = previous;
