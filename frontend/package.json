@@ -5,8 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "node server.mjs",
+    "test": "node --test tests/*.test.mjs",
     "build": "node scripts/build.mjs",
-    "check": "node --check src/app.js && node --check src/data.js && node --check src/icons.js && node --check server.mjs && node --check scripts/build.mjs"
+    "check": "node --check src/app.js && node --check src/data.js && node --check src/icons.js && node --check src/runtime.js && node --check src/workbench.js && node --check runtime-server.mjs && node --check server.mjs && node --check scripts/build.mjs"
   },
   "engines": {
     "node": ">=20"

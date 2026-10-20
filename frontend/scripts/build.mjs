@@ -6,17 +6,17 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const html = await readFile(resolve(root, "index.html"), "utf8");
 const css = await readFile(resolve(root, "src/styles.css"), "utf8");
 const files = await Promise.all(
-  ["data.js", "icons.js", "app.js"].map((file) =>
+  ["data.js", "icons.js", "runtime.js", "workbench.js", "app.js"].map((file) =>
     readFile(resolve(root, "src", file), "utf8"),
   ),
 );
-// This prototype has three local modules and no third-party dependencies.
+// This prototype has local modules and no third-party dependencies.
 // Inline the build so the review artifact also works without a web server.
 const script = files
   .map((source) =>
     source
       .replace(
-        /^import\s[\s\S]*?from\s+["']\.\/(?:data|icons)\.js["'];?\s*$/gm,
+        /^import\s[\s\S]*?from\s+["']\.\/(?:data|icons|runtime|workbench)\.js["'];?\s*$/gm,
         "",
       )
       .replace(/^export /gm, ""),

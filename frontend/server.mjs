@@ -2,6 +2,7 @@ import { createServer } from "node:http";
 import { readFile, stat } from "node:fs/promises";
 import { dirname, resolve, extname, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { handleRuntimeRequest } from "./runtime-server.mjs";
 
 const root = dirname(fileURLToPath(import.meta.url));
 const port = Number(process.env.PORT || 4173);
@@ -23,6 +24,10 @@ const server = createServer(async (req, res) => {
     const pathname = decodeURIComponent(
       new URL(req.url, "http://localhost").pathname,
     );
+    if (pathname === "/api/runtime") {
+      await handleRuntimeRequest(req, res);
+      return;
+    }
     const file = resolve(
       root,
       `.${pathname === "/" ? "/index.html" : pathname}`,

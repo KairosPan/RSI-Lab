@@ -8,6 +8,7 @@ import {
   toolCatalog,
 } from "./data.js";
 import { icon } from "./icons.js";
+import { workbenchPage, mountWorkbench } from "./workbench.js";
 
 const app = document.querySelector("#app");
 const dialog = document.querySelector("#detail-dialog");
@@ -17,7 +18,7 @@ const activeCampaign = campaigns.find(
 );
 const routes = ["overview", "campaigns", "candidates", "evidence", "evolution"];
 const nav = [
-  ["overview", "grid", "工作台概览"],
+  ["overview", "grid", "运行工作台"],
   ["campaigns", "flask", "实验运行"],
   ["candidates", "molecule", "候选分子"],
   ["evidence", "layers", "证据库"],
@@ -49,6 +50,7 @@ const state = {
       )
     : [],
 };
+let unmountWorkbench;
 let toastTimeout;
 let returnFocusId;
 
@@ -131,8 +133,8 @@ function shell(content) {
       <button class="workspace-switch" data-action="about"><span class="workspace-icon">${icon("flask")}</span><span class="workspace-copy"><strong>Compound Discovery</strong><small>研究工作区 · Demo</small></span>${icon("down")}</button>
       <div class="nav-caption">WORKSPACE</div><nav class="nav-list">${nav.map(([id, glyph, label]) => `<a href="#${id}" class="nav-link ${id === state.route ? "active" : ""}" ${id === state.route ? 'aria-current="page"' : ""}>${icon(glyph)}${label}${id === "campaigns" ? `<span class="nav-count">${campaigns.length + state.drafts.length}</span>` : id === "evolution" ? '<span class="nav-count">3</span>' : ""}</a>`).join("")}</nav>
       <div class="sidebar-bottom"><button class="nav-link" data-action="protocol">${icon("settings")}协议与工具</button><div class="sidebar-note"><div class="note-title">${icon("branch")}持续学习，有据可循</div><p>每一次改进，都从可追溯的实验经验开始。</p><a class="small-link" href="#evolution">查看演进路径 ${icon("arrow")}</a></div><div class="profile"><span class="avatar">RL</span><div><strong>RSI-Lab Research</strong><small>LOCAL DEMO WORKSPACE</small></div>${icon("lock")}</div></div>
-    </aside><div class="page-shell"><header class="topbar"><div class="breadcrumbs"><button class="icon-button mobile-menu" data-action="toggle-nav" aria-label="打开导航">${icon("menu")}</button><span>工作空间</span>${icon("chevron")}<strong>${currentTitle}</strong></div><div class="topbar-right"><span class="demo-badge"><i class="demo-dot"></i>演示工作区 · 示例数据</span><span class="topbar-line"></span><button class="icon-button" data-action="about" aria-label="关于此原型">${icon("info")}</button><span class="avatar">RL</span></div></header>
-      <main class="main" id="main-content" tabindex="-1">${content}<footer class="app-footer"><span>${icon("lock")}本地交互原型 · 未连接计算后端</span><span>RSI-LAB / RESEARCH PREVIEW 01</span></footer></main></div></div>`;
+    </aside><div class="page-shell"><header class="topbar"><div class="breadcrumbs"><button class="icon-button mobile-menu" data-action="toggle-nav" aria-label="打开导航">${icon("menu")}</button><span>工作空间</span>${icon("chevron")}<strong>${currentTitle}</strong></div><div class="topbar-right"><span class="demo-badge"><i class="demo-dot"></i>${state.route === "overview" ? "本地工作区 · 研究预览" : "演示工作区 · 示例数据"}</span><span class="topbar-line"></span><button class="icon-button" data-action="about" aria-label="关于此原型">${icon("info")}</button><span class="avatar">RL</span></div></header>
+      <main class="main" id="main-content" tabindex="-1">${content}<footer class="app-footer"><span>${icon("lock")}${state.route === "overview" ? "状态来源以画布为准 · 只读观察" : "本地交互原型 · 示例数据"}</span><span>RSI-LAB / RESEARCH PREVIEW 01</span></footer></main></div></div>`;
 }
 function heading(title, subtitle, actions = "") {
   return `<div class="page-heading"><div><h1>${title}</h1><p>${subtitle}</p></div><div class="heading-actions">${actions}</div></div>`;
@@ -203,10 +205,9 @@ function shortlistPreview() {
   return `<section class="panel table-panel section-space"><div class="panel-head"><div><h2 class="panel-title">候选短名单 <span class="title-count">${state.selected.size} / 20</span></h2><p class="panel-subtitle">${state.locked ? "已锁定的本地演示名单" : "当前暂定 · 持续积累证据"}</p></div>${button("全部候选", "go-candidates", "arrow", "text")}</div><div class="table-wrap"><table aria-label="短名单预览"><thead><tr><th>候选分子</th><th>历史 IC50</th><th>计算验证</th><th>短名单</th><th>预测工具</th><th><span class="sr-only">详情</span></th></tr></thead><tbody>${candidateRows(selected, true)}</tbody></table></div><div class="panel-footer"><span>显示 ${selected.length} 条 · 数值与结果均为演示</span><span class="lock-state">${icon("layers")}证据可追溯</span></div></section>`;
 }
 function overview() {
-  return `${heading("实验工作台", "让每一轮决策，都建立在可追溯的证据之上。", button("导出演示名单", "export", "download") + button("新建实验", "new-campaign", "plus", "primary"))}
-    <div class="overview-top"><section class="campaign-hero"><div class="hero-copy"><div class="hero-top"><span class="eyebrow">ACTIVE CAMPAIGN / DEV-004</span>${pill(state.paused ? "演示已暂停" : "演示回放", state.paused ? "gray" : "green", state.paused ? "pause" : "play")}</div><h2>CDK2 · 活性候选筛选</h2><p>在固定预算下探索候选，<br>让新计算证据指导下一步实验。</p><div class="hero-meta"><span>${icon("flask")}Development</span><span>${icon("branch")}Harness H1</span><span>${icon("lock")}协议已冻结 · 示例</span></div><div class="hero-actions">${button("查看候选", "go-candidates", "arrow", "primary")}${button(state.paused ? "继续演示" : "暂停演示", "pause", state.paused ? "play" : "pause", "")}</div></div>${moleculeArt()}<span class="target-visual-label">MOLECULAR NETWORK / 示意</span></section>${budgetCard()}</div>${stats()}
-    <div class="overview-mid"><div class="overview-main-column">${flowPanel()}${shortlistPreview()}</div><div>${activityPanel()}<div class="evolution-teaser" style="align-items:flex-start;flex-wrap:wrap"><span class="teaser-icon">${icon("branch")}</span><div class="teaser-copy"><strong>下一次改进，已在路上</strong><p>H2 失败反馈策略 · 等待独立验证</p></div><a class="btn text" style="margin-left:45px" href="#evolution">查看 Harness 演进 ${icon("arrow")}</a></div></div></div>`;
+  return workbenchPage();
 }
+
 function campaignsPage() {
   const all = [...state.drafts, ...campaigns];
   return `${heading("实验运行", "从独立的实验上下文出发，追踪每一轮探索。", button("新建实验", "new-campaign", "plus", "primary"))}<div class="info-banner">${icon("info")}当前为演示工作区。新建操作只保存本地草稿，不会调用模型或启动计算任务。</div><div class="campaign-grid">${all.map((c) => `<article class="panel campaign-card"><div class="campaign-card-head"><span class="eyebrow">${e(c.id)}</span>${pill(c.status === "draft" ? "本地草稿" : `${c.statusLabel} · 示例`, c.status === "running" ? "green" : c.status === "queued" ? "orange" : "gray")}</div><div class="eyebrow">${e(c.target)} / ${e(c.phaseLabel)}</div><h2>${e(c.name)}</h2><p class="description">${c.status === "draft" ? "实验参数已保存在当前浏览器，等待后端接入。" : c.id === "DEV-004" ? "根据当前证据，自适应安排下一批计算。" : c.id === "VAL-003" ? "相同数据快照与预算，独立比较候选版本。" : "保留失败反馈，形成可追溯的开发轨迹。"}</p><dl class="campaign-card-meta"><div><dt>候选池 / 目标名单</dt><dd>${num(c.poolSize)} / ${c.shortlistSize}</dd></div><div><dt>Harness</dt><dd>${e(c.harness)}</dd></div><div><dt>GPU 预算</dt><dd>${c.gpuBudget} h${c.phase === "validation" ? " / 分支" : ""}</dd></div><div><dt>数据快照</dt><dd class="mono">${e(c.snapshot)}</dd></div></dl>${button(c.status === "draft" ? "查看草稿" : "查看实验", "campaign", "arrow", c.id === "DEV-004" ? "soft" : "", `data-id="${e(c.id)}"`)}</article>`).join("")}</div>`;
@@ -285,7 +286,13 @@ function render() {
     evidence: evidencePage,
     evolution: evolutionPage,
   };
+  unmountWorkbench?.();
   app.innerHTML = shell(views[state.route]());
+  app
+    .querySelector(".main")
+    .classList.toggle("canvas-main", state.route === "overview");
+  unmountWorkbench =
+    state.route === "overview" ? mountWorkbench(app) : undefined;
   setNav(false, false);
   if (focusSelector)
     app.querySelector(focusSelector)?.focus({ preventScroll: true });

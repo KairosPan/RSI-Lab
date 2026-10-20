@@ -1,0 +1,86 @@
+{
+  "source": "demo",
+  "campaignId": "DEV-004",
+  "harness": "H1",
+  "observedAt": "2026-10-20T12:00:00.000Z",
+  "nodes": [
+    {
+      "id": "controller",
+      "status": "running",
+      "detail": "仅为文件格式示例，实时接口拒绝 demo 来源。真实接入时由外部生产者写入 source: live、实际状态和当前时间。",
+      "heartbeatAt": "2026-10-20T12:00:00.000Z",
+      "task": "维护 campaign 状态",
+      "metrics": [{ "label": "配置", "value": "示例值，需替换" }],
+      "events": [
+        {
+          "time": "2026-10-20T11:59:59.000Z",
+          "message": "文件格式示例，不代表已启动任何 agent。",
+          "level": "info"
+        }
+      ]
+    },
+    {
+      "id": "lab",
+      "status": "idle",
+      "detail": "等待已授权工具返回结果。",
+      "heartbeatAt": "2026-10-20T12:00:00.000Z",
+      "task": "",
+      "metrics": [],
+      "events": []
+    },
+    {
+      "id": "executor",
+      "status": "queued",
+      "detail": "示例：等待授权任务。",
+      "heartbeatAt": "2026-10-20T12:00:00.000Z",
+      "task": "",
+      "metrics": [],
+      "events": []
+    },
+    {
+      "id": "boltz",
+      "status": "idle",
+      "detail": "示例：当前无任务。",
+      "heartbeatAt": "2026-10-20T12:00:00.000Z",
+      "task": "",
+      "metrics": [],
+      "events": []
+    },
+    {
+      "id": "nesso",
+      "status": "error",
+      "detail": "示例 OOM：任务未产生预测，不能据此判断分子无活性。",
+      "heartbeatAt": "2026-10-20T12:00:00.000Z",
+      "task": "示例失败任务",
+      "metrics": [{ "label": "错误类型", "value": "OOM" }],
+      "events": []
+    },
+    {
+      "id": "memory",
+      "status": "idle",
+      "detail": "示例：保留原始证据和未决问题。",
+      "heartbeatAt": "2026-10-20T12:00:00.000Z",
+      "task": "",
+      "metrics": [],
+      "events": []
+    },
+    {
+      "id": "meta",
+      "status": "queued",
+      "detail": "示例：等待允许的已完成开发轨迹。",
+      "heartbeatAt": "2026-10-20T12:00:00.000Z",
+      "task": "",
+      "metrics": [],
+      "events": []
+    },
+    {
+      "id": "validator",
+      "status": "idle",
+      "detail": "示例：发布仅影响后续新 campaign。",
+      "heartbeatAt": "2026-10-20T12:00:00.000Z",
+      "task": "",
+      "metrics": [],
+      "events": []
+    }
+  ]
+}
