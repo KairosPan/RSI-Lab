@@ -1,0 +1,32 @@
+{
+  "schema_version": "lab_harness_migration_v1",
+  "source_repository": "https://github.com/KairosPan/RSI-Lab.git",
+  "source_head": "c6bef5f",
+  "source_status": "Local uncommitted implementation snapshot; source files remain unchanged. These hashes identify the source bytes, not the adapted destinations.",
+  "sources": {
+    "scripts/run_lab_comparison_controller.py": "de2de5e39e79ff39bdb1f7744042737f1e66c707035e57f5a07323e0ec0f83d3",
+    "scripts/lab_input_view.py": "a0f20a9ddc30baaa35f86d98ed4b1872a79224059e29f841bf7c07bba55ad636",
+    "scripts/run_lab_gpu_batch.py": "8ba77321004d6f9712ba0ef34fed956a44d1f0ad06bc0c4f6d12d4c4eab9290b",
+    "scripts/run_pilot_gpu.py": "f4d6b840d9c78b5006eb1d956d75d19b486ee06d87e617b399cb6ce9decab31f",
+    "scripts/test_lab_comparison_controller.py": "92fdc1aca695dfa1a6150689004aa1ce5943d0ebfac354126aeadb0f572cb82c",
+    "output/experiments/codex_orchestration/prompts/common_contract.md": "a552ae515cc159f645a93ef324bf26e938c832990555235a55881f87f306e708",
+    "output/experiments/codex_orchestration/prompts/lab_planner.md": "8d47fedcef89612855ab727f9f6361f0ac138d6ff67ea8fe9c5577f5be45a0cc"
+  },
+  "adaptations": [
+    "Package and CLI entrypoint",
+    "Pure harness identity independent of campaign, data, and protocol",
+    "Live/replay separation and explicit synthetic fixtures",
+    "Isolated Codex transport and recorded unknown usage",
+    "Bounded Meta proposal, frozen candidate, preregistered paired development gate",
+    "Stricter raw PoseBusters/CPU validation and preservation of parent worker timeout/abnormal exit status"
+  ],
+  "pablo_architecture_references": [
+    "pablo-meta-experiment/experiment/round2_runtime.py",
+    "pablo-meta-experiment/experiment/codex_model.py",
+    "pablo-meta-experiment/experiment/persistent_research_runtime.py"
+  ],
+  "excluded": [
+    "Original checkout data, credentials, model weights, run archives, and unrelated dirty changes",
+    "PABLO task data, scores, and Continuity Meta runtime"
+  ]
+}
