@@ -1,6 +1,6 @@
 # 发布、下载与复现
 
-代码和数据分开保存，两个仓库均为私有，需要各自的访问权限。
+代码和数据分开保存，两个仓库均为公开，可匿名浏览和下载。
 
 | 内容 | 位置 |
 | --- | --- |
@@ -17,10 +17,9 @@ cd RSI-Lab
 python3 -m lab_harness demo --out runs/new_demo --with-meta
 ```
 
-下载数据使用已授权的 Hugging Face 登录。先安装 `huggingface_hub` 提供的 `hf` CLI，然后将下面的 revision 占位符替换为实际 dataset commit。`hf auth login` 在本机交互登录；不要把 token 写入仓库或配置示例。[Hugging Face 官方 CLI 文档](https://huggingface.co/docs/huggingface_hub/en/guides/cli)
+先安装 `huggingface_hub` 提供的 `hf` CLI，然后将下面的 revision 占位符替换为实际 dataset commit。公开数据可匿名下载，无须登录；如遇下载速率限制，可选用 `hf auth login` 在本机交互登录。不要把 token 写入仓库或配置示例。[Hugging Face 官方 CLI 文档](https://huggingface.co/docs/huggingface_hub/en/guides/cli)
 
 ```sh
-hf auth login
 hf download Kairoszhe/RSI-Lab-docking --repo-type dataset \
   --revision DATASET_COMMIT_SHA --local-dir datasets/rsi-lab-docking
 cd datasets/rsi-lab-docking

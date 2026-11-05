@@ -15,7 +15,7 @@ python3 -m unittest discover -s tests -v
 
 运行方式、Meta 范围、固定 CDK2 profile 和预算口径见 [Lab harness v1 运行说明](docs/lab-harness-v1.md)。
 
-代码位于私有 [GitHub 仓库](https://github.com/KairosPan/RSI-Lab/tree/codex/lab-harness-v1)，数据与运行证据位于私有 [Hugging Face 数据集](https://huggingface.co/datasets/Kairoszhe/RSI-Lab-docking)。访问需要相应权限；下载、环境与重新运行步骤见[发布与复现说明](docs/publication-and-reproduction.md)。
+代码位于公开 [GitHub 仓库](https://github.com/KairosPan/RSI-Lab/tree/codex/lab-harness-v1)，数据与运行证据位于公开 [Hugging Face 数据集](https://huggingface.co/datasets/Kairoszhe/RSI-Lab-docking)。两者均可匿名下载；下载、环境与重新运行步骤见[发布与复现说明](docs/publication-and-reproduction.md)。
 
 2026-11-05 的真实探索性闭环完成了 6 个 Lab campaign、22 次模型调用及 92 个 seed 作业，覆盖 35 个不同的已对接 compound。两组配对验证中，候选 Harness 的 Lab input+output tokens 合计下降 31.3%，通过了预登记的成本路径；这不包含 Meta 提案成本，也不证明普遍收益或正式 100 项名单达标。结果口径见[验证记录](docs/validation-v1.md)。
 
