@@ -331,8 +331,8 @@ README = '''---
 pretty_name: RSI-Lab CDK2 exploratory docking and agentic study
 language: [en, zh]
 license: other
-license_name: Component-specific upstream data and software licenses
-license_link: LICENSES_AND_SOURCES.md
+license_name: component-specific
+license_link: https://huggingface.co/datasets/Kairoszhe/RSI-Lab-docking/blob/main/LICENSES_AND_SOURCES.md
 tags: [chemistry, molecular-docking, cdk2, tabular, 3d, agentic-evaluation]
 configs:
 - config_name: compounds
