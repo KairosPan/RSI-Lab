@@ -36,7 +36,14 @@ def main(argv=None):
     q=sub.add_parser('register-plan');q.add_argument('--plan',required=True)
     q=sub.add_parser('adapter-run');q.add_argument('--adapter',required=True)
     q.add_argument('--inputs',required=True);q.add_argument('--event',required=True)
-    q=sub.add_parser('meta-step');q.add_argument('--work',required=True)
+    for name in ('meta-step', 'lab-step'):
+        q=sub.add_parser(name);q.add_argument('--work',required=True)
+    q=sub.add_parser('lab-start');q.add_argument('--event',required=True)
+    q.add_argument('--evidence',action='append',default=[])
+    q=sub.add_parser('agent-checkpoint');q.add_argument('--session',required=True)
+    q=sub.add_parser('agent-rebuild');q.add_argument('--session',required=True)
+    q.add_argument('--reason',required=True);q.add_argument('--checkpoint')
+    q=sub.add_parser('finalize');q.add_argument('--reason',required=True)
     q=sub.add_parser('run-until-wait');q.add_argument('--max-steps',type=int,default=20)
     q=sub.add_parser('cancel-prepared');q.add_argument('--effect',required=True);q.add_argument('--reason',required=True)
     q=sub.add_parser('reply');q.add_argument('--question',required=True);q.add_argument('--version',type=int,required=True)
@@ -57,6 +64,19 @@ def main(argv=None):
             if args.command=='status':result=runtime.status()
             elif args.command=='recover':result=runtime.recover()
             elif args.command=='tick':result=controller.tick(args.run)
+            elif args.command=='lab-start':
+                result=runtime.enqueue_lab(args.event,args.evidence)
+            elif args.command=='agent-checkpoint':
+                session=store.get(args.run,'agent_session',args.session)
+                result=runtime.agents.seal_checkpoint(args.session,'checkpoint:'+args.session+':'+str(session['committed_turn']))
+            elif args.command=='agent-rebuild':
+                session=store.get(args.run,'agent_session',args.session)
+                if session['active_turn_id']:
+                    runtime.agents.discard_completed_turn(args.session,args.reason,
+                        'discard-for-rebuild:'+session['active_turn_id'])
+                result=runtime.agents.rebuild_session(args.session,args.reason,'rebuild:'+args.session,
+                    checkpoint_id=args.checkpoint)
+            elif args.command=='finalize':result=runtime.finalize(args.reason)
             elif args.command=='register-plan':
                 plan=read(args.plan)
                 result=register_task_plan(store,args.run,plan,key='task-plan:'+plan['task_id'])
@@ -75,8 +95,9 @@ def main(argv=None):
                 if config.get('execution_mode') not in {'live','role_recall'}:
                     raise ValueError('Real model execution needs a prospectively configured live or role_recall run')
                 executor=CodexExecutor(store.root/'calls')
-                if args.command=='meta-step':
-                    result=runtime.run_meta(args.work,executor,config['model_reservation'])
+                if args.command in {'meta-step','lab-step'}:
+                    run_step=runtime.run_lab if args.command=='lab-step' else runtime.run_meta
+                    result=run_step(args.work,executor,config['model_reservation'])
                 else:
                     result=runtime.run_until_wait(executor,config['model_reservation'],max_steps=args.max_steps)
         print(json.dumps(result,ensure_ascii=False,allow_nan=False,indent=2))

@@ -1,8 +1,9 @@
 <!doctype html>
 <html lang="zh-CN">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="RSI-Lab 完整系统设计 v2.1：Meta 主动检测、开源 Codex harness 自动修改、编译验收、版本切换、续跑与失败回退；Scientific Memory 的科研对象、来源、检索、修订与行动闭环。">
-<meta name="html-revision" content="2026-11-08-public-code-target-spec">
+<meta name="description" content="RSI-Lab 完整系统设计 v2.1：Meta 主动检测、开源 Codex harness 自动修改、编译验收、版本切换、续跑与失败回退；Lab/Meta 独立持久会话、工作记忆、逐事件日志与共享 Scientific Memory。">
+<meta name="base-source-sha256" content="24421b77edb5ee39c9dd19d26d161923c309e9b8ca4a0d3fafcbd4dd810990a9">
+<meta name="html-revision" content="2026-11-09-persistent-agent-sessions">
 <title>RSI-Lab 完整系统设计 v2.1</title><style>
 :root{--bg:#f5f5ef;--paper:#fffefa;--ink:#202f2c;--muted:#68746e;--line:#dce3dc;--accent:#155a4d;--soft:#eaf1ec;--side:286px}
 *{box-sizing:border-box}html{scroll-behavior:smooth;scroll-padding-top:32px}body{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Noto Sans CJK SC","Microsoft YaHei",sans-serif;font-size:15px;line-height:1.9}a{color:var(--accent);text-underline-offset:3px}button{font:inherit;cursor:pointer}.skip{position:absolute;left:-10000px}.skip:focus{left:20px;top:10px;z-index:20;background:white;padding:10px}
@@ -115,6 +116,10 @@ code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } /* Warni
 <li><a class="toc-level-4 toc-highlight" href="#参考原型与本项目扩展">7.6 参考原型与本项目扩展</a></li>
 <li><a class="toc-level-3" href="#等待与容量处置">8. 等待与容量处置</a></li>
 <li><a class="toc-level-3" href="#上下文证据与-ack">9. 上下文、证据与 ACK</a></li>
+<li><a class="toc-level-4 toc-highlight" href="#persistent-agent-sessions">9.1 Lab / Meta 独立持久会话</a></li>
+<li><a class="toc-level-4" href="#agent-working-memory">9.2 独立工作记忆与共享边界</a></li>
+<li><a class="toc-level-4" href="#execution-journal">9.3 逐事件执行日志</a></li>
+<li><a class="toc-level-4" href="#session-checkpoint-recovery">9.4 检查点与会话恢复</a></li>
 <li><a class="toc-level-3" href="#lab-执行和领域批次">10. Lab 执行和领域批次</a></li>
 <li><a class="toc-level-4" href="#通用步骤契约">10.1 通用步骤契约</a></li>
 <li><a class="toc-level-4" href="#化合物工作流示例">10.2 化合物工作流示例</a></li>
@@ -151,13 +156,14 @@ code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } /* Warni
 </ul></nav>
 <div class="actions"><button class="mobile-nav" type="button" aria-expanded="false">展开目录</button><button type="button" id="print">打印 / PDF</button><a href="#content">回到顶部 ↑</a></div>
 </aside>
-<main class="page" id="content"><article class="document"><div class="eyebrow">ARCHITECTURE &amp; ORCHESTRATION <span class="badge">设计规格 · 待实现</span></div><div class="jump-links" aria-label="重点章节"><a href="#开源-codex-harness-的自动修改与版本切换">Codex harness 自修改 §11.6</a><a href="#主动发现的责任与唤醒">主动检测 §7.1–7.6</a><a href="#统一-changeengine修复验收发布续跑">ChangeEngine：修复与续跑</a><a href="#可选知识和记忆">Scientific Memory §10.3</a><a href="#验收与故障注入">验收与故障注入</a></div><h1 id="rsi-lab-系统设计通用内核领域包计算任务与运行中修复">RSI-Lab 系统设计：通用内核、领域包、计算任务与运行中修复</h1>
-<p>版本：2.1 · 日期：2026-11-08 · 状态：目标设计规格，待逐项实现与验证。当前代码边界见 <a href="rsi-lab-core.md">核心实现说明</a>；本文不表示全部能力已交付。</p>
+<main class="page" id="content"><article class="document"><div class="eyebrow">ARCHITECTURE &amp; ORCHESTRATION <span class="badge">设计规格 · 待实现</span></div><div class="jump-links" aria-label="重点章节"><a href="#开源-codex-harness-的自动修改与版本切换">Codex harness 自修改 §11.6</a><a href="#主动发现的责任与唤醒">主动检测 §7.1–7.6</a><a href="#统一-changeengine修复验收发布续跑">ChangeEngine：修复与续跑</a><a href="#可选知识和记忆">Scientific Memory §10.3</a><a href="#persistent-agent-sessions">持久会话与工作记忆 §9</a><a href="#验收与故障注入">验收与故障注入</a></div><h1 id="rsi-lab-系统设计通用内核领域包计算任务与运行中修复">RSI-Lab 系统设计：通用内核、领域包、计算任务与运行中修复</h1>
+<p>版本：2.1 · 日期：2026-11-09 · 状态：当前设计规格，待实现与验证。</p>
 <p>本版将系统拆为 <code>rsi_lab</code>、<code>rsi_domains</code> 与计算任务 <code>task</code>，并将 Meta 的主路径改为任务进行中的发现、调查、修复、小范围验收、发布与续跑。预先授权范围和预算内的操作自主完成；冻结科学要求保持不变。P4 验收实际修复和成功继续任务，独立收益比较是后续可选研究。</p>
 <p>v2.1 明确 Meta 对发现问题负责：独立读取运行事实，在没有 Lab 报错、没有规则告警时也持续巡检；主动追查目标偏离、静默数据错误和能力缺口，自行取证并跟进处理。周期巡检、停滞诊断、覆盖记录和反证要求见 §7.1–7.6。检测主动性以提前发现和调查闭环衡量，不以告警数或修改数衡量。</p>
 <p>v2.1 同时将<strong>开源 Codex harness 的源码修复纳入主闭环</strong>：Meta 可自主发现执行层问题，在 task 预授权范围内修改指定 fork，编译并验收候选，切换本运行使用的 Codex 版本后继续任务；失败自动撤销候选或回退。该能力使用同一 ChangeEngine，具体绑定、进程切换与恢复契约见 §11.6；它是必须实现和验证的目标能力，当前文档更新不表示运行代码已具备此能力。</p>
 <p>本文取代 v1.0 的默认配对实验发布门槛、T3 整体禁用及只在下一运行启用的限制；保留不可变事实、精确交付、预算守恒、外部效果恢复和版本追踪要求。本文是完整的目标设计，不报告新运行结果，也不表示代码已按此重构。本发布副本仅包含目标设计，不分发既有实验记录、结果快照或原始模型对话。</p>
 <p><strong>Scientific Memory 修订：</strong>新增以研究问题组织的持久科研状态，连接来源、判断、研究行动、方法经验与决定。按问题读取支持/反证与未结工作，来源变化和新增证据均触发有界复核；观察卡与引用统一交付。主契约见 <a href="#可选知识和记忆">§10.3</a>，实体、API、预算、迁移和 SM01–SM20 验收同步更新；通用机制不依赖化合物候选或单一评分。</p>
+<p><strong>2026-11-09 会话与执行记忆修订：</strong>Lab 与 Meta 各自维护独立持久会话，正常续跑不再每轮使用 <code>--ephemeral</code>。增加可跨会话恢复的 AgentWorkingMemory、逐事件持久执行日志和受信检查点；共享 Scientific Memory 仍是经过来源与版本约束的科研状态。§3、§6、§9、§11、§13–17 同步规定所有权、有效上下文、交付认证、崩溃边界及 PS01–PS12 验收。这是目标方案；当前实现范围与运行入口见 <a href="persistent-agents.md">持久会话实现说明</a>。目标验收不等于已全部通过，本文不分发历史运行样本。</p>
 <h2 id="第一部分三层解耦">第一部分：三层解耦</h2>
 <h3 id="a.1-三层的责任与依赖方向">A.1 三层的责任与依赖方向</h3>
 <p>系统拆为通用内核 <code>rsi_lab</code>、领域包 <code>rsi_domains</code> 和计算任务 <code>task</code>。Lab 与 Meta 是内核承载的执行角色；领域包提供科学能力；task 指定这一次要完成什么、用哪些输入、满足哪些条件。</p>
@@ -313,7 +319,9 @@ code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } /* Warni
     runtime/                # 能力加载、状态、调度、预算、等待、外部效果与恢复
       agent_runtimes/       # CodexRuntimeAdapter、版本解析、CLI/app-server 协议适配
     results/                # 产物来源、依赖图、有效性、复用与选择性重算
-    context/                # 有界工作视图、证据查询、页面与精确回执
+    context/                # 完整有效上下文、证据查询、页面与精确回执
+    agent_state/            # 各 agent 独立工作记忆、检查点、显式交接；复用 store
+    journal/                # 进程外逐事件持久采集、完整性检查与重放游标
     memory/                 # 科研对象、版本关系、增量匹配、复核与归纳；复用 store/runtime
     meta/                   # 发现、调查、构建变更提议与证据关联
     changes/                # 隔离构建、局部验收、发布、恢复与续跑
@@ -342,7 +350,11 @@ runs/&lt;run_id&gt;/
   events/                   # 权威追加事件
   artifacts/                # 不可变原始输出与派生结果
   changes/                  # 修复差异、验收证据、发布与恢复记录
-  checkpoints/              # 恢复入口；不替代事件与原始证据</code></pre>
+  agents/&lt;agent_instance_id&gt;/
+    sessions/&lt;session_id&gt;/   # 原生持久会话与隔离 scratch；不可直接写共享科研状态
+    working_memory/         # 版本化工作记忆的导出视图；权威 revision/head 在 store
+  execution_journal/        # 按 Effect/attempt 归档的原始事件分段与持久水位
+  checkpoints/              # 跨账本/日志/工作记忆/会话的受信恢复清单</code></pre>
 <p>领域包可单独发布；task 可在兼容的内核版本上复用。内核、Codex harness、领域包、task、科学协议和运行策略分别版本化，不能只留一个含义不明的“系统版本”。supervisor 的恢复入口和发布权限独立于候选 Codex 进程，不属于本轮可修改产物。</p>
 <h3 id="a.3-task调度工作和外部执行的区别">A.3 <code>task</code>、调度工作和外部执行的区别</h3>
 <p><code>task</code> 是用户交付给系统的科学计算任务。一个 task 可以包含多个阶段、多轮模型决策和许多计算，不等于一次 API 调用或一次候选评分。</p>
@@ -928,10 +940,12 @@ runs/&lt;run_id&gt;/
 </table>
 <p><strong>自主权限默认契约：</strong> 只要路径/能力/操作类型已授权、资源足够且冻结要求保持，Meta 可连续调查、修改、验收、发布和续跑，无需逐次请用户确认。优先查任务、配置、证据和已有用户决定；仅在缺少决定下一步所必需且无法推导的用户信息时提问。范围外修改、目标变更或预算增加视作缺少相应授权，不自行推定；暂停依赖该决定的步骤，其他合法工作继续。</p>
 <p>所有模型命令校验 schema、来源 effect、作用域、版本和引用权限。非法命令留档并返回具体原因。Meta 可以修改允许范围内的内核实现，但不能在同一变更中修改约束/验收判据来批准自己的补丁；冻结判据和发布执行器从任务固定的可信版本读取。</p>
+<p>Lab 和 Meta 各自持有独立 AgentSession 与 AgentWorkingMemory，按 <code>task/run/branch/agent_instance</code> 隔离；两者不续接彼此的原生 thread。Inspector 与 Worker 默认是同一 Meta agent 的串行模式；并行时必须登记不同 agent/session，不允许并发写同一会话。会话保留不扩大本轮 Work 的动作权限，跨角色协作走受信 Handoff、Issue、Work 和科研提议；具体边界见 <a href="#persistent-agent-sessions">§9.1–9.4</a>。</p>
 <h3 id="账本实体与版本">3. 账本、实体与版本</h3>
 <h4 id="存储契约">3.1 存储契约</h4>
 <p>初版采用单写者 SQLite 短事务、外键、提交持久化和版本 CAS。大输入/输出先写内容寻址 blob 并持久化，再提交引用。事件、受影响投影、Work 状态、预算变化和 outbox 意图在同一事务提交；未引用的孤立 blob 可离线回收。</p>
 <p>共同字段为 <code>id, task_id, run_id, branch_id, version, created_seq, updated_seq</code>；事件包含 <code>event_id, commit_seq, type, entity_id, entity_version, causation_id, idempotency_key, payload_ref, config_hash</code>。<code>(branch_id, idempotency_key)</code> 唯一。排序使用提交序号，墙钟用于归档和已持久化的 deadline。</p>
+<p>原生会话文件与原始运行事件属于证据来源，不能替代上述权威事务。JournalWriter 将外部可观察事件逐条落盘，控制器按持久水位幂等摄取；两种存储间依靠不可变引用与重放游标衔接，不假定跨文件/数据库原子提交。工作记忆 head、session turn 提交状态与对应后继 Work 在控制器的 turn_commit 事务中保持一致；每个子 Effect 的结果与费用另按自己的 TX3 提交。</p>
 <h4 id="核心实体">3.2 核心实体</h4>
 <table>
 <colgroup>
@@ -967,6 +981,12 @@ runs/&lt;run_id&gt;/
 <td>change/release、目标角色、旧/新绑定、checkpoint、generation、进程句柄、健康证据、恢复义务</td>
 <td><code>prepared, quiescing, starting, ready, active, restoring, restored, recovery_required</code>；目标指针与进程健康分别取证</td>
 </tr>
+<tr><td>AgentSession</td><td>owner(task/run/branch/agent_instance/role)、session_id、provider_thread_id、runtime_binding/generation、turn_seq、lease/fencing_token、durable_prefix、checkpoint/compaction refs</td><td>creating / idle / in_turn / quiescing / recovery_required / superseded / closed；一个会话最多一个写入 turn，旧会话只读保留</td></tr>
+<tr><td>AgentTurn</td><td>session/turn_seq、owner Work、父 lease/fence、request_seq、子 Effect refs、terminal_ref、commit_key</td><td>prepared / running / waiting / terminal_observed / committed / recovery_required；协调生命周期，不占包住子请求的外部许可</td></tr>
+<tr><td>AgentWorkingMemoryRevision</td><td>owner、parent/version、source_call/effect、计划与理由摘要、尝试/未决项、next_step、精确引用、ledger_snapshot、review flags</td><td>独立于 session 的追加修订，head CAS；是工作状态，不能直接认证科学结论或已执行事实</td></tr>
+<tr><td>ExecutionJournal / JournalCursor</td><td>effect/attempt、agent/session/turn、runtime generation、collector_seq、provider_event_id/cursor、event_kind、raw_ref/hash、prev_hash、durable_seq、applied_seq、gap 状态</td><td>原始事件只追加；持久采集水位与账本已应用水位分开，完整性不以 exit code 代替</td></tr>
+<tr><td>AgentCheckpoint</td><td>owner/session、sealed turn boundary、journal durable/applied 水位、ledger_seq、working_memory_revision、runtime/config/schema、compaction 与待恢复义务引用</td><td>immutable manifest/hash；仅在一致边界 ready，不复制预算或重执行历史动作</td></tr>
+<tr><td>AgentHandoff</td><td>producer/recipient、精确工作记忆摘录或产物引用、scope/access、purpose、expected versions、source call、受信提议/接受回执</td><td>proposed / accepted / rejected / consumed；接受后建立目标 Work/Request，不复制整段私人历史，不转授旧 call 读权</td></tr>
 <tr>
 <td>Step</td>
 <td>输入/结果依赖、执行能力、版本、resume point、影响范围</td>
@@ -999,7 +1019,7 @@ runs/&lt;run_id&gt;/
 </tr>
 <tr>
 <td>Effect</td>
-<td>work_id、种类、输入/packet hash、读取快照、memory_binding_hash、幂等键、provider handle、预约和结果；模型调用另绑 runtime/generation/session</td>
+<td>work_id、种类、输入/packet hash、读取快照、memory_binding_hash、幂等键、provider handle、预约和结果；模型调用另绑 runtime/generation/session/turn、fence、工作记忆 revision、checkpoint/compaction、有效上下文 hash 与日志 attempt</td>
 <td>prepared / dispatching / succeeded / failed_definite / unknown / cancelled；TX2 是最终派发准入边界</td>
 </tr>
 <tr>
@@ -1124,6 +1144,7 @@ runs/&lt;run_id&gt;/
 <span id="cb2-40"><a href="#cb2-40" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">enabled</span><span class="kw">:</span><span class="at"> </span><span class="ch">false</span></span>
 <span id="cb2-41"><a href="#cb2-41" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">budget</span><span class="kw">:</span><span class="at"> </span><span class="dv">0</span></span></code></pre></div>
 <p>必填任务配置：<code>domain_package/version, workflow/version, task_spec/hash, frozen_requirements/hash, protocol/hash, model_routes, tokenizer/version, allowed_operations, allowed_write_scopes, dependency_policy, compute/token/tool/wall_time limits, repair_allowance, recovery_reserve, checkpoint_policy, registered_acceptance_checks</code>。科学阈值必须来自明确 task 规范；缺少关键值就定位为用户信息缺口，不由 Meta 猜测。<code>scoped_code_patch: true</code> 只启用授权内的受控修复，不赋予任意路径写权限。</p>
+<p>会话配置固定 <code>session_policy={lab:persistent, meta:persistent}</code>，另登记每角色有效上下文上限、compaction/checkpoint 策略、工作记忆 schema/选择规则、journal 持久性与保留策略、session lease 和恢复 deadline。ephemeral 仅可用于显式登记的一次性检查/验收子任务，不继承 Lab/Meta 会话身份，不作为主角色的隐式降级方式。日志、压缩和工作记忆维护均计入共同存储/计算/模型预算，不能因其名为“内部操作”免费执行。</p>
 <p>Codex 自修改能力还必须绑定 <code>codex_runtime_spec_ref/hash, initial_runtime_bindings_by_role, trusted_supervisor_ref/hash, known_good_runtime_bindings, runtime_activation_policy</code>。后者登记静止/启动/健康检查 deadline、启动和回退次数上限、generation fencing、会话恢复方式和回退目标；构建 CPU/内存/磁盘/墙钟及验证 token/工具费用均受总预算约束。启动校验并报告该能力为 ready、blocked 或 unsupported；缺少源码、工具链、授权或恢复执行器时不能只凭布尔开关显示“可自动修改”。缺口不阻塞无依赖的普通 Lab 工作。</p>
 <p>进度单位由任务工作流注册为完成 Step 或逻辑 Batch；一次子调用、同批修补、重复回调不能凭空增加进度或产生额外 Meta credit。登记完成判据和时钟推进规则必须可重放。</p>
 <p>主动巡检在启动时安排一次，此后每 4 个进度单位或距上次巡检 300 秒先到者登记到期；有未检查的任务事实才发起常规模型巡检。时间到期可以申请一次巡检机会，不增发 optional credit 或总预算；与进度到期合并，令牌仍最多 1。没有新事实但预期进展逾期时使用有界停滞诊断。上述间隔、重试和取证次数是可登记的工程初值，须通过 §17 的活性与成本验收，不能称为已验证的最佳参数。</p>
@@ -1139,9 +1160,9 @@ runs/&lt;run_id&gt;/
 <p>时间使用登记 deadline，不能以调用数近似。模型调用上限可为空，但真实 token、时间和计算额度必须明确。新变更在准入时同时预约验收、必要续跑检查和恢复资源；修复局部预算耗尽则停止该修复、结清效果并撤销候选，释放后任务可用剩余合法预算继续。回滚后仍有原故障时只暂停该依赖，不谎称可以安全继续。</p>
 <p>科学记忆检索、解释复核与归纳从任务执行额度中的登记子预算支付；Meta 对记忆机制的修复使用相应修复额度，已承诺对账遵循恢复预留。所有模型、工具、索引与摘要工作分别记录实际资源，既有调用内处理的解释不重复收费。记忆写入数、摘要数和维护事件不能增加 credit 或重置尝试次数。</p>
 <h3 id="外部效果与崩溃恢复">6. 外部效果与崩溃恢复</h3>
-<p><strong>TX1 准备事务：</strong> 重查 Work、权限、版本、必需依赖与预算；以固定读取快照和实际 runtime/memory binding 构造完整 packet/input blob 及候选交付清单并持久化；提交 Effect(prepared)、Work(leased)、预约和 outbox。此时仅物化内容，不授予实际读取权限或 ACK；提交失败绝不调用外部服务。</p>
-<p><strong>TX2 领取事务：</strong> 在同一短事务内重查 Work、§13 的用途/停止准入规则、权限、当前必需依赖及失效水位、该 Work 实际依赖的活动 runtime/memory 绑定和有效预约；模型调用另查 generation，再 CAS prepared→dispatching 并登记本次准入版本。finalizing 禁止新科研推理，但已登记的必要对账/取消/回退/恢复可按恢复权限与预留准入，不得借此启动新科研工作。检查失败保留原 packet 与来源，取消尚未派发意图并释放确定未消耗的预约，后继 Work 按新快照重建；不能原地替换原 packet。已 dispatching/unknown 的 Effect 不走此取消路径。TX2 提交是派发许可的线性化边界，随后退出事务才执行外部 IO；并发更正若在此之后发生，保留实际调用及费用，在结果提交时重新处理适用性，不盲目重发。</p>
-<p><strong>TX3 结果事务：</strong> 先持久化原始结果/错误，再核对 Effect、provider handle、实际绑定、传输/完成回执和 packet hash；根据受信证据登记实际交付、原生读取权限及页面 ACK。原子登记结果、合法提议或逐项拒绝、后继工作/待处理水位和预约结算；支持检查及记忆提议在提交时再次核对精确依赖版本。调用期间来源已更正的解释可按历史快照保留，但由控制器标记 needs_review，不能作为当前已检查依据；相关后继动作受阻并排入新版本复核。非法/过期解释不丢弃真实结果、已认证交付和费用，也不让一次成功计算重新变成未执行。数据库事务失败从已落盘回执幂等重放。</p>
+<p><strong>TX1 准备事务：</strong> 重查 Work、权限、版本、必需依赖与预算；固定读取快照、实际 runtime/memory binding、agent/session/parent_turn_id、预期 turn_seq/request_seq、工作记忆 revision 及受信历史前缀。父 AgentTurn 在首个请求前幂等准备，不持有外部执行许可；每个真实模型/工具/压缩请求分别创建子 Effect。用同一 <code>build_packet</code> 生成不可变本轮传输包、完整有效上下文清单及候选交付清单，登记日志 attempt；原子提交 Effect(prepared)、Work(leased)、预约和 outbox。有效上下文包含获准保留的历史而不是只计新增 prompt。此时不推进原生会话、不授予实际读取权或 ACK；提交失败绝不调用外部服务。</p>
+<p><strong>TX2 领取事务：</strong> 在同一短事务内重查 Work、§13 的用途/停止准入规则、权限、当前必需依赖及失效水位、该 Work 实际依赖的活动 runtime/memory 绑定和有效预约；模型调用另查 runtime generation、session owner/lease/fencing_token、turn/head/compaction 与 TX1 前缀一致、工作记忆 revision 及 journal 可写性；首个请求在同一事务领取唯一 session turn；同一父 turn 的后续子请求验证并沿用其 lease/fence 与当前 request_seq，不重新领取另一个 turn。再 CAS prepared→dispatching 并登记本次准入版本。finalizing 禁止新科研推理，但已登记的必要对账/取消/回退/恢复可按恢复权限与预留准入，不得借此启动新科研工作。检查失败保留原 packet 与来源，取消尚未派发意图并释放确定未消耗的预约，后继 Work 按新快照重建；不能原地替换原 packet。已 dispatching/unknown 的 Effect 不走此取消路径。TX2 提交是派发许可的线性化边界，随后退出事务才执行外部 IO；并发更正若在此之后发生，保留实际调用及费用，在结果提交时重新处理适用性，不盲目重发。</p>
+<p><strong>TX3 结果事务：</strong> 先确认逐事件日志与终态回执已持久化，再核对 Effect、provider handle、session/turn/fence、实际绑定及传输包和有效上下文 hash；按本次真实有效上下文认证新交付与仍精确保留的来源、原生读取权限及页面 ACK。原子登记该子 Effect 的结果、合法领域提议或逐项拒绝、日志 applied 水位、必要后继步骤/待处理水位和该请求预约结算；工作记忆增量留作来源明确的待提交提议。子请求完成不等于父 turn 完成，不能提前推进 session committed-turn 或释放其写 lease；支持检查及记忆提议在提交时再次核对精确依赖版本。调用期间来源已更正的解释可按历史快照保留，但由控制器标记 needs_review，不能作为当前已检查依据；相关后继动作受阻并排入新版本复核。非法/过期解释不丢弃真实结果、已认证交付和费用，也不让一次成功计算重新变成未执行。数据库事务失败从已落盘回执幂等重放。</p>
 <table>
 <colgroup>
 <col style="width: 50%" />
@@ -1177,6 +1198,8 @@ runs/&lt;run_id&gt;/
 </tbody>
 </table>
 <p>网络超时、断连和进程丢失默认 unknown。只有已知未执行或明确失败才为 failed_definite。若外部服务无查询/幂等能力，明确报告未决，不宣称自动 exactly-once。</p>
+<p>执行完成、格式校验与工作记忆提交分别记录。有可信完成回执但 JSON/命令无效时，仍保存真实交付、费用和会话进展，拒绝无效提议；不把已知完成重新标为 unknown。没有终态或会话尾部未对齐时，保留 Effect 责任并将该会话标为 recovery_required；不得用原 prompt 开一个新 turn 伪装恢复。逐事件日志的缺口及重放规则见 §9.3。</p>
+<p><strong>父 turn 提交：</strong>受信终态已持久、必需子结果已对齐后，控制器执行幂等 <code>commit_agent_turn</code> 短事务，CAS 推进 session committed-turn 与 AgentWorkingMemory head（或无变化/待修复标记），登记后继 Work 并释放会话写 lease。工作记忆与最终科研提议按产生它们的真实请求及其读取清单校验；不合并整个 turn 的历史读权。格式失败仍可提交已完成的原生 turn，并保留旧工作记忆；缺失终态或相依子结果保持 recovery_required。该事务不再次计算子 Effect 费用；下一 turn 必须等它完成。单请求 turn 也遵守同一语义。</p>
 <p>未知任务 effect 保留原许可、身份和费用。只读恢复通道可在独立许可下查询原动作，默认最多三次、退避 5/30/120 秒；不借探测通道重发任务。探测超时且客户端连接已关闭可释放探测许可，但保留未明费用，不递归“查询自己的查询”。本地恢复继续运行；全局唯一任务许可被 unknown 占用时，新外部工作必须等待对账。</p>
 <h3 id="调度与运行中修复">7. 调度与运行中修复</h3>
 <div class="sourceCode" id="cb3"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> control_tick(trigger):</span>
@@ -1373,7 +1396,7 @@ outcome = suspected_problem | no_issue_found | insufficient_evidence | not_appli
 </tr>
 </tbody>
 </table>
-<p>公开原型以消息、规则接纳与 worker 协作为主；本项目增加无告警的成功路径巡检、科学证据语义检查、静默停滞初诊和修复后验证。独立观察、未审阅 backlog 与调查责任归属由本节契约明确；实际实现须分别通过对应验收。</p>
+<p>公开原型以消息、规则接纳与 worker 协作为主；本项目增加无告警的成功路径巡检、科学证据语义检查、静默停滞初诊和修复后验证，并明确独立观察、未审阅 backlog 与调查责任归属。本发布副本不包含既有运行结果。</p>
 <h3 id="等待与容量处置">8. 等待与容量处置</h3>
 <p>Wait 必须绑定具体 dependency_id、已见版本和可查询的生产者。注册类型包括 <code>request_outcome_changed, capacity_signature_changed, issue_evidence_changed, change_outcome_available, continuation_available, protocol_revision_available, scientific_evidence_changed, scientific_result_available, memory_review_due, timer_due</code>；可选研究另提供 replication_finished。已失败/取消生产者立即产生相应处理，不注册永远等成功的 Wait；依赖闭环触发一次处置。</p>
 <p>默认 deadline 为 8 个进度单位或 300 秒先到者；到期先落持久事件。唯一键 <code>(wait_id, wait_epoch, disposition)</code> 保证即时容量阻塞和后续 deadline 共用一次处置。处置准入原子消费 allowance，模型失败也不能重置已尝试事实。相关依赖/容量版本真正变化才能建新 epoch，纯时间和计数增长不能重置。</p>
@@ -1381,7 +1404,8 @@ outcome = suspected_problem | no_issue_found | insufficient_evidence | not_appli
 <p>容量签名包括内容、必需依赖、策略、投影及可用 byte/token，不含无关的全局序号或时间戳。每签名最多自动重规划一次。模型处置包本身也放不下时直接报 packet_unrepresentable；不要继续发超限调用。预算不足保留具体未决对象与可恢复动作，不将 parked 写成已解决。</p>
 <p>每个 Wait / disposition 继承 <code>owner_refs, purpose, actor_binding, budget_account, blocking_scope</code>。Meta 问题按原 close_issue 等命令处置；科研等待仅允许收窄/重规划请求或搁置相关 Work，由 Lab/登记科研处理器处理，最小诊断包不能关闭 ScientificQuestion 或产生支持结论。科学处置 allowance 来自任务执行预算，不要求 Meta token；同 Wait epoch 仍最多一次。计时 deadline 处理等待，没有科学进度时也可到期，不以归纳/复核次数伪造时钟。</p>
 <h3 id="上下文证据与-ack">9. 上下文、证据与 ACK</h3>
-<p>最终 UTF-8 序列化字节与登记 tokenizer 的 token 数都须通过，并预留输出空间。规划与派发使用同一纯构造函数 <code>build_packet</code>，返回 packet/hash 与<strong>候选</strong> delivery manifest，完整 hash 和实际 memory/runtime binding 进入 Effect；禁止检查后追加内容。预览、选中或物化不证明实际交付。实际交付权限与 ACK 仅由 §6 TX3/受信交付对账根据真实回执登记，不能由构造函数或模型自报产生。</p>
+<p>Lab/Meta 默认使用独立持久会话。本轮 <strong>有效上下文</strong> 包括适配器确认仍保留的指令、历史消息/工具结果、压缩摘要、工作记忆选段及新增来源；其 UTF-8 表示与登记 tokenizer 的 token 数都须通过，并预留输出空间。仅计算新 prompt 不合格。无法核验的保留内容或内部开销必须由登记适配契约提供受信边界，否则阻塞该调用并按 §9.4 重建可核验的持久会话。</p>
+<p><code>build_packet</code> 是纯构造函数，输入固定的 session prefix、scope/snapshot、工作记忆与科研选择计划，输出 <code>turn_packet_ref/hash, submitted_input_hash, effective_context_manifest/hash, candidate_delivery_manifest</code>。传输包固定本轮新输入及续接身份；有效上下文清单固定保留项、来源/locator、checkpoint/compaction 和计数，禁止检查后隐式追加或压缩。所有 hash 与实际 memory/runtime binding 进入 Effect；真实请求须由适配器核对。已保留内容不为凑“完整 packet”再重复追加一遍。候选清单不产生读权；实际交付由 §6 TX3/受信对账按本次回执认证。</p>
 <table>
 <colgroup>
 <col style="width: 33%" />
@@ -1398,43 +1422,76 @@ outcome = suspected_problem | no_issue_found | insufficient_evidence | not_appli
 <tbody>
 <tr>
 <td>Lab Worker</td>
-<td>总 packet 80,000 B；初始分配：指令/计划 4,096 B，观察/反馈 48,000 B，原生证据 24,576 B；共享总预算，重分配需验收</td>
+<td>完整有效上下文 80,000 B；初始分配：指令/计划 4,096 B，观察/反馈 48,000 B，原生证据 24,576 B；共享总预算，重分配需验收</td>
 <td>任务/协议/冻结要求、当前动作、未决状态、必要证据依赖</td>
 </tr>
 <tr>
 <td>Inspector</td>
-<td>packet 24,576 B；增量 6,144 B、账本 2,048 B、诊断页最多 8,192 B</td>
+<td>完整有效上下文 24,576 B；新增增量目标 6,144 B、账本 2,048 B、诊断页最多 8,192 B</td>
 <td>冻结目标/要求、检查计划、能力/进展/预算摘要、正常与异常来源、覆盖缺口和已有调查</td>
 </tr>
 <tr>
 <td>Meta Worker</td>
-<td>原生信封 24,576 B；操作包 13,500 B；core 目标 8,000 B；reserve 768 B</td>
+<td>完整有效上下文 24,576 B；本轮操作包 13,500 B；core 目标 8,000 B；reserve 768 B</td>
 <td>义务、版本、问题、验收规则、必要证据</td>
 </tr>
 <tr>
 <td>Disposition</td>
-<td>packet 4,096 B</td>
+<td>本轮处置子包 4,096 B；完整有效上下文仍受所属 Lab/Meta 上限约束</td>
 <td>请求身份、容量、义务和受限动作</td>
 </tr>
 </tbody>
 </table>
-<p>Meta Worker 页预算为 <code>min(page_limit, 13500-core_bytes-768, 24576-core_bytes-native_groups-native_envelope-768)</code>。最小诊断页默认 1,400 B，原生依赖组最多 48；先减少可选完整组，必需闭包仍超限则阻塞。默认是可变工程配置，修改须经过上下文验收；不得通过删掉冻结要求或关键反证使包“放得下”。</p>
+<p>表中角色上限均包含保留历史、工作记忆和完整指令/工具信封；子包限额另行检查，不与历史预算相加增发容量。Meta Worker 新页空间为 <code>min(page_limit, 13500-new_core_bytes-768, 24576-retained_bytes-new_core_bytes-new_native_groups-native_envelope-768)</code>，各项不重复计数且结果不能为负；还须通过 token 门槛。最小诊断页默认 1,400 B，原生依赖组最多 48；先省略可选组，再按已登记策略压缩/重建，必需闭包仍超限则阻塞。Disposition 的小子包只限制本轮处置内容和动作，不宣称模型看不见会话历史。默认配置修改须验收，不得删掉冻结要求或关键反证使包“放得下”。</p>
 <p>上下文修复必须输出保留/省略清单，检查任务要求、义务、必要来源和依赖仍完整；摘要保存 source_range/hash、projection_version、omitted 信息。摘要、索引和工作上下文是可重建视图，不替代原始证据；科研问题、判断、方法与决定是持久版本状态，其历史不能随缓存淘汰而丢弃。精确查重仍用完整索引，不让模型承担不可见全历史的成员测试。</p>
-<p>每页绑定 <code>request_id, page_token, from/to_cursor, content_hash, scope, dependency_manifest</code>。ACK 按 <code>(request_id, page_token)</code> 唯一，并关联已完成调用、实际 packet hash 与受信交付回执；重读可有多次呈现但 cursor 只推进一次。模型输出格式无效不抹去已认证交付，命令拒绝另记；只有派发意图、服务端接收或未知完成状态时，不推断完整交付。页面 ACK 和原生引用分别认证；部分交付不能写成全请求 delivered。原生权限限定到 call、版本和 locator；用于校验提议的 <code>actual_read_manifest</code> 由控制器查询受信记录，不能接受模型提供的清单作为权威。</p>
+<p>每页绑定 <code>request_id, page_token, from/to_cursor, content_hash, scope, dependency_manifest</code>。ACK 按 <code>(request_id, page_token)</code> 唯一，并关联已完成调用、传输包/有效上下文 hash 与受信交付回执；新发或保留重读可有多次呈现，但 cursor 只推进一次。模型输出格式无效不抹去已认证交付，命令拒绝另记；只有派发意图、服务端接收或未知完成状态时，不推断完整交付。页面 ACK 和原生引用分别认证；部分交付不能写成全请求 delivered。原生权限限定到 call、版本和 locator。本次受信证明仍在有效上下文中的精确原文可认证为 <code>retained_exact</code>，新发材料为 <code>new_delivery</code>；旧 ACK、session_id 或摘要本身均不转授权限。用于校验提议的 <code>actual_read_manifest</code> 由控制器查询受信记录，不能接受模型提供的清单作为权威。</p>
 <p>Inspector→Meta Worker 交接重新算容量，原未确认页保持不变；不因消费者改变删回执，也不自动授权另一调用引用。记忆判断追加支持/反证、适用协议和来源；依赖修订后标记 needs_review，不能继续静默引用失效结论。</p>
-<p>Scientific Memory 的检索结果是 <code>build_packet</code> 的输入，最终只物化一个完整 packet，实际派发后按受信回执认证，不在检查后追加另一份记忆。观察卡的内容、条件和精确引用来自同一原生证据：完整 record 与字段投影使用不同 locator，投影另存规则版本与 source manifest；实际交付哪部分只认证哪部分。工作上下文优先恢复未结工作、相关对照/反证和失效提示，选择策略及省略原因一并留档。</p>
-<p><strong>Agent 局部上下文与共享数据的边界。</strong>角色、会话、数据作者与访问范围是不同维度。Lab / Meta 是职责角色；同一角色可以有多次调用或多个实例。记录由某个 agent 产生，不等于只供该 agent 使用；位于共享数据库，也不等于自动进入所有 agent 的上下文。</p>
+<p>Scientific Memory 的检索结果与本 agent 的工作记忆是同一次 <code>build_packet</code> 的输入，统一产生本轮传输包和完整有效上下文清单，实际派发后按受信回执认证，不在检查后追加另一份记忆。观察卡的内容、条件和精确引用来自同一原生证据：完整 record 与字段投影使用不同 locator，投影另存规则版本与 source manifest；实际交付哪部分只认证哪部分。工作上下文优先恢复未结工作、相关对照/反证和失效提示，选择策略及省略原因一并留档。</p>
+<h4 id="persistent-agent-sessions">9.1 Lab / Meta 独立持久会话</h4>
+<p>正常运行中，Lab 与 Meta 分别创建并持续使用自己的原生会话，绑定 <code>task_id/run_id/branch_id/agent_instance_id/role</code>。<code>agent_instance_id</code> 是逻辑工作者身份，<code>session_id/provider_thread_id</code> 是一次可替换的会话身份，<code>turn_id/turn_seq</code> 标识原生协调回合，<code>request_id/call_id/child_effect_id</code> 标识其中每次真实外部请求；进程重启不等于新 agent，会话重建也不重置工作记忆或预算。支持经过验收的 <code>exec resume</code> 或持久 app-server thread，由适配器提供确切续接/枚举/压缩/恢复契约。正常 Lab/Meta 不使用 <code>--ephemeral</code>；一次性检查子任务必须显式登记并按自身身份归档。</p>
+<p>Lab 会话延续研究计划和执行上下文；Meta 会话延续巡检、取证、问题调查及修复。Inspector/Worker 默认串行使用同一 Meta 会话，每个 turn 的模式、owner、允许命令和预算由当前 Work 决定，历史角色提示不能扩大权限；Inspector 的“独立”指独立于 Lab 的发现责任。若需要并发或隔离评审，登记多个 Meta agent，各有会话、工作记忆和配额；不得并发 resume 同一 thread，也不得让 Lab 续接 Meta thread。</p>
+<p>每个 session 同时最多一个活动 turn，领取使用持久 lease 与 fencing_token；仅租约过期不足以证明旧调用结束。supervisor 必须隔离旧写入者并对账原 turn，旧代际迟到输出仍归档计费，但不得驱动新动作或覆盖当前工作记忆。等待期间不长期占用模型/工具执行许可；父 turn 与每个真实子请求按 §11.6 分开调度和计费。</p>
+<p>一个原生 turn 可包含多次模型请求、工具往返、重试和压缩；子请求沿用父 turn 的会话 fence，但各有预算、Effect 和不可变有效上下文清单。工具结果追加或压缩后，下一真实模型请求必须重新构建并核验当时的完整上下文、权限、来源新鲜度和容量，不能复用首个请求的 hash。交付按 request/call 认证，最终提议仅使用产生它的请求之 <code>actual_read_manifest</code>。普通会话接管更新本 session 的 lease epoch/process generation；仅发布/回退更新目标 runtime 绑定的 generation，重启一个 Meta 实例不隐式撤销同角色其他实例。</p>
+<p>持久会话保留历史，不证明历史材料仍准确或仍获准。每轮重查来源版本、授权及 dirty 水位；更正内容以显式失效/替代记录进入当前上下文，旧材料仅作标注的历史。必要依据必须刷新，不能靠摘要掩盖已知反证；权限收窄后必须先裁剪/重建并证明旧受限内容不在有效上下文，不能仅追加“不要使用”的提示。压缩固定前后 manifest、方法/模型版本、源范围和省略项；丢失精确原文后不再保留其原文读权。</p>
+<h4 id="agent-working-memory">9.2 独立工作记忆与共享边界</h4>
+<p>角色、作者、会话归属和访问范围分别记录。<strong>AgentWorkingMemory 独立于原生会话文件持久化</strong>，其 owner 是 task/run/branch/agent instance；会话更换只更新关联。它记录“这个 agent 正在做什么、下一步如何继续”，Scientific Memory 记录“任务中有哪些可引用的科研状态”。只有会话里存在、没有显式保存的工作状态不能作为可靠恢复依据。</p>
 <table>
 <thead><tr><th>数据层</th><th>保存内容与归属</th><th>读取、写入和恢复边界</th></tr></thead>
 <tbody>
-<tr><td>Agent 局部会话 / 工作草稿</td><td>对话历史、局部计划、压缩摘要、scratch 和会话检查点；按 run / branch / agent instance / session 归属</td><td>用于继续该 agent 的工作。影响他人调度、恢复或科学判断的义务与结论必须经控制器显式登记；局部草稿不能直接覆盖共享事实</td></tr>
-<tr><td>共享运行账本与原始产物</td><td>Work、Effect、Request、交付回执、工具输入输出、预算和恢复状态</td><td>控制器通过事务和受信结果入口写入；为不同角色提供授权视图。恢复与去重依据持久账本，不能只依赖会话摘要</td></tr>
-<tr><td>共享 Scientific Memory</td><td>有作用域和版本的科研问题、证据、判断、研究行动、方法经验与决定</td><td>共享范围由 task / run / branch 和访问规则确定。agent 提交提议，控制器检查来源、实际交付和版本；跨任务复用另走许可版本包</td></tr>
-<tr><td>本次调用的 context packet</td><td>从共享数据及必要局部状态选择的工作视图，按 call / Effect 归档</td><td>保存快照、选择策略、内容 hash、来源与实际交付。归档用于审计；文件存在或上轮读过，不表示下轮自动看见</td></tr>
-</tbody>
-</table>
-<p>实现时分别记录生产者 <code>agent_instance_id / role / call_id</code>、局部状态所属 <code>session_id</code> 和受信作用域 <code>task_id / run_id / branch_id / access_class</code>；这些是目标元数据约定，不表示旧存储均已具备。按角色选取不同 packet 不等于角色级硬隔离。目录名、role 标签或单写者锁都不能阻止具有任意文件/SQL 权限的进程；模型端仅暴露获准的读取与提议接口，共享写入口由控制器掌握。部署若要求 agent 间保密，还须限制实际工具能力、文件可见范围或服务访问权限。</p>
-<p><strong>两种上下文模式。</strong>初版可采用每次显式重建 packet 的无持久会话调用；连续性来自共享记录。若启用原生持续会话，本次有效上下文必须包含新输入以及仍保留的历史、摘要和工具结果，不能只对新增 prompt 计数或记来源。适配器须绑定 session / checkpoint / compaction 版本，在派发前核对完整有效输入的预算、来源与新鲜度；实际交付仍仅由 §6 TX3 / 受信交付对账根据本次真实回执登记，不能由会话保留或输入物化直接认证。历史摘要不授予原文读取权。无法核验保留内容时，从共享状态和必要检查点重建新会话。单个会话丢失不能使已登记实验、预算或未决 Effect 丢失，也不能触发已完成副作用重做。</p>
+<tr><td>原生持久会话与 scratch</td><td>各 agent 的对话历史、工具消息、运行时摘要与会话文件</td><td>由所属 runtime 续接；运行时文件不是科研权威状态。scratch 中有恢复价值的内容必须登记为有 hash 的产物/工作记忆；不能依赖临时文件存在</td></tr>
+<tr><td>AgentWorkingMemory</td><td>Lab 与 Meta 各自的当前目标引用、局部计划、已尝试步骤、选择/排除理由摘要、暂定假设、未决问题、next_step、证据/Work/Effect 引用及失效标记</td><td>模型提出增量，控制器校验并追加版本、CAS 更新 head；只允许 owner 的工作接口写入。草稿和假设保持 unverified，不自签已执行、已验收或科学支持</td></tr>
+<tr><td>逐事件执行日志</td><td>每次 attempt 的输入、可观察事件、工具往返、输出、压缩/恢复事件、错误、退出与用量</td><td>受信 JournalWriter 追加，agent 无权改写。授权的 Meta Inspector 可读相关 Lab 审计切片；不因此获得整个私人工作区。日志仅证明接口观察到什么，不证明科学判断正确</td></tr>
+<tr><td>共享运行账本与原始产物</td><td>Work、Effect、Request、交付回执、工具输入输出、预算和恢复责任</td><td>控制器事务与受信结果入口写入；恢复、去重及已执行状态以账本/回执为准。工作记忆与之冲突时保留草稿冲突并重新规划，不能覆写账本</td></tr>
+<tr><td>共享 Scientific Memory</td><td>有 scope、来源和版本的 Question、Evidence、Claim、Investigation、MethodExperience、Decision</td><td>经过授权提议、精确来源与实际读取校验后登记；支持检查另行认证。局部摘要、会话历史或 Handoff 被接受不自动升级为科研事实</td></tr>
+<tr><td>本次有效上下文</td><td>本轮新输入和受信确认保留的历史/摘要/工具消息/工作记忆选段，按 call/Effect 归档 manifest</td><td>同时检查容量、权限与新鲜度；可回查、可恢复不等于本轮已可见，本轮可见也不等于已被推理实际使用</td></tr>
+</tbody></table>
+<pre class="text"><code>AgentWorkingMemoryRevision {
+  owner: {task_id, run_id, branch_id, agent_instance_id, role},
+  revision, parent_ref, source_call_id, source_effect_id,
+  ledger_snapshot_seq, context_manifest_hash, schema_version,
+  goal_refs, plan_items, attempted_steps, rationale_summaries,
+  tentative_hypotheses, open_questions, next_step,
+  evidence_refs, work_refs, effect_refs, artifact_refs,
+  dependency_versions, review_flags, handoff_refs
+}</code></pre>
+<p>修订追加且保留 supersedes/理由，原版本可审计；允许空增量，不要求每轮编造经验。合法工作记忆增量先绑定来源子请求的持久结果，并在 §6 的父 turn_commit 中与后继 Work 和已提交 turn 原子绑定；格式非法则保留原 head，登记 <code>working_memory_update_rejected</code> 或 <code>working_memory_repair_pending</code>，不得虚构缺失状态。影响其他角色的待办、外部效果和资源责任必须登记共享 Work/Wait/Effect，不能只藏在私有 next_step 中。依赖变更传播至相关工作记忆条目，读/用前复检；这些条目的失效不能自动删除科研历史。</p>
+<p>跨角色协作走显式 <code>AgentHandoff</code>：生产者提出最小必要摘录、来源和用途，控制器检查 recipient/scope/版本后创建目标 Work/Request，接收方按本次有效上下文获得引用权限。移交待办以共享 Work 的稳定身份去重，不因摘录一份工作记忆产生第二次执行。科研内容通过 <code>propose_memory_revision</code> 或科研结果登记进入共享 Scientific Memory，记录来源工作记忆 revision/call，但重新验证证据；Meta 发现解释疑点仍转 Lab 科研复核，不能通过 Handoff 绕过支持检查。</p>
+<p>“独立”首先是所有权、上下文选择与写入边界，不自动承诺操作系统级保密。控制器可以为恢复审计读取所需记录，Meta Inspector 仅获 task 授权的日志/产物切片；模型端不能任意读取另一 agent 的会话目录或 SQL。若要求保密，须由服务鉴权、文件权限和工具可见范围实际执行。角色、session、日志和工作记忆的 access_class 不得因进入共享数据库而被忽略。</p>
+<h4 id="execution-journal">9.3 逐事件执行日志</h4>
+<p>由独立于模型及其可修改 runtime 的受信 JournalWriter 持续采集，而非等待整个调用结束才写文件。派发前持久化输入、schema、实际 binary/config、session/turn、Effect 和预期前缀；每个收到的完整事件帧先追加原始 bytes/blob、校验 hash 链并 <code>fsync</code>（或等价持久提交），再发布 <code>durable_seq</code> 供消费者使用。stdout/stderr 的不完整或非法帧也保留为原始片段，解析失败另记，不能悄悄丢行。大事件可用分块 blob，但完整记录引用只能在所有块持久后生效。</p>
+<p>日志至少覆盖 turn/request 起止、用户/系统输入、工具请求与结果、模型可见输出、接口暴露的 reasoning 摘要/事件、压缩前后清单、恢复/分叉、错误、超时、取消、退出和 usage；缺少某类可观察能力须声明，不声称保存模型未暴露的完整内部推理。每条绑定 <code>agent/session/turn/effect/attempt/runtime_generation, collector_seq, provider_event_id/cursor?, kind, raw_ref/hash, prev_hash</code>；墙钟仅辅助审计，排序依靠登记序号。</p>
+<p>采集日志和控制器事件是两层：<code>durable_seq</code> 表示已持久原始前缀，<code>applied_seq</code> 表示已经事务化应用的前缀。按稳定 provider event ID/cursor 去重派生处理；没有 provider ID 时保留每次接收的独立序号，不仅凭相同文本 hash 删除可能真实重复的事件。结果登记依靠 Effect/result 身份幂等，恢复先重放已持久且未应用前缀；序号缺口/尾帧损坏单列，不自动跳过后声称完整。日志分段封存、保留策略及删除清单可审计，未提交或未对账义务所需日志禁止提前回收。</p>
+<p>逐事件落盘降低丢失窗口，但不能保证收到前或持久提交前的事件绝不丢失。崩溃恢复只能承诺已确认 durable 的前缀；未确定尾部向 provider 按 cursor 补取或显式标记 <code>journal_gap / stream_incomplete</code>。日志写失败/磁盘满时停止该作用域的新派发，不继续产生未留档的后续工具动作；在途动作保留 unknown/费用责任并按能力取消或对账，不能假定外部执行已经停止。没有补取能力时保留缺口并阻塞依赖完整尾部的恢复。</p>
+<p>工具请求只有在原始请求事件持久化、控制器登记子 Effect 并通过权限/预算准入后才可执行；原生工具调度必须接入同一代理，不能仅靠事后日志计费。子请求终态日志持久后，TX3 才提交该请求结果、交付和费用；父 turn 的可信终态及必需子结果对齐后，turn_commit 再提交工作记忆与会话 head。已知完成但格式无效保留终态与原文，不抹去交付；费用、解析状态和科学有效性分别记录。</p>
+<h4 id="session-checkpoint-recovery">9.4 检查点与会话恢复</h4>
+<p>checkpoint 不是模型自写总结。控制器在该 session 的安全 turn 边界封存受信清单：原生 prefix/hash、journal durable/applied 水位、controller ledger_seq、工作记忆 head、compaction、runtime/config/schema、当前 Work 与未决 Effect/Wait。捕获期间防止该 session 新写入；原生快照和 blob 持久后才原子发布 checkpoint_ref。其他角色可继续合法工作，checkpoint 不要求全局所有 unknown 已解决，也不复制第二份预算权威状态。</p>
+<ol>
+<li>先验证日志前缀、账本与 blob，摄取终态回执和未应用事件；保留未决副作用，禁止重放历史 prompt 或工具调用来“恢复记忆”。</li>
+<li>确认旧写入者被 fencing/停止；原生会话、runtime 和前缀可核对时执行 <code>native_compatible</code> 续接，登记新的 process generation，工作记忆沿用现有 owner/head。</li>
+<li>会话损坏、上下文无法核验、权限收窄或版本不兼容时，用受信 checkpoint、当前共享账本、该 agent 的工作记忆和必要原始来源重建<strong>新的持久会话</strong>；登记 <code>supersedes_session / resume_mode / reconstruction_manifest</code>，保留旧日志，不自动改用 ephemeral。状态不足则 recovery_required。</li>
+<li>新调用统一重建有效上下文并重新认证当前来源。确定已完成的实验/工具动作仅引用回执；不知道旧 turn 是否结束时隔离该会话并先对账，不能通过新 session 绕过冲突动作和预算责任。</li>
+</ol>
+<p>无法保证原生持续会话始终保存全部历史，压缩与重建是显式版本事件。审计保留的完整历史、恢复时选择的工作状态和模型当前可见内容分别报告；恢复成功表示任务状态与必要上下文可继续，不承诺重现相同的内部推理或逐字相同输出。</p>
 <h3 id="lab-执行和领域批次">10. Lab 执行和领域批次</h3>
 <h4 id="通用步骤契约">10.1 通用步骤契约</h4>
 <p>Lab 选择已注册能力，控制面检查输入、权限、依赖、版本和预算，再创建 Effect。完成原始计算、解析、分析和科学判断分别建结果节点，避免一个解析器错误让整个计算回滚重跑。task 的完成条件由领域 validator 在当前有效结果上检查；模型报告“完成”只是提议。</p>
@@ -1455,6 +1512,7 @@ outcome = suspected_problem | no_issue_found | insufficient_evidence | not_appli
 Memory：通用科研状态与记忆机制</h4>
 <p>Scientific Memory
 以<strong>研究问题组织记忆，以证据约束判断，以新结果推动修订</strong>，支持实验、计算分析、观察、复现、文献综合与理论推导。它保存研究状态，并为下一步行动重建相关上下文。以下是目标契约。当前仓库中的运行账本与版本化事实不等于本节六类科研对象和完整记忆机制均已实现；功能及科研收益须分别验证。</p>
+<p>本节共享科研状态与 §9.2 的 AgentWorkingMemory 分开：Lab/Meta 的私人计划、调查草稿和理由摘要不会自动成为 Claim/MethodExperience。科研提议须绑定精确来源与本次受信读取记录；记忆对象保留其研究范围和检查状态，不因被某会话反复引用而升级可信度。原始日志可以作为执行/机制诊断证据，若用于科学判断，还须经领域语义与来源检查。</p>
 
 
 <figure class="architecture-diagram memory-diagram"><svg role="img" aria-label="Scientific Memory：证据、科研状态、工作上下文与研究行动闭环" width="384pt" height="522pt"
@@ -1689,7 +1747,7 @@ inconclusive，以及方法、检查者、版本、定位和局限</td>
 按问题构建本次工作上下文</h5>
 <p>一次读取指定
 <code>question_ref, decision_context, scientific_scope, snapshot, role, budget</code>；调用者不能用自行填写的
-scope 扩大权限。选择顺序为：</p>
+scope 扩大权限。选择器另接收当前 agent 的工作记忆 revision 和 session 有效上下文清单，用于定位任务并避免重复传输；局部草稿只提供检索线索，不替代共享来源检查。选择顺序为：</p>
 <ol type="1">
 <li>恢复目标、约束、未结行动、新结果、提交回执和关键失效提示。</li>
 <li>精确查询已有工作、对象、数据/方法版本和显式来源引用。</li>
@@ -1702,9 +1760,8 @@ scope 扩大权限。选择顺序为：</p>
 record 才能认证该 locator；字段投影使用单独版本化的 projection locator
 和 source manifest，展示摘要不能授予全文引用。页面 ACK
 与原生引用继续分别认证，遵循 §9。</p>
-<p>所有内容进入 §9 同一次 <code>build_packet</code> 的字节和 token
-总预算，不能将 memory
-当作检查后的额外附件。记录最终序列化内容/hash、实际交付引用、选中/省略原因、查询与投影版本。语义检索不保证发现尚未关联的所有反证，需独立测量漏检；许可访问、实际交付、显式引用和因果使用分别报告。</p>
+<p>所有内容进入 §9 同一次 <code>build_packet</code> 的完整有效上下文字节和 token
+总预算，不能将 memory 当作检查后的额外附件。已有原文仅在适配器确认本次精确保留后免于重复传输；只有摘要时须重新取得必需原文。记录传输内容/hash、有效上下文清单、按新发/保留区分的实际交付引用、选中/省略原因及查询/投影版本。语义检索不保证发现尚未关联的所有反证，需独立测量漏检；许可访问、实际交付、显式引用和因果使用分别报告。</p>
 <h5 id="scientific-memory-investigation">10.3.5
 研究行动、结果与下一次选择</h5>
 <p>ScientificInvestigation
@@ -1925,6 +1982,7 @@ AcceptanceSpec
 <p>Meta Worker 先区分领域错误、RSI 适配器错误、远端服务失败和 Codex harness 缺陷。只有证据支持修改执行层时，才创建 <code>change_kind=codex_runtime_patch</code>，列出复现输入、目标机制、预期行为、受影响角色/步骤、冻结验收和回退目标。规则可以直接登记提议，但不能跳过定位与准入；同一根因/版本重复告警合并到原 Issue，调查、失败候选和重试共用其预算与次数。</p>
 <p>Codex 内部工具调用必须保留在 RSI 的资源与效果控制范围：科学工具、外部写操作经授权代理/MCP 网关进入内核 Effect 账本，使用稳定的任务/Work/逻辑调用标识去重。候选 runtime 不能获得绕过账本的执行通道；本地编辑、构建和测试也在对应隔离执行器内计费。无法关联或约束的副作用使该 runtime 契约不满足，不得靠 prompt 声称幂等或严格预算。</p>
 <p>每次真实模型请求、自动重试和上下文压缩请求也必须通过登记的调用代理或 runtime 计量接口先预约，再关联子 Effect 并结算；最终一条 turn usage 只能用于核对，不能替代事前准入。无法观测/限制内部请求的 runtime 标为不满足该资源契约。长驻进程、会话和父 agent turn 是协调生命周期，不持有包住子请求的外部执行许可；父预算只转拨、不重复计费，许可按实际模型/工具请求持有和释放。模型返回工具请求后释放本次请求许可，再调度工具，因此单槽配置也能推进完整回合；未知子 Effect 按 §6 保留责任。</p>
+<p>父 AgentTurn/子 Effect 的持久身份、session fence 与提交边界见 §6、§9.1。每个真实模型请求使用当时的独立有效上下文 manifest/hash；工具消息、重试或压缩改变上下文后重新计量与检查，不以初始 turn packet 覆盖后续实际输入。内部调用若无法被观察、准入和关联，适配器不可标为满足该契约。</p>
 <p><strong>c. 隔离修改、真实编译和验收</strong></p>
 <ol type="1">
 <li>固定当前 runtime binding、源码基线、复现材料、AcceptanceSpec、回退产物和兼容检查点；预留构建、验证、必要真实续跑和恢复资源。下载依赖、失败构建和测试调用均归属当前 Change，不重置任务总预算。</li>
@@ -1971,7 +2029,8 @@ AcceptanceSpec
 </table>
 <p>旧进程的生产派发权限在切换时撤销，工具网关按 generation 校验；停止超时或无法确认旧进程是否仍可产生效果时，不启用冲突的新派发。每个 activation 的 deadline、启动/恢复次数和剩余额度必须有界；等待不能无限续租或刷新预算。</p>
 <p><code>runtime_generation</code> 按 run/branch/role 持久单调递增；启动重试和回退到同一旧 binary 也分配新代际，不能恢复旧 generation。工具/模型代理和控制面共同校验该代际，防止旧进程的迟到命令在回退后重新获得权限；旧事实的摄取仍使用原 Effect 身份和来源。</p>
-<p>会话兼容采用明确的 <code>resume_mode=native_compatible | validated_migration | reconstruct_from_checkpoint</code>。原生恢复须有兼容测试；迁移在副本上执行并保留旧状态；不兼容时从 RSI 外部证据、任务状态和检查点构造新会话，保留必要约束、引用与未决义务，并重新认证实际交付。旧回执保留，但不能冒充新会话已读取材料；不重放已执行的模型/工具副作用。恢复材料不足则 blocked，不能静默丢失上下文后宣布续跑。</p>
+<p>会话兼容采用明确的 <code>resume_mode=native_compatible | validated_migration | reconstruct_from_checkpoint</code>。原生恢复须有兼容测试；迁移在副本上执行并保留旧状态；不兼容时从 RSI 外部证据、任务状态、目标 agent 的工作记忆和受信检查点构造新持久会话，保留必要约束、引用与未决义务，并重新认证本次有效上下文。旧回执保留，但不能冒充新会话已读取材料；不重放已执行的模型/工具副作用。恢复材料不足则 blocked，不能静默丢失上下文后宣布续跑。</p>
+<p>兼容检查同时覆盖 session format、工作记忆 schema、journal event contract、checkpoint 与 compaction 来源清单。只切换目标角色；保留其他角色会话与 owner，候选测试使用副本，受信 JournalWriter 不随候选 runtime 一起被改写。回退也使用新 generation，不能把工作记忆 head、已结算账本或日志水位回退到旧时刻；新写状态无法兼容旧 runtime 时进入 recovery_required。</p>
 <p><strong>e. 自动回退与后续责任</strong></p>
 <table>
 <colgroup>
@@ -2016,6 +2075,7 @@ AcceptanceSpec
 <h4 id="停止新工作">13.1 停止新工作</h4>
 <p>task 的冻结完成判据满足、预算/时长耗尽、用户停止、不可恢复错误或有界停滞处理失败时进入 finalizing。停止新 Lab、发现、变更，以及新的科研解释/归纳/外部检索 Effect；已排队 memory_review / memory_consolidate 不因不叫 lab_step 而绕过停止。继续幂等摄取已承诺的在途结果、确定性失效标记、待处理状态持久化和必要恢复；不为清空记忆队列新增模型/工具调用。</p>
 <p>处理顺序：摄取已落盘结果 → 对账未知效果 → 撤销未验收试用版本/完成必要恢复 → 结算可判定变更与 Continuation → 处理未决 Wait 或记录资源不足 → 验证当前结果和任务完成条件 → 输出义务与预算总账。已 accepted 的修复不无条件退回旧基线。</p>
+<p>同时停止 Lab/Meta 新 turn；在途日志继续接收并持久化，合法完成结果仍提交。按可核验安全边界封存 journal、工作记忆 head 和 session checkpoint，不能为写结束总结或压缩而新增未授权模型请求。无法对齐的会话标记 recovery_required 并列出日志缺口/未决 Effect；停止不删除原生会话文件或将局部草稿自动发布为科研结论。</p>
 <p>收尾不额外启动整轮对照，也不偷偷增加评价来凑达标数或验收样本。合法在途预约按停止策略处理。对于冻结了至少 100 个达标 compound 要求的任务，若有效达标数少于 100，即使停止原因是预算耗尽或修复完成，也不能标记科学任务成功；其他领域使用各自冻结完成判据。</p>
 <h4 id="报告相互独立的状态">13.2 报告相互独立的状态</h4>
 <pre class="text"><code>stop_reason = goal_met | compute_budget | token_budget | wall_time | user_stop | stalled | error
@@ -2025,10 +2085,11 @@ work_status = empty | pending_queued | parked_dependencies | unresolved_effects<
 <p>settled 表示外部效果和恢复义务已结清，不表示所有 Issue 已解决或任务达标。报告必须列出未决对象、原因、负责处理器和可恢复动作。</p>
 <p>科研记忆报告使用 <code>scientific_memory_report = {scope, as_of_seq, flags[], pending_object_refs[]}</code>；flags 可同时包含 <code>review_pending, source_unavailable, maintenance_deferred, support_check_pending</code>。空集合仅表示该范围没有已登记的对应未决项，不宣称所有判断均正确或已审阅。最后一批未解释结果保留 awaiting_review，未完成支持检查不写成 checked；冻结完成条件要求的复核未完成时，task 不能 succeeded。该报告不重定义 task_status 或 settlement_status。</p>
 <h4 id="重启与旧轨迹迁移">13.3 重启与旧轨迹迁移</h4>
+<p>先按 §9.3–9.4 对齐 journal、账本、各 agent 工作记忆和 session 前缀，再决定原生续接或新持久会话重建；审计、恢复状态与当前可见上下文分开认证。会话 lease/代际不得绕过未决调用，旧进程迟到结果仍按原 Effect 对账。每个角色单独恢复，无关角色不因另一会话损坏被迫清空历史。</p>
 <p>启动校验配置、冻结要求 hash、实际 runtime/memory binding、schema、blob 与事件/投影一致性。先摄取已落盘回执，恢复 unknown、版本及依赖的持久状态并安排有界对账；未决效果保留，仅阻塞冲突动作和其占用许可，不要求所有 unknown 已解决才能继续独立本地恢复与报告。prepared outbox 重新通过 §6 TX2，不在启动扫描中直接重发。恢复中断 Step/Batch 与科研义务后，普通 Lab、科研复核/归纳和新检索仅在非 finalizing 且通过依赖/权限/预算门槛时派发；已承诺的必要对账、取消、回退与恢复可在 finalizing 中按登记权限和恢复预留执行。预算、问题尝试次数、wait_epoch、身份预约和进度不重置。</p>
 <p>已有历史默认只读保留。接入新编排使用明确 child/checkpoint：冻结父边界/哈希，验证父 prefix，按 <code>(parent_checkpoint_hash, target_schema_version, migration_version)</code> 幂等追加迁移事件，使用新 branch namespace。旧等待映射为带原原因的 Wait 并获得一次 legacy_wait_reassessment；不宣称新原因已验证。旧活动试验由兼容恢复器结清，unknown 先对账。所有新执行、重审与费用位于新边界之后。</p>
 <p>记忆恢复保留来源版本、科学问题、判断关系、实际交付清单、未结研究行动、复核/匹配水位和 Wait epoch；不重新执行已确定的外部动作。迁移旧自由文本时保留原文和来源，推断出的结构化对象标为待检查；不能伪造旧调用已读引用、历史支持检查或事前检验承诺。跨任务导入使用明确许可的只读版本包，目标任务重查适用性。</p>
-<p>有合法 SourceTombstone 的来源缺失按 unavailable 恢复，其依赖动作继续受阻，无关工作可以恢复；没有该记录的丢失、hash 不符或损坏报告完整性错误，不自动补写 tombstone 掩盖。恢复的是历史交付事实，不把旧 call 的 actual_read_manifest 转授给新 call 或新会话；新的科学提议必须引用该调用实际重新交付的来源。同一已完成 call 的幂等结果重放使用原记录，不重复调用或结算。</p>
+<p>有合法 SourceTombstone 的来源缺失按 unavailable 恢复，其依赖动作继续受阻，无关工作可以恢复；没有该记录的丢失、hash 不符或损坏报告完整性错误，不自动补写 tombstone 掩盖。恢复的是历史交付事实，不把旧 call 的 actual_read_manifest 转授给新 call 或新会话；新的科学提议必须引用该调用受信确认有效呈现的来源（新交付或仍精确保留）；仅旧 ACK、旧 manifest 或摘要不能证明本次原文可见。同一已完成 call 的幂等结果重放使用原记录，不重复调用或结算。</p>
 <h3 id="模块和-api">14. 模块和 API</h3>
 <p>模块通过组合连接。以下是实现目标，不表示已创建或已完成重构。</p>
 <table>
@@ -2057,8 +2118,10 @@ work_status = empty | pending_queued | parked_dependencies | unresolved_effects<
 </tr>
 <tr>
 <td><code>rsi_lab/runtime/agent_runtimes/</code></td>
-<td>CodexRuntimeAdapter、exec/app-server 协议适配、不可变运行绑定与会话契约</td>
+<td>CodexRuntimeAdapter、持久 exec resume/app-server、session lease/fencing、有效上下文与检查点兼容</td>
 </tr>
+<tr><td><code>rsi_lab/agent_state/</code></td><td>AgentWorkingMemory 版本/CAS、owner 权限、Handoff、checkpoint 与显式重建计划</td></tr>
+<tr><td><code>rsi_lab/journal/</code></td><td>受信逐事件持久采集、hash 链、durable/applied 水位、缺口报告与幂等重放</td></tr>
 <tr>
 <td><code>rsi_lab/context/</code></td>
 <td>packet、依赖投影、页面与 ACK</td>
@@ -2110,7 +2173,17 @@ register_domain(package_ref, contract_checks) -&gt; capability_manifest
 register_codex_runtime(runtime_spec, readiness_checks) -&gt; runtime_id, ready | blocked | unsupported
 prepare_step(step_id, expected_versions) -&gt; effect_id | blocked_reason
 ingest_effect_result(effect_id, raw_ref, provider_evidence) -&gt; committed | duplicate | conflict
-build_packet(role, snapshot, budget) -&gt; packet_ref, hash, candidate_delivery_manifest | blocked
+open_agent_session(owner, runtime_binding, policy) -&gt; session_ref | blocked
+claim_session_turn(session_ref, expected_head, work_ref, lease) -&gt; turn_ref, fence | busy | stale
+build_packet(role, snapshot, session_prefix, working_memory_ref, budget) -&gt; turn_packet_ref, submitted_input_hash, effective_context_manifest, candidate_delivery_manifest | blocked
+append_execution_event(attempt_ref, source_cursor, raw_frame) -&gt; durable_seq, event_ref | journal_error
+reconcile_journal(attempt_ref, expected_applied_seq) -&gt; applied_seq, gaps, obligations
+propose_working_memory_update(owner, expected_revision, delta, source_call_id) -&gt; revision_ref | rejected
+propose_agent_handoff(owner, recipient, selected_refs, purpose) -&gt; handoff_ref | rejected
+accept_agent_handoff(handoff_ref, expected_version) -&gt; target_work_ref | rejected
+commit_agent_turn(turn_ref, terminal_ref, expected_session_head, expected_memory_revision) -&gt; committed | duplicate | recovery_required
+seal_agent_checkpoint(session_ref, expected_turn, working_memory_ref) -&gt; checkpoint_ref | not_quiescent
+resume_agent_session(checkpoint_ref, target_binding) -&gt; session_ref, resume_mode | recovery_required
 record_scientific_evidence(source_ref, conditions, provenance) -&gt; typed_ref | rejected
 retire_source(source_ref, expected_version, retention_authorization) -&gt; tombstone_ref, retirement_work | reasons
 propose_memory_revision(object_ref, expected_version, proposal, actual_read_manifest) -&gt; revision_ref | reasons
@@ -2140,8 +2213,9 @@ plan_recompute(protocol_hash, dependency_snapshot) -&gt; affected, reusable, nee
 settle_change(change_id, continuation_manifest) -&gt; immutable_outcome
 finalize_run(reason) -&gt; report_ref</code></pre>
 <p>所有 API 返回机器可读 reason_code；“没有工作”不能同时指容量满、unknown、缺信息、权限不足和预算耗尽。注册适配器、协议和验收器都必须经过相应权限/兼容检查，不能让可执行文本直接绕过接口。</p>
+<p>session 领取、journal 写入/重放、checkpoint 封存和 Handoff 接纳是受信控制面接口，不直接暴露为模型可自签操作。工作记忆提议按 source_call 幂等，来源子请求先经 TX3 落档，再由父 turn_commit 提交 head；读取清单从控制器查询。<code>claim_session_turn</code> 与首个子 Effect 的 TX2 共用事务，后续子 Effect 只检查父 turn fence；<code>commit_agent_turn</code> 不产生新外部请求或重复计费，不额外引入派发旁路。接口涉及外部调用时仍创建 Work/Effect、预约和回执。</p>
 <p><code>build_codex_candidate</code> 是 <code>prepare_candidate</code> 的登记后端；激活准备与对账是 <code>release_change / rollback_change / resume_task</code> 调用的受信处理器，不能作为跳过 AcceptanceGate 的旁路。长操作通过 Work/Effect 异步推进，前端请求超时不等于构建、启动或回退已停止。</p>
-<p><code>prepare_scientific_context</code> 只返回选择计划，<code>build_packet</code> 物化 packet 和候选交付清单，二者都不认证读取权限。实际交付由 §6 TX3 的受信回执路径登记。证据与支持检查登记只接受可核对的来源/执行或检查回执，模型只能提议，不能自签通过；<code>actual_read_manifest</code> 是控制器解析的调用记录。长操作按 §3 的 Work.kind 登记，新外部效果继续经过预算、outbox 和最终派发检查。</p>
+<p><code>prepare_scientific_context</code> 只返回选择计划，<code>build_packet</code> 固定本轮传输包、完整有效上下文和候选交付清单，二者都不认证读取权限。实际交付由 §6 TX3 的受信回执路径登记。证据与支持检查登记只接受可核对的来源/执行或检查回执，模型只能提议，不能自签通过；<code>actual_read_manifest</code> 是控制器解析的调用记录。长操作按 §3 的 Work.kind 登记，新外部效果继续经过预算、outbox 和最终派发检查。</p>
 <p><code>retire_source</code> 仅由已登记保留政策授权的受信处理器调用；通过 source_retire Work 的准入/恢复契约完成，模型记忆提议无此权限。删除意图、执行、tombstone 与依赖失效均可恢复；未启用该能力时返回 unsupported_capability，不在普通缓存淘汰或摘要重建中隐式删除来源。</p>
 <h3 id="运行指标与审计">15. 运行指标与审计</h3>
 <table>
@@ -2217,6 +2291,7 @@ finalize_run(reason) -&gt; report_ref</code></pre>
 </table>
 <p>每次修复保存 <code>inspection/source signal → issue → investigation → change → checks → release → resume → downstream result</code> 全链引用。无变更的运行不能通过空集合 all() 记为能力已验证。告警只在阈值跨越时产生一次，使用 breach_epoch 去重，不自行增加证据版本或无限重开问题。巡检覆盖缺口、no_action、被反证的假设和不可取得的材料同样报告，不只保留成功修复。</p>
 <p>来源支持率以预登记抽样中的可审计判断为分母，同时报告无法审计项。更正后的过期依据误用率以受影响决定中的关键依据引用为分母，分列误用数、可审计数与不适用；修订延迟区分失效提示和完成复核。前瞻可判别率以合法事前检验为分母，未完成/失败/无法比较单列；命中率仅以可判别项为分母。同分是否命中由冻结规则决定，共享一次结果的多条检验不当作独立重复。原始检索评测不能替代闭环科研收益。</p>
+<p>持久会话审计另报：各 agent 的 session/turn、原生续接/重建次数及原因、工作记忆 head/陈旧条目、日志 durable/applied 差额与缺口、有效上下文字节/token、压缩丢失的必需引用、交接接纳/拒绝和重复副作用数。会话存活时间、日志条数与工作记忆修订次数不计科学进度，也不增加 Meta credit。</p>
 <h3 id="实现与迁移顺序">16. 实现与迁移顺序</h3>
 <table>
 <colgroup>
@@ -2239,18 +2314,18 @@ finalize_run(reason) -&gt; report_ref</code></pre>
 </tr>
 <tr>
 <td>P1 控制面</td>
-<td>事件、预算、outbox、unknown、等待、调度、检查点和收尾；科研对象/关系版本及来源身份</td>
-<td>崩溃/重复回调/容量/预算/等待测试通过；已有结果可恢复</td>
+<td>事件、预算、outbox、unknown、等待、调度、检查点和收尾；逐事件 journal、session owner/fencing、独立工作记忆 CAS；科研对象/关系版本及来源身份</td>
+<td>崩溃/重复回调/容量/预算/等待测试通过；已有结果可恢复；PS02、PS03、PS05、PS09、PS12 的存储/幂等/停止检查通过</td>
 </tr>
 <tr>
 <td>P2 Lab / Meta 工作闭环</td>
-<td>Lab 步骤、独立巡检/覆盖、主动取证与持续调查、上下文/ACK、Issue 与 Work；初诊和必要修复额度；按问题取证、观察引用统一、科研结果回写与记忆复核</td>
-<td>无报告/无告警仍可巡检；静默停滞初诊可达；覆盖不虚增；调查能继续且不饿死 Lab；SM01–SM09、SM12–SM17、SM19 功能通过</td>
+<td>Lab/Meta 各自持久会话、工作记忆续接、Handoff、有效上下文/ACK；Lab 步骤、独立巡检/覆盖、主动取证与持续调查、Issue 与 Work；初诊和必要修复额度；按问题取证、观察引用统一、科研结果回写与记忆复核</td>
+<td>无报告/无告警仍可巡检；静默停滞初诊可达；覆盖不虚增；调查能继续且不饿死 Lab；SM01–SM09、SM12–SM17、SM19 及 PS01–PS09、PS11–PS12 集成通过</td>
 </tr>
 <tr>
 <td>P3 修复发布基础设施</td>
 <td>scoped T3、ChangeEngine、适配器注册、协议影响与 resume；Codex fork/构建器、兼容检查、独立 supervisor 与回退</td>
-<td>五类路径的受控案例及失败回退/冻结要求负例通过；包含 H01–H11、记忆机制变更 SM11、SM18，不依赖配对 runner</td>
+<td>五类路径的受控案例及失败回退/冻结要求负例通过；包含 H01–H11、记忆机制变更 SM11、SM18 及 PS10 会话升级/回退，不依赖配对 runner</td>
 </tr>
 <tr>
 <td><strong>P4 实际运行中修复并继续</strong></td>
@@ -2267,6 +2342,7 @@ finalize_run(reason) -&gt; report_ref</code></pre>
 <p>P4 不要求每个补丁成功，但通用闭环至少有一次真实修复达到 problem_status=resolved、continuation=verified；Codex 自修改子项另外要求实际 fork 修改、构建、切换和同一任务续跑达到这些条件。两项分别报告，完整新版 P4 要求两项都通过，允许同一 Codex 案例同时满足。只有失败回退、合成正例或没有遇到相应修复机会时，该子项仍待验证。P3 受控故障证明五条路径可执行，必须与 P4 自然运行案例区分。</p>
 <p>P4 的有限任务范围在开始前登记；若只验收续跑闭环，应分别报告“P4 通过”和“科学任务仍在进行”。最终科学任务必须满足其全部冻结条件；对于已冻结至少 100 个达标 compound 要求的化合物任务，该数量不变，不能把小样本修复验收替代最终交付。</p>
 <p>迁移优先复用不可变存储、原始调用、身份索引、评价来源、原生记录查询和回执认证；通过桥接适配器接入，旧 runtime 的隐式批次推进不直接嵌入新循环。旧机制与研究结果保留，不追溯改写成新 ChangeOutcome。</p>
+<p>旧 ephemeral 调用的日志与共享状态可作为新 agent 工作记忆的导入来源，但不能伪造不存在的原生 session 前缀。迁移建立新的 Lab/Meta 持久会话、标注导入来源与未知项，并按本次实际交付认证；独立工作记忆、逐事件日志和基本会话恢复属于 P1/P2 必需项，不后置到可选研究。</p>
 <p>Scientific Memory 的基本功能随 P1/P2 接入，不要求先完成向量检索、长期自动归纳或跨任务共享。P4 保持工程修复与续跑验收；记忆的独立科研收益另按 P5/§12 评价。旧记录不能仅因迁移到新 schema 被升级为 checked 或已验证经验。</p>
 <h3 id="验收与故障注入">17. 验收与故障注入</h3>
 <p>以下是实现的完成条件，本文不声称已经通过这些测试。检查事件、版本、结果 hash、资源和实际外部调用计数，不能只检查最终返回值。</p>
@@ -2531,7 +2607,7 @@ finalize_run(reason) -&gt; report_ref</code></pre>
 <tr>
 <td>H11</td>
 <td>单外部许可下的完整工具回合，包含内部重试和压缩</td>
-<td>父 turn 不包住子请求占槽；每个真实请求事前预约并归属子 Effect，重试/压缩/失败全计费，预算耗尽禁止新请求，流程无自等待死锁</td>
+<td>父 turn 不包住子请求占槽；子请求沿用同一会话 fence、每次重建有效上下文且独立预约结算；重试/压缩/失败全计费，仅可信父终态触发一次 turn_commit，预算耗尽禁止新请求，无自等待死锁</td>
 </tr>
 <tr>
 <td>F01</td>
@@ -2611,7 +2687,7 @@ finalize_run(reason) -&gt; report_ref</code></pre>
 <tr>
 <td>SM13</td>
 <td>预览/物化未派发、错误格式响应、伪造读取清单、新会话及持续会话中的旧材料</td>
-<td>build_packet 不授予读权；实际回执才能认证交付；格式错误不撤销真实交付，新调用不继承旧读权，模型自报清单无权威；持续会话纳入完整有效上下文的预算/来源核验，摘要不授予原文读权，不能核验则重建</td>
+<td>build_packet 不授予读权；实际回执才能认证交付；格式错误不撤销真实交付，新调用不得直接复制旧读权；按本次受信有效上下文认证新发/精确保留来源，模型自报清单无权威；历史纳入预算/来源核验，摘要不授予原文读权，不能核验则重建持久会话</td>
 </tr>
 <tr>
 <td>SM14</td>
@@ -2648,10 +2724,23 @@ finalize_run(reason) -&gt; report_ref</code></pre>
 <td>按许可删除来源后重启/历史回放，对比无记录丢失或损坏</td>
 <td>有 tombstone 为 unavailable，无关工作可恢复；必要依赖保持阻塞，旧快照无正文读权；意外丢失/损坏不能伪装成合法删除</td>
 </tr>
+<tr><td>PS01</td><td>Lab/Meta 连续多轮，Inspector→Worker 切换</td><td>两角色 session 与工作记忆 owner 独立；各自原生续接，Meta 模式串行且本轮权限生效；日志与上下文能定位准确 turn，不默默启动 ephemeral</td></tr>
+<tr><td>PS02</td><td>同会话双派发、lease 过期及旧进程迟到</td><td>CAS/fencing 最多一个有效写入 turn；租约到期不证明旧调用终止；旧输出留档计费但不覆盖当前状态，不绕过未决 Effect</td></tr>
+<tr><td>PS03</td><td>工作记忆重复/并发更新、空提议与非法 JSON</td><td>CAS 和 source_call 幂等；允许无变化，非法更新保留旧 head 与修复标记；已完成调用不变 unknown，真实输出/交付/费用保留</td></tr>
+<tr><td>PS04</td><td>工作记忆与账本矛盾、跨角色移交、科研发布</td><td>账本执行事实优先；Handoff 最小授权、目标 Work 去重；接收方重新认证读取；草稿/摘要不自动成为 checked Claim，Meta 科研疑点仍转 Lab</td></tr>
+<tr><td>PS05</td><td>逐事件写前/写后、TX3 前后崩溃，重复与损坏帧</td><td>durable/applied 分离；只保证已持久前缀，尾部缺口显式；幂等重放不重做工具/重复费用；非法原始帧保留，缺 provider ID 不按文本盲目去重</td></tr>
+<tr><td>PS06</td><td>历史增长超限、压缩丢必需来源、来源更正/撤权</td><td>计入完整历史/工具/schema 与输出预留；工具追加/压缩后每个真实请求重新核验，不能沿用首请求hash或合并旧读权；保留/新发来源按本call认证；摘要无原文权，更正阻止旧依据当前使用；撤权材料真正裁剪/重建，不能只加提示</td></tr>
+<tr><td>PS07</td><td>原生 session 丢失但 journal/工作记忆/账本完整</td><td>重建新持久会话并记录 supersedes/resume_mode；保留旧历史与各 owner；恢复计划/未决项不重做已完成动作，不伪造原生续接</td></tr>
+<tr><td>PS08</td><td>未知 turn、断流、provider 无补取/查询能力</td><td>隔离受影响会话，保留缺口与最坏费用责任；不把重新发送 prompt 当恢复；无关本地恢复可继续，不宣称完整追溯</td></tr>
+<tr><td>PS09</td><td>finalizing、磁盘满或 journal 写失败</td><td>停止相关新 turn/工具派发，保留在途对账；仅在可核验且可持久化的安全边界纯代码封存，否则保留最近已发布 checkpoint/durable 前缀并标缺口；不启动总结/压缩模型调用，日志不提前回收</td></tr>
+<tr><td>PS10</td><td>仅 Lab runtime 升级/回退，或工作记忆 schema 不兼容</td><td>Meta 会话不受替换；候选只用副本，JournalWriter 保持可信；按已验兼容原生续接/迁移/重建，新 generation 不回退账本/head，不能兼容则 recovery_required</td></tr>
+<tr><td>PS11</td><td>同run不同agent权限、日志审计视图和工具越权</td><td>Lab/Meta不能任意读写对方会话/草稿；Inspector仅获授权审计切片；共享Scientific Memory按scope与提议规则访问，目录名不冒充强隔离</td></tr>
+<tr><td>PS12</td><td>checkpoint封存中崩溃，或多工具/压缩turn终态已到但子TX3/turn_commit未提交</td><td>未发布checkpoint不可用于续跑；重放durable尾部、先对齐必需子TX3再幂等turn_commit，仅提交一次session/head并释放会话lease；格式失败与执行完成分别恢复，不重复请求或结算</td></tr>
 </tbody>
 </table>
 <p>可选研究启用后另测分支隔离、失败 pair 保留、禁止递归研究、预算不增发及停止传播。研究测试不加入默认 P4 的前置依赖。</p>
 <p>SM01–SM09、SM12–SM17、SM19 随核心记忆与编排整合验收；SM11、SM18 随 P3 机制变更与版本恢复验收。SM10 在启用长期归纳/跨任务迁移前验收；来源删除能力启用前另验 SM20。所有场景均为待实现检查，不报告已通过；记忆收益比较仍是独立可选研究。</p>
+<p>PS01–PS09、PS11–PS12 随 P1/P2 的存储与运行集成分阶段验收，PS10 随 P3 的发布/回退验收。脚本 fixture 证明控制契约；持久会话后端还须用实际登记的 Codex runtime 验证续接、有效上下文可观测性、日志流、压缩和重启，不能由合成 session_id 或仅删除 <code>--ephemeral</code> 代替。</p>
 <h4 id="p4-真实案例留档">17.3 P4 真实案例留档</h4>
 <p>每个案例保存首次可见线索及巡检触发、是否有 Lab/用户报告、实际检查与取证范围、问题出现时的输入/错误与 checkpoint、Meta 的原因调查、实际 patch/构建 hash、小范围验收记录、冻结要求前后 hash、发布事件、真实续跑点和后续结果、复用/重算清单及全部成本。缺任何关键环节则报告尚未验证，不能用合成成功响应填充。</p>
 <p>P4 按 §16 分别登记通用闭环与 Codex 自修改子项。五类路径的受控覆盖由 P3 验收；P4 明确标注真实任务实际覆盖哪几类，不把一例修复泛化为所有场景的效果证明。无修复机会的 pilot 保留其真实结果，相关子项仍待验证；不为了通过而擅自改目标或增加预算。</p>
@@ -2661,6 +2750,7 @@ finalize_run(reason) -&gt; report_ref</code></pre>
 <p>本次交付是版本 2.1 的系统设计。实施完成必须具备：三层边界可检查；领域中立入口；持久效果和预算正确；任务冻结要求可执行；Meta 独立巡检、主动取证和持续调查可运行；在授权内能实际修改；五类局部验收/恢复路径，包含开源 Codex harness 的自动源码修改、真实编译验收、版本切换、当前任务续跑与失败回退；受影响重算与原始数据复用；明确未决义务报告。Codex 自修改是主闭环实现要求，不后置到可选收益研究。</p>
 <p><strong>核心实施验收是系统实际修好了问题，并成功继续任务。</strong> 配对收益实验不属于这条闭环的必需条件；科学任务的最终完成条件也不会因修复验收通过而放宽。</p>
 <p>本次 Scientific Memory 修订增加通用科研对象、版本关系、按问题检索、观察/引用统一、新证据匹配与来源更正复核、研究行动回写和未结工作恢复。一致性约束还覆盖实际交付认证、Lab/Meta 工作路由、提交/派发期间的来源变化、活动机制绑定、停止与恢复；验收范围及阶段见 §16 和 SM01–SM20。本文中的接口、对象和检查仍是设计规格，不表示已有实现或已证明科研收益。</p>
+<p>本次持久会话方案进一步要求 Lab/Meta 的连续性可核验、工作记忆可独立恢复、执行事件逐条持久，且跨角色与科研发布边界明确。§9 与 PS01–PS12 是实施目标；更新 HTML 不代表已修改运行代码或已通过这些验收。</p>
 <h3 id="附录关键-reason_code">附录：关键 reason_code</h3>
 <pre class="text"><code>invalid_schema, invalid_command, invalid_dependency, dependency_cycle
 missing_information, authorization_required, frozen_requirement_violation
@@ -2685,10 +2775,15 @@ memory_revision_conflict, memory_dependency_stale, memory_match_incomplete
 scientific_review_pending, test_commitment_late, investigation_binding_conflict
 memory_maintenance_deferred, memory_import_not_permitted
 memory_binding_incompatible, scientific_review_stale, source_tombstoned
-source_integrity_error, finalizing_no_new_inference</code></pre>
+source_integrity_error, finalizing_no_new_inference
+session_owner_mismatch, session_busy, session_fence_stale, session_prefix_mismatch
+session_recovery_required, context_unverifiable, retained_source_stale
+working_memory_revision_conflict, working_memory_update_rejected, working_memory_repair_pending
+handoff_scope_denied, checkpoint_not_quiescent, checkpoint_incomplete
+journal_write_failed, journal_gap, stream_incomplete</code></pre>
 <p>reason_code、对象 ID 和自然语言原因共同保存；默认报告不把工程可用性、科学达标和可选研究收益合并成一个 PASS。</p>
 </article>
-<footer class="footer"><span>RSI-Lab · 完整系统设计 v2.1 · 2026-11-08</span><span>单文件 HTML · Scientific Memory 已整合 · 设计待实现</span></footer></main>
+<footer class="footer"><span>RSI-Lab · 完整系统设计 v2.1 · 2026-11-09</span><span>单文件 HTML · 持久会话与记忆边界已整合 · 设计待实现</span></footer></main>
 <script>
 document.querySelectorAll('article table').forEach(function(table){var wrap=document.createElement('div');wrap.className='table-scroll';wrap.setAttribute('tabindex','0');wrap.setAttribute('aria-label','可横向滚动的表格');table.parentNode.insertBefore(wrap,table);wrap.appendChild(table);});
 document.getElementById('print').addEventListener('click',function(){window.print();});

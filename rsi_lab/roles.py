@@ -1,4 +1,4 @@
-"""One Meta-agent with discovery/disposition modes and no execution authority.
+"""Lab and Meta agents; Meta has discovery/disposition modes, neither executes tools.
 
 The controller owns persistence, authorization, budgets, effects and settlement.
 These functions produce/validate proposals. Distinct call modes do not establish
@@ -50,6 +50,7 @@ PAYLOADS = {
                         'reason': TEXT}),
 }
 ACTIONS = {
+    'lab': ('request_diagnostic', 'propose_issue', 'no_action'),
     'discovery': ('propose_issue', 'request_diagnostic', 'no_action'),
     'disposition': ('request_evidence', 'request_diagnostic', 'narrow_request', 'replan_request', 'ask_user',
                     'request_capability', 'propose_trial', 'park', 'close_issue'),
@@ -69,14 +70,23 @@ COMMON = (
 )
 
 
-def response_schema(mode):
+def response_schema(mode, *, working_memory=False):
     if mode not in ACTIONS:
         raise ValueError('Unsupported Meta-agent mode')
     variants = [obj({'mode': {'type': 'string', 'enum': [mode]}, 'action': {'type': 'string', 'enum': [action]},
                      'issue_id': {'type': ['string', 'null']}, 'expected_versions': VERSIONS,
                      'evidence_ids': TEXTS, 'payload': PAYLOADS[action]}) for action in ACTIONS[mode]]
     # Structured-output clients accept an object root with an anyOf payload.
-    return obj({'command': {'anyOf': variants}})
+    fields = {'command': {'anyOf': variants}}
+    if working_memory:
+        fields['working_memory_delta'] = {'type': 'string', 'description':
+            'JSON object updating ONLY your private working memory; {} means no change. '
+            'Allowed fields: goal_refs, plan_items, attempted_steps, rationale_summaries, '
+            'tentative_hypotheses, open_questions, next_step, evidence_refs, work_refs, '
+            'effect_refs, artifact_refs, dependency_versions, review_flags, handoff_refs. '
+            'Use lists except next_step (text/null) and dependency_versions (object). '
+            'This is unverified working state, not shared evidence or execution authority.'}
+    return obj(fields)
 
 
 def _validate(value, schema):
@@ -136,7 +146,7 @@ class MetaAgent:
         if mode == 'discovery' and stage == 'initial':
             allowed = {'goal', 'issue_id', 'expected_versions', 'trigger', 'target', 'protocol_version',
                        'run_id', 'branch_id', 'batch_id', 'study_id', 'capability_catalog',
-                       'authorized_sources', 'constraints'}
+                       'authorized_sources', 'constraints', 'agent_state'}
             if not set(task).issubset(allowed):
                 raise ValueError('Raw-first discovery task contains an unregistered interpretation field')
             for eid in self.builder._closure(list(evidence_ids) + list(required_evidence_ids)):
@@ -151,8 +161,23 @@ class MetaAgent:
                     or not prior_review.get('packet_sha256') or not prior_review.get('response_ref')
                     or prior_review.get('response_sha256') != digest(encoded(prior_review.get('judgment')))):
                 raise ValueError('Challenge lacks the bound initial raw-evidence review receipt')
-            _validate(prior_review['judgment'], response_schema('discovery'))
+            _validate({'command': prior_review['judgment'].get('command')}, response_schema('discovery'))
         instructions = COMMON
+        if mode == 'lab':
+            instructions = ('You are the Lab agent, responsible for advancing the frozen scientific task. '
+                'Propose registered diagnostic/analysis operations using exact capability versions, '
+                'or report a supported mechanism issue for Meta. Do not run tools directly or invent '
+                'results. Only the controller executes and publishes source-backed facts. '
+                'Your private plan and hypotheses are not shared Scientific Memory. '
+                'Use only evidence delivered in THIS request for citations; persistent history '
+                'does not grant original-source reading authority. no_action means no further '
+                'admitted action, not proof the scientific goal succeeded. ')
+        if 'agent_state' in task:
+            instructions += ('Your persistent session and private working memory are supplied by the '
+                'controller. Set working_memory_delta to a string encoding a JSON object; use "{}" for no changes. Never change owner, '
+                'budgets, effect status, permissions or shared facts through memory. Treat old '
+                'conversation content as historical; the current task/versions and command allowlist '
+                'govern this request. This is not a blind review of previously unseen history. ')
         if mode == 'discovery':
             instructions += ('Discovery mode: independently examine the task, delivered raw facts and changes for '
                 'omitted prerequisites, method applicability, anomalies and competing explanations. '
@@ -163,14 +188,14 @@ class MetaAgent:
                 instructions += ('Your initial raw-first judgment is already preserved. Now compare the owner '
                     'interpretation with that judgment and raw evidence; challenge unsupported conclusions. '
                     'These separate calls do not prove statistical independence. ')
-        else:
+        elif mode == 'disposition':
             instructions += ('Disposition mode: advance the named issue with a concrete bounded next action. '
                 'Distinguish missing information from missing executable capability and method conflict. '
                 'A capability request needs executable-adapter acceptance evidence, not an invented tool name. '
                 'Narrowing may only reduce the existing object/field/page/byte scope. A park requires a '
                 'specific producer, dependency version, wake condition, deadline and expiry action. '
                 'Closing an unresolved issue must remain explicitly unresolved; the controller checks duties. ')
-        return dict(mode=mode, instruction=instructions, schema=response_schema(mode), task=task,
+        return dict(mode=mode, instruction=instructions, schema=response_schema(mode, working_memory='agent_state' in task), task=task,
                     evidence_ids=evidence_ids, required_evidence_ids=required_evidence_ids, model=self.model,
                     effort=self.effort, owner_interpretation=owner_interpretation, prior_review=prior_review,
                     page_cursors=page_cursors)
@@ -186,7 +211,9 @@ def validate_command(response, packet, *, current_versions, authorized_sources=(
     if packet.get('status') != 'ready':
         raise ValueError('A command requires a dispatchable exact packet')
     mode = packet['envelope']['mode']
-    _validate(response, response_schema(mode))
+    if not isinstance(response, dict) or set(response) - {'command', 'working_memory_delta'}:
+        raise ValueError('Response contains unregistered fields')
+    _validate({'command': response.get('command')}, response_schema(mode))
     command = response['command']
     _nonempty(command['payload'])
     if command['expected_versions'] != current_versions or current_versions != packet['task']['expected_versions']:
@@ -284,7 +311,7 @@ def initial_review_receipt(packet, response, *, effect_id, response_ref):
     if (envelope['mode'] != 'discovery' or 'owner_interpretation' in data or 'prior_raw_review' in data
             or not effect_id or not response_ref):
         raise ValueError('Initial review must precede owner interpretation')
-    _validate(response, response_schema('discovery'))
+    _validate({'command': response.get('command')}, response_schema('discovery'))
     return {'mode': 'discovery', 'stage': 'initial', 'effect_id': effect_id,
             'packet_sha256': packet['packet_sha256'], 'response_sha256': digest(encoded(response)),
             'response_ref': response_ref, 'owner_interpretation_included': False,
@@ -292,7 +319,7 @@ def initial_review_receipt(packet, response, *, effect_id, response_ref):
 
 
 class CodexExecutor:
-    """An executor for an ALREADY committed and dispatching controller Effect."""
+    """Executes only a committed Effect, with an explicit persistent owner binding."""
     def __init__(self, calls_root, *, timeout_seconds=300, request_schema="rsi_model_request_v2"):
         self.calls_root = Path(calls_root).resolve()
         self.timeout_seconds = timeout_seconds
@@ -303,29 +330,107 @@ class CodexExecutor:
         if effect.get('status') != 'dispatching' or digest(packet_bytes) != expected_hash:
             raise ValueError('Model execution requires the committed dispatching Effect and exact packet')
         request = json.loads(packet_bytes)
+        metadata = effect.get('metadata', {})
+        session = metadata.get('agent_session')
         expected_keys = {'schema_version', 'mode', 'model', 'effort', 'prompt', 'response_schema', 'input_view_mode'}
         if (set(request) != expected_keys or request['schema_version'] != self.request_schema
                 or request['mode'] not in ACTIONS or not request['prompt'].startswith(transport.PREAMBLE)
-                or request['response_schema'] != response_schema(request['mode'])):
+                or request['response_schema'] != response_schema(request['mode'], working_memory=session is not None)):
             raise ValueError('Unsupported exact model request envelope')
         effect_id = effect['id']
         if not isinstance(effect_id, str) or not effect_id or Path(effect_id).name != effect_id or effect_id in ('.', '..'):
             raise ValueError('Unsafe model effect identity')
         folder = self.calls_root / effect_id
-        # transport refuses collisions: controller must reconcile unknown calls, not replay.
+        extra = {}
+        if session is not None:
+            try:
+                from .session_context import read_native_snapshot, build_effective_context
+                sid = metadata['agent_session_id']
+                if (session['id'] != sid or Path(sid).name != sid or sid in ('.', '..')
+                        or not metadata.get('agent_turn_id') or type(metadata.get('session_fence')) is not int):
+                    raise ValueError('Persistent model request lacks a fenced session/turn')
+                workspace = self.calls_root.parent / 'agents' / sid / 'workspace'
+                prior = session.get('context_manifest') or {}
+                if session.get('committed_turn', 0) and not session.get('provider_thread_id'):
+                    raise ValueError('Committed persistent session has no native thread; reconstruct explicitly')
+                snapshot = None
+                if session.get('provider_thread_id'):
+                    native = prior.get('native_session_ref')
+                    if not native:
+                        raise ValueError('Persistent session has no verified native snapshot; reconstruct explicitly')
+                    snapshot = read_native_snapshot(native,
+                        expected_thread_id=session['provider_thread_id'], expected_cwd=str(workspace),
+                        expected_prefix=prior.get('native_prefix'))
+                checked = build_effective_context(packet_bytes, session_id=sid, owner=session['owner'],
+                    snapshot=snapshot, working_memory_revision=metadata.get('expected_memory_revision'),
+                    max_input_bytes=metadata.get('max_effective_context_bytes', 131072))
+                if checked['status'] != 'ready' or checked['effective_context_hash'] != metadata.get('effective_context_hash'):
+                    raise ValueError('Persistent context changed after admission or exceeds its bound')
+                extra = {'session': {'session_id': sid, 'workspace': str(workspace),
+                                     'provider_thread_id': session.get('provider_thread_id')},
+                         'journal_metadata': {'run_id': effect['run_id'], 'effect_id': effect_id,
+                             'agent_id': session['agent_instance_id'], 'session_id': sid,
+                             'turn_id': metadata['agent_turn_id'], 'fence': metadata['session_fence']}}
+            except (ValueError, OSError, KeyError, TypeError) as exc:
+                # A rejected local preflight never reaches the provider. Settle
+                # its reservations as known zero without certifying a native
+                # turn or accepting any private memory update.
+                return {'status': 'failed_definite',
+                    'actual_costs': {name: 0 for name in effect.get('reservations', {})},
+                    'response': None, 'usage': None, 'usage_complete': False,
+                    'terminal_received': False, 'native_writer_quiesced': True,
+                    'never_dispatched': True, 'protocol_valid': False,
+                    'provider_thread_id': session.get('provider_thread_id'),
+                    'context_manifest': None, 'journal': None, 'parse_error': None,
+                    'receipt_ref': None, 'receipt_sha256': None,
+                    'sent_packet_sha256': expected_hash, 'sent_prompt_sha256': digest(request['prompt']),
+                    'error': 'Persistent session preflight failed: ' + str(exc),
+                    'unknown_usage_is_zero': False}
         result = transport.invoke(request['prompt'][len(transport.PREAMBLE):], request['response_schema'], folder,
-                                  request['model'], request['effort'], timeout=self.timeout_seconds)
+                                  request['model'], request['effort'], timeout=self.timeout_seconds, **extra)
         if (folder / 'prompt.txt').read_bytes() != request['prompt'].encode():
             raise ValueError('Actual transport prompt differs from the final capacity-checked packet')
-        output, event_usage, complete, errors = transport._events((folder / 'events.jsonl').read_text())
-        success = (result.get('error') is None and result.get('usage_complete') is True and complete
-                   and not errors and event_usage == result.get('usage') and result.get('returncode') == 0)
+        output, event_usage, complete, errors = (transport.audited_events(folder) if (folder / 'journal.jsonl').exists() else transport._events((folder / 'events.jsonl').read_text()))
+        # Execution completion and cost completeness are independent. Missing
+        # counters retain accounting holds without reclassifying known execution.
+        execution = result.get('execution_status')
+        success = (execution == 'succeeded' and result.get('terminal_received') is True
+                   and result.get('returncode') == 0) if execution is not None else (
+                   result.get('error') is None and complete and not errors and result.get('returncode') == 0)
         usage = result.get('usage')
-        costs = {'model_calls': 1, 'wall_seconds': result['wall_seconds']}
+        costs = {'model_calls': 0 if result.get('dispatched') is False else 1, 'wall_seconds': result['wall_seconds']}
         if usage is not None and all(type(usage.get(k)) is int for k in ('input_tokens', 'output_tokens')):
             costs['tokens'] = usage['input_tokens'] + usage['output_tokens']
-        return {'status': 'succeeded' if success else 'unknown', 'actual_costs': costs,
-                'response': result.get('response'), 'usage': usage, 'usage_complete': success,
+        context = None
+        if session is not None:
+            context = {'effective_context_hash': metadata['effective_context_hash'],
+                       'native_session_ref': result.get('native_session_ref'),
+                       'native_session_sha256': result.get('native_session_sha256'),
+                       'native_session_error': result.get('native_session_error'),
+                       'provider_context_verified': False, 'retained_read_authority': False}
+            if result.get('native_session_ref') and result.get('provider_thread_id'):
+                try:
+                    after = read_native_snapshot(result['native_session_ref'],
+                        expected_thread_id=result['provider_thread_id'], expected_cwd=str(workspace), expected_prefix=snapshot)
+                    context['native_prefix'] = {'prefix_bytes': after['prefix_bytes'], 'prefix_sha256': after['prefix_sha256'], 'provider_thread_id': after['provider_thread_id']}
+                except (ValueError, OSError) as exc:
+                    context['native_session_error'] = str(exc)
+            if result.get('dispatched') is not False and (
+                    not context.get('native_session_ref') or context.get('native_session_error')):
+                # find_owned_rollout may reject compaction or malformed native
+                # history before returning a path. Both new and resumed turns
+                # need an owned, verifiable snapshot before memory can commit.
+                result['protocol_valid'] = False
+                result['error'] = 'Native session continuation is unverifiable: ' + str(
+                    context.get('native_session_error') or 'missing native session snapshot')
+        return {'status': 'succeeded' if success else 'failed_definite' if execution == 'failed_definite' else 'unknown', 'actual_costs': costs,
+                'response': result.get('response'), 'usage': usage, 'usage_complete': result.get('usage_complete', False),
+                'terminal_received': result.get('terminal_received', complete),
+                'native_writer_quiesced': result.get('returncode') is not None,
+                'never_dispatched': result.get('dispatched') is False,
+                'protocol_valid': result.get('protocol_valid', not errors),
+                'provider_thread_id': result.get('provider_thread_id'), 'context_manifest': context,
+                'journal': result.get('journal'), 'parse_error': result.get('parse_error'),
                 'receipt_ref': str(folder / 'transport_result.json'), 'receipt_sha256': digest((folder / 'transport_result.json').read_bytes()),
                 'sent_packet_sha256': expected_hash, 'sent_prompt_sha256': digest(request['prompt']),
                 'error': result.get('error') or ('; '.join(errors) if errors else None),

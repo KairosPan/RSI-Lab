@@ -327,12 +327,14 @@ class Controller:
         raw = packet if isinstance(packet, bytes) else encode(packet)
         if not raw or not reservations or any(not finite(v) for v in reservations.values()):
             raise ValueError('A bounded nonempty input and explicit resource reservations are required')
-        metadata = metadata or {}
+        metadata = dict(metadata or {})
         payload = dict(work_id=work_id, kind=kind, packet_hash=digest(raw), reservations=reservations, metadata=metadata)
         def apply(tx):
             work = tx.get('work', work_id)
             if work['status'] != 'ready':
                 raise ValueError('Work is not eligible for dispatch')
+            if tx.find('registration', id='run_lifecycle', status='finalizing') and work['kind'] not in {'effect_reconcile', 'trial_settle'}:
+                raise ValueError('Finalizing run does not admit new external work')
             if work['issue_id']:
                 issue = tx.get('issue', work['issue_id'])
                 if issue['status'] != 'open' or any(issue[k] != v for k, v in work['expected_versions'].items()):
@@ -372,9 +374,18 @@ class Controller:
                         raise ValueError('Trial budget admission denied')
             eid = identity('effect', run_id, key)
             packet_ref = tx.blob(raw)
+            effect_metadata = dict(metadata)
+            if metadata.get('agent_session_id'):
+                from .agent_state import AgentState
+                turn = AgentState(self.store, run_id).prepare_turn_tx(tx,
+                    metadata['agent_session_id'], work_id,
+                    expected_turn_seq=metadata.get('expected_session_head'),
+                    expected_memory_revision=metadata.get('expected_memory_revision'),
+                    context_ref=metadata.get('context_ref'))
+                effect_metadata['agent_turn_id'] = turn['id']
             effect = tx.insert('effect', eid, {'work_id': work_id, 'issue_id': work['issue_id'], 'kind': kind,
                 'status': 'prepared', 'packet_ref': packet_ref, 'packet_hash': packet_ref, 'packet_sha256': packet_ref,
-                'idempotency_key': eid, 'metadata': metadata, 'reservations': reservations,
+                'idempotency_key': eid, 'metadata': effect_metadata, 'reservations': reservations,
                 'held_reservations': reservations, 'actual_costs': {}, 'accounting_unknown': False,
                 'receipt_ref': None, 'result_ref': None, 'provider_handle': None})
             tx.update('work', work_id, {'status': 'leased', 'effect_id': eid, 'attempts': work['attempts'] + 1})
@@ -404,13 +415,21 @@ class Controller:
                 issue = tx.get('issue', work['issue_id'])
                 if issue['status'] != 'open' or any(issue[k] != v for k, v in work['expected_versions'].items()):
                     raise ValueError('Prepared input versions are stale; cancel_prepared and replan before dispatch')
+            if tx.find('registration', id='run_lifecycle', status='finalizing') and work['kind'] not in {'effect_reconcile', 'trial_settle'}:
+                raise ValueError('Finalizing run blocks undispatched external work')
             # Independent producers survive an issue's scheduling changes, but
             # must not run after the issue owning their obligation was closed.
             owners = {effect.get('metadata', {}).get('issue_id'), work.get('inputs', {}).get('issue_id')}
             for issue_id in owners - {None}:
                 if tx.get('issue', issue_id)['status'] != 'open':
                     raise ValueError('Producer issue is closed; cancel_prepared before dispatch')
-            return tx.update('effect', effect_id, {'status': 'dispatching'})
+            patch = {'status': 'dispatching'}
+            if effect['metadata'].get('agent_turn_id'):
+                from .agent_state import AgentState
+                turn = AgentState(self.store, run_id).claim_turn_tx(tx,
+                    effect['metadata']['agent_turn_id'], effect_id)
+                patch['metadata'] = {**effect['metadata'], 'session_fence': turn['fence']}
+            return tx.update('effect', effect_id, patch)
         # Unique nonce prevents repeat-key fast path from bypassing the CAS.
         effect = self.store.mutate(run_id, 'dispatch:' + effect_id + ':' + str(time.time_ns()),
             'effect_dispatching', mark, payload={'effect_id': effect_id})
@@ -462,6 +481,9 @@ class Controller:
                 'accounting_unknown': False, 'receipt_ref': receipt_ref, 'result_ref': receipt_ref,
                 'never_dispatched': True, 'cancellation_reason': reason})
             tx.update('work', work['id'], {'status': 'cancelled', 'outcome_ref': receipt_ref})
+            if effect['metadata'].get('agent_turn_id'):
+                from .agent_state import AgentState
+                AgentState(self.store, run_id).cancel_turn_tx(tx, effect['metadata']['agent_turn_id'], reason)
             self._capacity(tx)
             return result
         return self.store.mutate(run_id, key, 'prepared_effect_cancelled', cancel, payload=payload)
@@ -474,7 +496,28 @@ class Controller:
             raise ValueError('Unverifiable external status or resource receipt')
         def apply(tx):
             effect = tx.get('effect', effect_id)
-            if effect['status'] not in {'dispatching', 'unknown'} and not effect.get('accounting_unknown'):
+            journal_replacement = False
+            writer_exit_upgrade = False
+            if (effect['status'] in {'succeeded', 'failed_definite'}
+                    and effect.get('result_ref') and receipt.get('recovered_from_journal') is True):
+                previous_result = json.loads(self.store.read_blob(effect['result_ref']))
+                if previous_result.get('recovered_from_journal') is True:
+                    binding_fields = ('response', 'sent_packet_sha256', 'sent_prompt_sha256',
+                                      'provider_thread_id', 'status')
+                    if any(previous_result.get(field) != receipt.get(field) for field in binding_fields):
+                        raise ValueError('Journal reconciliation contradicts the known execution result')
+                    if (previous_result.get('protocol_valid') is False
+                            and receipt.get('protocol_valid') is True):
+                        raise ValueError('Journal reconciliation cannot upgrade a rejected protocol')
+                    if (previous_result.get('native_writer_quiesced') is True
+                            and receipt.get('native_writer_quiesced') is not True):
+                        raise ValueError('Journal reconciliation cannot revoke durable writer exit')
+                    journal_replacement = True
+                    writer_exit_upgrade = (previous_result.get('recovery_requires_fencing') is True
+                        and receipt.get('native_writer_quiesced') is True
+                        and receipt.get('recovery_requires_fencing') is False)
+            if (effect['status'] not in {'dispatching', 'unknown'}
+                    and not effect.get('accounting_unknown') and not writer_exit_upgrade):
                 raise ValueError('External effect has already settled or never dispatched')
             if effect['status'] in {'succeeded', 'failed_definite'} and status != effect['status']:
                 raise ValueError('Accounting reconciliation cannot rewrite a known execution outcome')
@@ -507,13 +550,21 @@ class Controller:
                     held[resource] = 0
             unknown_cost = any(resource not in actual for resource in effect['reservations'])
             # Additional accounting does not replace the actual model/tool
-            # result with a receipt that may contain no response at all.
+            # result with a receipt that may contain no response at all. A
+            # journal-only terminal can later acquire durable writer-exit
+            # proof, but it must still attest the exact same native response.
             result_ref = (effect['result_ref'] if effect['status'] in {'succeeded', 'failed_definite'}
                           else receipt_ref)
+            if journal_replacement:
+                result_ref = receipt_ref
             result = tx.update('effect', effect_id, {'status': status, 'receipt_ref': receipt_ref,
                 'result_ref': result_ref, 'actual_costs': actual, 'held_reservations': held,
                 'accounting_unknown': unknown_cost,
                 'provider_handle': receipt.get('provider_handle', effect.get('provider_handle'))})
+            if effect['metadata'].get('agent_turn_id'):
+                from .agent_state import AgentState
+                AgentState(self.store, run_id).settle_request_tx(tx,
+                    effect['metadata']['agent_turn_id'], effect_id, receipt)
             tx.update('work', effect['work_id'], {'status': 'blocked' if status == 'unknown' else ('succeeded' if status == 'succeeded' else 'failed'),
                 'outcome_ref': result_ref})
             self._capacity(tx)

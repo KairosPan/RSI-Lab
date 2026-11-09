@@ -94,7 +94,8 @@ class SyntheticMetaExecutor:
             'issue_id': task.get('issue_id'), 'expected_versions': task['expected_versions'],
             'evidence_ids': list(dict.fromkeys(page['evidence_id'] for page in data['delivered_pages'])),
             'payload': payload}}
-        return {'status': 'succeeded', 'actual_costs': {'model_calls': 0, 'tokens': 0,
+        return {'status': 'succeeded', 'terminal_received': True, 'protocol_valid': True,
+            'actual_costs': {'model_calls': 0, 'tokens': 0,
                 'wall_seconds': time.monotonic() - started},
             'response': response, 'sent_packet_sha256': digest(packet_bytes),
             'sent_prompt_sha256': digest(envelope['prompt'].encode()), 'usage_complete': True,

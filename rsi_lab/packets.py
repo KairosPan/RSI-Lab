@@ -125,7 +125,7 @@ class PacketBuilder:
               model='gpt-6-astra', effort='medium', strategy='complete', page_cursors=None,
               owner_interpretation=None, prior_review=None):
         """One exact builder shared by planning, effects and final dispatch checks."""
-        if mode not in ('discovery', 'disposition') or strategy not in ('complete', 'paged', 'deduplicated', 'narrowed'):
+        if mode not in ('lab', 'discovery', 'disposition') or strategy not in ('complete', 'paged', 'deduplicated', 'narrowed'):
             raise ValueError('Unknown role mode or bounded context strategy')
         if not isinstance(instruction, str) or not instruction or not isinstance(schema, dict) or not isinstance(task, dict):
             raise ValueError('Packet requires instructions, response schema and versioned task')

@@ -8,7 +8,7 @@ RSI-Lab 是用于研究 Lab 执行、Meta 调查与受控机制修改的代码�
 
 | 目录 | 职责 |
 | --- | --- |
-| `rsi_lab/` | SQLite 事件与实体投影、Work/Wait、预算、上下文交付、Meta 调度、能力验收、Trial 和恢复 |
+| `rsi_lab/` | SQLite 账本、Lab/Meta 调度、各自持久会话与工作记忆、逐事件日志、上下文交付、能力验收和恢复 |
 | `rsi_domains/tabular/` | 使用合成 CSV 的可替换领域能力与离线演示 |
 | `rsi_domains/docking/` | Docking 输入契约、领域检查、能力适配和结果核验 |
 | `docking_rsi/` | Docking 控制面的兼容 CLI 与离线演示 |
@@ -23,7 +23,9 @@ RSI-Lab 是用于研究 Lab 执行、Meta 调查与受控机制修改的代码�
 
 通用核心已有执行账本、证据事实、依赖、交付回执与恢复机制。SQLite 中的 `fact`、`question` 等实体按当前代码语义使用：例如 `question` 保存向用户提问的记录，并非完整的科研问题模型。
 
-[系统设计 v2.1](docs/system-design.html) 描述目标架构。其六类 Scientific Memory 对象、完整的 Lab 与 Meta 持续协作，以及 Codex harness 自动修改和热切换等契约尚未全部实现。当前通用运行器主要推进 Meta 和已注册工具；独立的 Lab 循环位于 `lab_harness/`，仍需进一步接入通用控制面。
+通用运行器现在可调度 Lab、Meta 和已注册工具。Lab 与 Meta 各自拥有持久 Codex 会话及版本化工作记忆；新调用通过精确 thread 身份续接，原始事件逐条落盘。模型只提出受控命令，工具由 Controller 执行；工具结果登记后可安排 Lab 的下一步。运行器以明确的工作、预算和等待条件推进，不把 `no_action` 或队列暂时为空视为科学任务达标。入口、恢复和存储边界见[持久 Agent 使用说明](docs/persistent-agents.md)。
+
+[系统设计 v2.1](docs/system-design.html) 仍是完整目标规格。六类 Scientific Memory 对象、全自动工程修复发布，以及可逐请求拦截 Codex 内部工具/压缩/重试的 runtime 尚未全部实现。当前 CLI 后端禁用原生工具，容量检查覆盖可观察的会话历史与本轮输入；它不声称已证明完整 provider 输入或取得模型的全部内部推理。旧 `lab_harness/` 保留为兼容执行器，不与新核心的会话或工作记忆混用。
 
 ## 离线运行
 
@@ -45,8 +47,8 @@ python3 -m docking_rsi --root runs/docking-demo --run demo status
 
 1. 准备输入文件、协议和任务计划，显式指定文件位置和工具版本。
 2. 初始化独立运行目录及预算，注册获准的领域适配器。
-3. 通过控制器提交工作、执行工具和摄取结果；保留原始产物及来源。
-4. 使用相同运行身份恢复已登记状态，对结果未知的调用先对账。
+3. 用 `lab-start` 提交初始 Lab 工作，再用 `run-until-wait` 推进已注册的 Lab/Meta/工具处理器；保留原始产物及来源。
+4. 使用相同运行身份恢复已登记状态；外层回执缺失时可从所属调用日志核验已知终态，缺失费用继续保留对账义务。结果未知或旧 writer 尚未确认停止时先处理这些义务；检查点和显式会话重建保留工作记忆，不重做已完成工具动作。
 
 真实模型运行需要用户自行配置 Codex CLI 和模型访问。Docking 的化学准备与计算工具另需 RDKit、Meeko 等依赖以及明确配置的 Vina 可执行文件；具体依赖和输入见 [使用说明](docs/publication-and-reproduction.md)。本仓库不附带凭证、模型权重、受体或实验数据集。
 
@@ -78,6 +80,7 @@ npm run build
 
 ## 文档
 
+- [持久会话、工作记忆与逐事件日志](docs/persistent-agents.md)
 - [通用核心与领域接口](docs/rsi-lab-core.md)
 - [Docking 控制面](docs/docking-rsi-v2.md)
 - [独立 Lab harness](docs/lab-harness-v1.md)
@@ -85,4 +88,4 @@ npm run build
 - [Vina 执行与核验工具](docs/bounded-vina-screen.md)
 - [目标系统设计](docs/system-design.html)
 
-Agent 的局部上下文、共享执行账本和共享科研记忆有不同的归属与权威。角色看到的数据由控制器选择和交付；目录或角色名称本身不构成访问隔离。完整边界见系统设计第 9 节。
+每个 agent 的工作记忆保存自己的计划、尝试和未决问题；共享账本保存执行事实和费用；Scientific Memory 保存受来源与版本约束的科研状态。工作记忆或会话历史不能直接覆盖共享事实。跨角色传递使用显式 Handoff/Work，接收方重新获得本轮来源；目录或角色名称本身不构成操作系统级保密。

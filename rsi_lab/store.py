@@ -10,7 +10,8 @@ import time
 
 KINDS = ('issue', 'work', 'wait', 'request', 'delivery', 'effect', 'trial', 'capability',
          'study', 'shard', 'version', 'budget', 'fact', 'proposal', 'dependency',
-         'question', 'measurement', 'registration')
+         'question', 'measurement', 'registration', 'agent_owner', 'agent_session',
+         'agent_turn', 'working_memory', 'agent_checkpoint', 'agent_handoff')
 META = {'id', 'run_id', 'version', 'created_seq', 'updated_seq'}
 
 
@@ -209,6 +210,8 @@ class Transaction:
     def update(self, kind, entity_id, patch, expected_version=None):
         if kind == 'fact':
             raise ValueError('Recorded facts are immutable; append new evidence with a new identity')
+        if kind in {'working_memory', 'agent_checkpoint'}:
+            raise ValueError('Agent revisions and checkpoints are immutable; append a new version')
         if META.intersection(patch):
             raise ValueError('Entity metadata is owned by the ledger')
         old = self.get(kind, entity_id)

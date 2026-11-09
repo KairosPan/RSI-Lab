@@ -27,9 +27,9 @@ class Adapter:
         for value in (self.adapter_id, self.version, self.effect_kind):
             if not isinstance(value, str) or not value or len(value) > 160:
                 raise ValueError('Adapter identities must be explicit bounded strings')
-        if self.effect_kind in {'meta', 'capability_acceptance'}:
+        if self.effect_kind in {'lab', 'meta', 'capability_acceptance'}:
             raise ValueError('Adapter may not impersonate a controller-owned effect kind')
-        if any(k in {'meta','capability_acceptance'} for k in self.legacy_effect_kinds):
+        if any(k in {'lab','meta','capability_acceptance'} for k in self.legacy_effect_kinds):
             raise ValueError('Legacy aliases cannot take over controller-owned recovery')
         if not isinstance(self.manifest, dict) or not self.manifest:
             raise ValueError('Adapter must describe its applicability and contracts')

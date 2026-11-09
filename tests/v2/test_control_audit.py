@@ -202,6 +202,62 @@ class ControlAuditTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'obligations'):
             self.control.close_issue('audit', 'i', 'closed_unresolved', 'stop', 'close')
 
+    def journal_receipt(self, effect, **changes):
+        return {'status': 'succeeded', 'actual_costs': {'tool_calls': 1},
+            'response': {'value': 'original'}, 'sent_packet_sha256': effect['packet_hash'],
+            'sent_prompt_sha256': 'fixture-prompt-hash', 'provider_thread_id': 'fixture-thread',
+            'recovered_from_journal': True, 'terminal_received': True, 'protocol_valid': True,
+            'native_writer_quiesced': False, 'recovery_requires_fencing': True,
+            'reconciliation': {'effect_id': effect['id'], 'provenance': 'verified local journal'},
+            **changes}
+
+    def test_journal_terminal_can_gain_writer_exit_without_rebilling(self):
+        effect = self.effect()
+        initial = self.journal_receipt(effect)
+        first = self.control.dispatch_effect('audit', effect['id'], lambda *_: initial)
+        self.assertFalse(first['accounting_unknown'])
+        final_receipt = {**initial, 'native_writer_quiesced': True, 'recovery_requires_fencing': False}
+        final = self.control.reconcile('audit', effect['id'], final_receipt, 'writer_exit')
+        self.assertNotEqual(first['result_ref'], final['result_ref'])
+        self.assertEqual(json.loads(self.store.read_blob(final['result_ref'])), final_receipt)
+        self.assertEqual(self.store.get('audit', 'work', effect['work_id'])['outcome_ref'], final['result_ref'])
+        self.assertEqual(self.control.reconcile('audit', effect['id'], final_receipt, 'writer_exit'), final)
+        with self.assertRaisesRegex(ValueError, 'already settled'):
+            self.control.reconcile('audit', effect['id'], final_receipt, 'duplicate_exit')
+        self.assertEqual(self.store.get('audit', 'budget', 'tool_calls')['spent'], 1)
+        self.store.verify_history('audit')
+
+    def test_journal_exit_cannot_change_response_or_input_identity(self):
+        for index, replacement in enumerate(({'response': {'value': 'replaced'}},
+                {'sent_packet_sha256': 'other-packet'}, {'sent_prompt_sha256': 'other-prompt'},
+                {'provider_thread_id': 'other-thread'}, {'status': 'failed_definite'})):
+            with self.subTest(replacement=replacement):
+                effect = self.effect(name='journal_conflict_' + str(index))
+                initial = self.journal_receipt(effect)
+                first = self.control.dispatch_effect('audit', effect['id'], lambda *_: initial)
+                final_receipt = {**initial, 'native_writer_quiesced': True,
+                    'recovery_requires_fencing': False, **replacement}
+                with self.assertRaisesRegex(ValueError, 'contradicts'):
+                    self.control.reconcile('audit', effect['id'], final_receipt, 'conflict_' + str(index))
+                current = self.store.get('audit', 'effect', effect['id'])
+                self.assertEqual(current['result_ref'], first['result_ref'])
+                self.assertEqual(current['receipt_ref'], first['receipt_ref'])
+        self.assertEqual(self.store.get('audit', 'budget', 'tool_calls')['spent'], 5)
+
+    def test_journal_exit_cannot_upgrade_rejected_protocol(self):
+        effect = self.effect()
+        initial = self.journal_receipt(effect, protocol_valid=False)
+        first = self.control.dispatch_effect('audit', effect['id'], lambda *_: initial)
+        final_receipt = {**initial, 'native_writer_quiesced': True,
+            'recovery_requires_fencing': False, 'protocol_valid': True}
+        with self.assertRaisesRegex(ValueError, 'rejected protocol'):
+            self.control.reconcile('audit', effect['id'], final_receipt, 'changed_protocol')
+        final_receipt['protocol_valid'] = False
+        final = self.control.reconcile('audit', effect['id'], final_receipt, 'confirmed_exit')
+        self.assertNotEqual(first['result_ref'], final['result_ref'])
+        self.assertFalse(json.loads(self.store.read_blob(final['result_ref']))['protocol_valid'])
+        self.assertEqual(self.store.get('audit', 'budget', 'tool_calls')['spent'], 1)
+
     def test_closed_issue_cancels_independent_ready_producer(self):
         self.issue()
         work = self.control.enqueue('audit', 'evidence_retrieve', 'retrieve', 'retrieve',

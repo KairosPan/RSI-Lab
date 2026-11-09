@@ -52,3 +52,13 @@ frontend/data/
 frontend/dist/
 frontend/docs/*.png
 .playwright-cli/
+
+# Runtime state created when --root points at the checkout itself
+# Anchored paths keep source modules/packages with similar names trackable.
+/agents/
+/sessions/
+/archived_sessions/
+/execution_journal/
+/calls/
+/working_memory/
+/objects/
