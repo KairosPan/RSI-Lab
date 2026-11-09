@@ -1,0 +1,2699 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="RSI-Lab 完整系统设计 v2.1：Meta 主动检测、开源 Codex harness 自动修改、编译验收、版本切换、续跑与失败回退；Scientific Memory 的科研对象、来源、检索、修订与行动闭环。">
+<meta name="html-revision" content="2026-11-08-public-code-target-spec">
+<title>RSI-Lab 完整系统设计 v2.1</title><style>
+:root{--bg:#f5f5ef;--paper:#fffefa;--ink:#202f2c;--muted:#68746e;--line:#dce3dc;--accent:#155a4d;--soft:#eaf1ec;--side:286px}
+*{box-sizing:border-box}html{scroll-behavior:smooth;scroll-padding-top:32px}body{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Noto Sans CJK SC","Microsoft YaHei",sans-serif;font-size:15px;line-height:1.9}a{color:var(--accent);text-underline-offset:3px}button{font:inherit;cursor:pointer}.skip{position:absolute;left:-10000px}.skip:focus{left:20px;top:10px;z-index:20;background:white;padding:10px}
+.sidebar{position:fixed;inset:0 auto 0 0;width:var(--side);padding:30px 22px 24px 28px;overflow-y:auto;border-right:1px solid var(--line);background:#eef1e9}.brand{font-size:20px;font-weight:760;letter-spacing:-.5px}.edition{font-size:11px;letter-spacing:2px;color:var(--muted);margin:2px 0 24px}.toc-label{font-size:11px;font-weight:700;color:var(--muted);letter-spacing:2px;margin-bottom:10px}.sidebar ul{list-style:none;padding:0;margin:0}.sidebar li{margin:0}.sidebar a{display:block;text-decoration:none;font-size:12px;line-height:1.6;padding:5px 9px;border-radius:6px;color:#50635b}.sidebar a:hover,.sidebar a.active{background:#dbe8dd;color:#103f33}.sidebar>nav>ul>li>a{font-weight:700;margin:12px 0 4px}.sidebar ul ul a{padding-left:15px}.sidebar .actions{display:flex;gap:12px;align-items:center;margin:22px 0 10px}.actions button{background:white;border:1px solid #c6d5c9;border-radius:7px;padding:5px 12px;font-size:12px;color:var(--accent)}.actions a{font-size:12px}
+.page{margin-left:var(--side);padding:46px 5vw 90px}.document{max-width:1090px;margin:auto;background:var(--paper);padding:50px 58px 62px;border:1px solid var(--line);border-radius:14px;box-shadow:0 9px 36px #193e2510}.eyebrow{color:var(--accent);font-size:11px;letter-spacing:2px;font-weight:700;margin-bottom:15px}.badge{display:inline-block;font-size:11px;letter-spacing:0;background:#f5ebce;color:#705a20;border-radius:20px;padding:2px 10px;margin-left:8px}h1{font-size:clamp(28px,3vw,42px);line-height:1.4;letter-spacing:-1px;margin:0 0 18px;max-width:900px}h1+p{font-size:13px;color:var(--muted);padding-bottom:24px;border-bottom:1px solid var(--line)}h2{font-size:28px;line-height:1.5;margin:62px 0 24px;padding:18px 0 14px;border-top:3px solid var(--accent);border-bottom:1px solid var(--line)}h3{font-size:21px;line-height:1.5;margin:40px 0 15px;color:#164f42}h4{font-size:16px;margin:26px 0 12px}p{margin:14px 0}strong{font-weight:700}ul,ol{padding-left:24px}li{margin:7px 0}li p{margin:7px 0}code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.87em;background:#edf0e9;padding:2px 5px;border-radius:4px;overflow-wrap:anywhere}pre{overflow-x:auto;padding:20px 22px;border:1px solid #d8e2d9;border-radius:9px;background:#f1f5ef;line-height:1.65;font-size:12px;margin:18px 0}pre code{background:none;padding:0;overflow-wrap:normal}div.sourceCode{margin:18px 0}div.sourceCode pre{margin:0}blockquote{border-left:3px solid var(--accent);padding:3px 18px;margin:18px 0;background:var(--soft)}
+.table-scroll{overflow-x:auto;margin:20px 0;border:1px solid var(--line);border-radius:9px}table{border-collapse:collapse;width:100%;font-size:13px;line-height:1.75;margin:0}th,td{padding:12px 13px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line);min-width:120px}th{font-weight:700;background:#e8eee5;color:#234b3d}td:first-child{font-weight:560;min-width:120px}tbody tr:nth-child(even){background:#f7f8f2}tbody tr:last-child td{border-bottom:none}table code{font-size:11px;overflow-wrap:anywhere}.architecture-diagram{margin:25px 0 12px;padding:18px 16px 12px;border:1px solid var(--line);border-radius:10px;background:#fafcf7;overflow:auto;text-align:center}.architecture-diagram svg{display:block;width:100%;height:auto;max-height:1100px;margin:auto}.architecture-diagram figcaption{font-size:12px;color:var(--muted);margin-top:12px}.diagram-source{font-size:12px;color:var(--muted);margin:8px 0 28px}.diagram-source summary{cursor:pointer}.diagram-source pre{text-align:left}.footer{max-width:1090px;margin:20px auto;color:var(--muted);font-size:12px;display:flex;justify-content:space-between;gap:20px}.mobile-nav{display:none}.progress{position:fixed;top:0;left:var(--side);height:3px;width:0;background:#398969;z-index:30}
+@media(min-width:1600px){.document{padding:58px 70px}.page{padding-top:56px}}@media(max-width:1100px){:root{--side:248px}.sidebar{padding:24px 15px}.page{padding:25px}.document{padding:35px 28px}}@media(max-width:780px){:root{--side:0px}.sidebar{position:relative;width:auto;max-height:none;padding:18px 22px;border-right:0;border-bottom:1px solid var(--line)}.sidebar .edition{margin-bottom:8px}.toc-label{display:none}.sidebar nav{display:none;max-height:55vh;overflow:auto}.sidebar.open nav{display:block}.mobile-nav{display:inline-block;border:1px solid #c7d5c9;background:#f9fbf6;border-radius:6px;padding:3px 10px;margin-right:8px}.sidebar .actions{margin:8px 0 0}.page{margin:0;padding:18px 12px 40px}.document{padding:28px 20px;border-radius:9px}h1{font-size:27px}h2{font-size:23px;margin-top:40px}h3{font-size:19px}.progress{left:0}pre{padding:15px;font-size:11px}th,td{min-width:145px}.footer{padding:0 8px;display:block}.architecture-diagram{padding:8px}.architecture-diagram svg{min-width:450px}}
+@media print{body{background:white;font-size:10pt;color:black;line-height:1.65}.sidebar,.progress,.footer,.diagram-source,.eyebrow{display:none}.page{margin:0;padding:0}.document{max-width:none;margin:0;padding:0;border:0;box-shadow:none}h1{font-size:24pt}h2{font-size:18pt;break-before:page;border-top:2px solid #155a4d}h3{font-size:14pt}h1,h2,h3,h4{break-after:avoid}p,li{orphans:3;widows:3}pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:8pt}.table-scroll{overflow:visible;border:0}table{font-size:8pt}th,td{padding:6px;min-width:0}thead{display:table-header-group}tr{break-inside:avoid}.architecture-diagram{break-inside:avoid;overflow:visible}.architecture-diagram svg{max-height:210mm;width:100%;min-width:0}a{color:inherit;text-decoration:none}}
+html { -webkit-text-size-adjust: 100%; }
+pre > code.sourceCode { white-space: pre; position: relative; }
+pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+pre > code.sourceCode > span:empty { height: 1.2em; }
+.sourceCode { overflow: visible; }
+code.sourceCode > span { color: inherit; text-decoration: inherit; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+pre > code.sourceCode { white-space: pre-wrap; }
+pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+}
+pre.numberSource code
+  { counter-reset: source-line 0; }
+pre.numberSource code > span
+  { position: relative; left: -4em; counter-increment: source-line; }
+pre.numberSource code > span > a:first-child::before
+  { content: counter(source-line);
+    position: relative; left: -1em; text-align: right; vertical-align: baseline;
+    border: none; display: inline-block;
+    -webkit-touch-callout: none; -webkit-user-select: none;
+    -khtml-user-select: none; -moz-user-select: none;
+    -ms-user-select: none; user-select: none;
+    padding: 0 4px; width: 4em;
+    color: #aaaaaa;
+  }
+pre.numberSource { margin-left: 3em; border-left: 1px solid #aaaaaa;  padding-left: 4px; }
+div.sourceCode
+  {   }
+@media screen {
+pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+}
+code span.al { color: #ff0000; font-weight: bold; } /* Alert */
+code span.an { color: #60a0b0; font-weight: bold; font-style: italic; } /* Annotation */
+code span.at { color: #7d9029; } /* Attribute */
+code span.bn { color: #40a070; } /* BaseN */
+code span.bu { color: #008000; } /* BuiltIn */
+code span.cf { color: #007020; font-weight: bold; } /* ControlFlow */
+code span.ch { color: #4070a0; } /* Char */
+code span.cn { color: #880000; } /* Constant */
+code span.co { color: #60a0b0; font-style: italic; } /* Comment */
+code span.cv { color: #60a0b0; font-weight: bold; font-style: italic; } /* CommentVar */
+code span.do { color: #ba2121; font-style: italic; } /* Documentation */
+code span.dt { color: #902000; } /* DataType */
+code span.dv { color: #40a070; } /* DecVal */
+code span.er { color: #ff0000; font-weight: bold; } /* Error */
+code span.ex { } /* Extension */
+code span.fl { color: #40a070; } /* Float */
+code span.fu { color: #06287e; } /* Function */
+code span.im { color: #008000; font-weight: bold; } /* Import */
+code span.in { color: #60a0b0; font-weight: bold; font-style: italic; } /* Information */
+code span.kw { color: #007020; font-weight: bold; } /* Keyword */
+code span.op { color: #666666; } /* Operator */
+code span.ot { color: #007020; } /* Other */
+code span.pp { color: #bc7a00; } /* Preprocessor */
+code span.sc { color: #4070a0; } /* SpecialChar */
+code span.ss { color: #bb6688; } /* SpecialString */
+code span.st { color: #4070a0; } /* String */
+code span.va { color: #19177c; } /* Variable */
+code span.vs { color: #4070a0; } /* VerbatimString */
+code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } /* Warning */
+
+.sidebar>nav>ul>li>a{font-weight:400;margin:0}.sidebar .toc-level-1{font-size:12px;font-weight:650!important;margin-bottom:10px!important}.sidebar .toc-level-2{font-size:12px;font-weight:750!important;margin:14px 0 4px!important;border-top:1px solid #d1dcd1;padding-top:12px}.sidebar .toc-level-3{padding-left:12px}.sidebar .toc-level-4{padding-left:24px;font-size:11px;color:#63766b}.sidebar .toc-highlight{border-left:2px solid #37785e;background:#e2ecdf}.jump-links{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0 25px;padding:14px;background:#eef4ea;border:1px solid #cfdecd;border-radius:9px}.jump-links a{font-size:12px;text-decoration:none;border:1px solid #b8cdbb;background:#fffefa;padding:5px 10px;border-radius:6px}.jump-links a:first-child{background:#155a4d;color:white;border-color:#155a4d}.source-link{font-size:12px;color:var(--muted);margin-top:18px}.sidebar .source-link a{padding:0;display:inline}.architecture-diagram svg{max-height:none}.diagram-source code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.footer code{font-size:10px}.document h4[id^="7"]{padding:14px 16px;background:#edf4e9;border-left:3px solid #3b7a5b;border-radius:0 6px 6px 0}
+@media print{.jump-links{display:none}.architecture-diagram svg{max-height:210mm}.document h4[id^="7"]{padding:8px;background:#f3f6ef}}
+.document h4[id="开源-codex-harness-的自动修改与版本切换"]{padding:14px 16px;background:#edf4e9;border-left:3px solid #3b7a5b;border-radius:0 6px 6px 0}
+.document h5{font-size:15px;line-height:1.65;margin:30px 0 12px;color:#164f42;padding-left:12px;border-left:3px solid #8fac93}.sidebar .toc-level-5{padding-left:32px;font-size:11px;color:#63766b}.memory-diagram svg{max-width:680px}.document h4[id="可选知识和记忆"]{padding:14px 16px;background:#edf4e9;border-left:3px solid #3b7a5b;border-radius:0 6px 6px 0}@media print{h5{break-after:avoid}.memory-diagram svg{max-height:175mm}}
+</style></head>
+<body><a class="skip" href="#content">跳转到正文</a><div class="progress" aria-hidden="true"></div>
+<aside class="sidebar"><div class="brand">RSI / LAB</div><div class="edition">SYSTEM DESIGN · V2.1</div>
+<div class="toc-label">完整文档目录</div><nav aria-label="章节目录"><ul>
+<li><a class="toc-level-1" href="#rsi-lab-系统设计通用内核领域包计算任务与运行中修复">RSI-Lab 系统设计：通用内核、领域包、计算任务与运行中修复</a></li>
+<li><a class="toc-level-2" href="#第一部分三层解耦">第一部分：三层解耦</a></li>
+<li><a class="toc-level-3" href="#a.1-三层的责任与依赖方向">A.1 三层的责任与依赖方向</a></li>
+<li><a class="toc-level-3" href="#a.2-代码与任务目录">A.2 代码与任务目录</a></li>
+<li><a class="toc-level-3" href="#a.3-task调度工作和外部执行的区别">A.3 task、调度工作和外部执行的区别</a></li>
+<li><a class="toc-level-3" href="#a.4-通用接口与能力注册">A.4 通用接口与能力注册</a></li>
+<li><a class="toc-level-3" href="#a.5-任务规格与冻结要求">A.5 任务规格与冻结要求</a></li>
+<li><a class="toc-level-3" href="#a.6-版本来源与选择性重算">A.6 版本、来源与选择性重算</a></li>
+<li><a class="toc-level-3" href="#a.7-meta-可修改的所有权边界">A.7 Meta 可修改的所有权边界</a></li>
+<li><a class="toc-level-3" href="#a.8-三层解耦的验收">A.8 三层解耦的验收</a></li>
+<li><a class="toc-level-2" href="#第二部分任务进行中的-lab-meta-编排">第二部分：任务进行中的 Lab / Meta 编排</a></li>
+<li><a class="toc-level-3" href="#目标与默认路径">0. 目标与默认路径</a></li>
+<li><a class="toc-level-3" href="#架构和不变量">1. 架构和不变量</a></li>
+<li><a class="toc-level-3" href="#labmeta-与代码执行器">2. Lab、Meta 与代码执行器</a></li>
+<li><a class="toc-level-3" href="#账本实体与版本">3. 账本、实体与版本</a></li>
+<li><a class="toc-level-4" href="#存储契约">3.1 存储契约</a></li>
+<li><a class="toc-level-4" href="#核心实体">3.2 核心实体</a></li>
+<li><a class="toc-level-3" href="#工作集依赖与安全点">4. 工作集、依赖与安全点</a></li>
+<li><a class="toc-level-3" href="#配置授权与预算">5. 配置、授权与预算</a></li>
+<li><a class="toc-level-4" href="#启动配置">5.1 启动配置</a></li>
+<li><a class="toc-level-4" href="#三类额度">5.2 三类额度</a></li>
+<li><a class="toc-level-3" href="#外部效果与崩溃恢复">6. 外部效果与崩溃恢复</a></li>
+<li><a class="toc-level-3" href="#调度与运行中修复">7. 调度与运行中修复</a></li>
+<li><a class="toc-level-4 toc-highlight" href="#主动发现的责任与唤醒">7.1 主动发现的责任与唤醒</a></li>
+<li><a class="toc-level-4 toc-highlight" href="#检查正常路径与未知问题">7.2 检查正常路径与未知问题</a></li>
+<li><a class="toc-level-4 toc-highlight" href="#主动取证与持续调查">7.3 主动取证与持续调查</a></li>
+<li><a class="toc-level-4 toc-highlight" href="#覆盖证明与有条件的-no_action">7.4 覆盖证明与有条件的 no_action</a></li>
+<li><a class="toc-level-4 toc-highlight" href="#主动性如何验收">7.5 主动性如何验收</a></li>
+<li><a class="toc-level-4 toc-highlight" href="#参考原型与本项目扩展">7.6 参考原型与本项目扩展</a></li>
+<li><a class="toc-level-3" href="#等待与容量处置">8. 等待与容量处置</a></li>
+<li><a class="toc-level-3" href="#上下文证据与-ack">9. 上下文、证据与 ACK</a></li>
+<li><a class="toc-level-3" href="#lab-执行和领域批次">10. Lab 执行和领域批次</a></li>
+<li><a class="toc-level-4" href="#通用步骤契约">10.1 通用步骤契约</a></li>
+<li><a class="toc-level-4" href="#化合物工作流示例">10.2 化合物工作流示例</a></li>
+<li><a class="toc-level-4 toc-highlight" href="#可选知识和记忆">10.3 Scientific Memory：通用科研状态与记忆机制</a></li>
+<li><a class="toc-level-5" href="#scientific-memory-objects">10.3.1 三层职责与六类科研对象</a></li>
+<li><a class="toc-level-5" href="#scientific-memory-update">10.3.2 登记、关联与判断修订</a></li>
+<li><a class="toc-level-5" href="#scientific-memory-judgment">10.3.3 判断、支持检查和新鲜度分别保存</a></li>
+<li><a class="toc-level-5" href="#scientific-memory-retrieval">10.3.4 按问题构建本次工作上下文</a></li>
+<li><a class="toc-level-5" href="#scientific-memory-investigation">10.3.5 研究行动、结果与下一次选择</a></li>
+<li><a class="toc-level-5" href="#scientific-memory-long-term">10.3.6 长期归纳、遗忘与跨任务迁移</a></li>
+<li><a class="toc-level-5" href="#scientific-memory-runtime">10.3.7 角色、计费与领域预设</a></li>
+<li><a class="toc-level-5" href="#scientific-memory-validation">10.3.8 机制验收与科研收益</a></li>
+<li><a class="toc-level-3" href="#统一-changeengine修复验收发布续跑">11. 统一 ChangeEngine：修复、验收、发布、续跑</a></li>
+<li><a class="toc-level-4" href="#可修改范围">11.1 可修改范围</a></li>
+<li><a class="toc-level-4" href="#changespec-与-acceptancespec">11.2 ChangeSpec 与 AcceptanceSpec</a></li>
+<li><a class="toc-level-4" href="#生命周期与发布事务">11.3 生命周期与发布事务</a></li>
+<li><a class="toc-level-4" href="#代码数据和协议的恢复">11.4 代码、数据和协议的恢复</a></li>
+<li><a class="toc-level-4" href="#结算语义">11.5 结算语义</a></li>
+<li><a class="toc-level-4 toc-highlight" href="#开源-codex-harness-的自动修改与版本切换">11.6 开源 Codex harness 的自动修改与版本切换</a></li>
+<li><a class="toc-level-3" href="#可选的独立收益研究">12. 可选的独立收益研究</a></li>
+<li><a class="toc-level-3" href="#停止收尾与恢复">13. 停止、收尾与恢复</a></li>
+<li><a class="toc-level-4" href="#停止新工作">13.1 停止新工作</a></li>
+<li><a class="toc-level-4" href="#报告相互独立的状态">13.2 报告相互独立的状态</a></li>
+<li><a class="toc-level-4" href="#重启与旧轨迹迁移">13.3 重启与旧轨迹迁移</a></li>
+<li><a class="toc-level-3" href="#模块和-api">14. 模块和 API</a></li>
+<li><a class="toc-level-3" href="#运行指标与审计">15. 运行指标与审计</a></li>
+<li><a class="toc-level-3" href="#实现与迁移顺序">16. 实现与迁移顺序</a></li>
+<li><a class="toc-level-3" href="#验收与故障注入">17. 验收与故障注入</a></li>
+<li><a class="toc-level-4" href="#领域中立-fixture">17.1 领域中立 fixture</a></li>
+<li><a class="toc-level-4" href="#必需矩阵">17.2 必需矩阵</a></li>
+<li><a class="toc-level-4" href="#p4-真实案例留档">17.3 P4 真实案例留档</a></li>
+<li><a class="toc-level-3" href="#设计完成与实施完成的区别">18. 设计完成与实施完成的区别</a></li>
+<li><a class="toc-level-3" href="#附录关键-reason_code">附录：关键 reason_code</a></li>
+</ul></nav>
+<div class="actions"><button class="mobile-nav" type="button" aria-expanded="false">展开目录</button><button type="button" id="print">打印 / PDF</button><a href="#content">回到顶部 ↑</a></div>
+</aside>
+<main class="page" id="content"><article class="document"><div class="eyebrow">ARCHITECTURE &amp; ORCHESTRATION <span class="badge">设计规格 · 待实现</span></div><div class="jump-links" aria-label="重点章节"><a href="#开源-codex-harness-的自动修改与版本切换">Codex harness 自修改 §11.6</a><a href="#主动发现的责任与唤醒">主动检测 §7.1–7.6</a><a href="#统一-changeengine修复验收发布续跑">ChangeEngine：修复与续跑</a><a href="#可选知识和记忆">Scientific Memory §10.3</a><a href="#验收与故障注入">验收与故障注入</a></div><h1 id="rsi-lab-系统设计通用内核领域包计算任务与运行中修复">RSI-Lab 系统设计：通用内核、领域包、计算任务与运行中修复</h1>
+<p>版本：2.1 · 日期：2026-11-08 · 状态：目标设计规格，待逐项实现与验证。当前代码边界见 <a href="rsi-lab-core.md">核心实现说明</a>；本文不表示全部能力已交付。</p>
+<p>本版将系统拆为 <code>rsi_lab</code>、<code>rsi_domains</code> 与计算任务 <code>task</code>，并将 Meta 的主路径改为任务进行中的发现、调查、修复、小范围验收、发布与续跑。预先授权范围和预算内的操作自主完成；冻结科学要求保持不变。P4 验收实际修复和成功继续任务，独立收益比较是后续可选研究。</p>
+<p>v2.1 明确 Meta 对发现问题负责：独立读取运行事实，在没有 Lab 报错、没有规则告警时也持续巡检；主动追查目标偏离、静默数据错误和能力缺口，自行取证并跟进处理。周期巡检、停滞诊断、覆盖记录和反证要求见 §7.1–7.6。检测主动性以提前发现和调查闭环衡量，不以告警数或修改数衡量。</p>
+<p>v2.1 同时将<strong>开源 Codex harness 的源码修复纳入主闭环</strong>：Meta 可自主发现执行层问题，在 task 预授权范围内修改指定 fork，编译并验收候选，切换本运行使用的 Codex 版本后继续任务；失败自动撤销候选或回退。该能力使用同一 ChangeEngine，具体绑定、进程切换与恢复契约见 §11.6；它是必须实现和验证的目标能力，当前文档更新不表示运行代码已具备此能力。</p>
+<p>本文取代 v1.0 的默认配对实验发布门槛、T3 整体禁用及只在下一运行启用的限制；保留不可变事实、精确交付、预算守恒、外部效果恢复和版本追踪要求。本文是完整的目标设计，不报告新运行结果，也不表示代码已按此重构。本发布副本仅包含目标设计，不分发既有实验记录、结果快照或原始模型对话。</p>
+<p><strong>Scientific Memory 修订：</strong>新增以研究问题组织的持久科研状态，连接来源、判断、研究行动、方法经验与决定。按问题读取支持/反证与未结工作，来源变化和新增证据均触发有界复核；观察卡与引用统一交付。主契约见 <a href="#可选知识和记忆">§10.3</a>，实体、API、预算、迁移和 SM01–SM20 验收同步更新；通用机制不依赖化合物候选或单一评分。</p>
+<h2 id="第一部分三层解耦">第一部分：三层解耦</h2>
+<h3 id="a.1-三层的责任与依赖方向">A.1 三层的责任与依赖方向</h3>
+<p>系统拆为通用内核 <code>rsi_lab</code>、领域包 <code>rsi_domains</code> 和计算任务 <code>task</code>。Lab 与 Meta 是内核承载的执行角色；领域包提供科学能力；task 指定这一次要完成什么、用哪些输入、满足哪些条件。</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>层</th>
+<th>负责</th>
+<th>不应包含</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>rsi_lab</code></td>
+<td>状态、调度、预算、事件与证据、外部调用、上下文、能力加载、变更验收与恢复</td>
+<td>化合物结构、靶点名称、领域分数公式、具体科学阈值、特定任务的完成数量</td>
+</tr>
+<tr>
+<td><code>rsi_domains.&lt;domain&gt;</code></td>
+<td>领域数据类型、输入校验、身份规范化、计算与分析适配器、结果解释、领域验收规则</td>
+<td>通用调度器实现、全局事件存储、绕过内核的调用与计费、当前任务的硬编码配置</td>
+</tr>
+<tr>
+<td><code>task</code></td>
+<td>科学目标、输入与协议、所选领域能力、计算依赖、冻结要求、预算与 Meta 授权、产物及完成判据</td>
+<td>复制一套内核、隐含的全局状态、在提示词中覆盖冻结协议</td>
+</tr>
+</tbody>
+</table>
+<p>依赖方向固定：领域包实现内核定义的接口；task 通过配置引用内核与领域能力。<code>rsi_lab</code> 不导入具体领域包，安装内核并运行领域中立 fixture 时不需要安装化学等领域依赖。进程入口按登记的包名、接口版本和内容哈希加载实现；内核通过接口调用，不通过 <code>if domain == ...</code> 分支判断科学含义。</p>
+<p>领域包可以依赖独立数值库和提供多个计算后端；每个后端声明兼容协议、资源需求、结果格式和恢复方式。更换后端仍需通过同一版本与来源检查，不因 Python 接口相同就视为结果可互换。</p>
+<p>Codex harness 是 <code>rsi_lab</code> 通过 <code>AgentRuntimeAdapter</code> 管理的执行组件，登记为 <code>codex_runtime</code>，不另增一个领域层。应用侧提示、上下文和策略与开源 Codex 内部的 agent loop、工具调度、重试、上下文压缩实现分别标识；诊断必须指出改动属于哪一组件。源码修复面向 RSI-Lab 自己构建并启动的 Codex fork；官方桌面应用及本次编辑文档的聊天进程不作为隐含的版本切换目标。开源 harness 与 CLI、SDK、app-server 的关系见 <a href="https://developers.openai.com/blog/codex-as-a-platform">OpenAI 官方说明</a>；本文后续 runtime 管理契约是 RSI-Lab 的目标设计。</p>
+<figure class="architecture-diagram"><svg role="img" aria-label="三层职责与证据循环" width="336pt" height="525pt"
+ viewBox="0.00 0.00 336.00 525.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="diagram-1-graph0" class="graph" transform="scale(1 1) rotate(0) translate(10.8 514.58)">
+<title>system</title>
+<!-- Task -->
+<g id="diagram-1-node1" class="node">
+<title>Task</title>
+<path fill="#edf3e9" stroke="#86a68f" stroke-width="1.1" d="M266.92,-503.78C266.92,-503.78 37,-503.78 37,-503.78 31,-503.78 25,-497.78 25,-491.78 25,-491.78 25,-479.78 25,-479.78 25,-473.78 31,-467.78 37,-467.78 37,-467.78 266.92,-467.78 266.92,-467.78 272.92,-467.78 278.92,-473.78 278.92,-479.78 278.92,-479.78 278.92,-491.78 278.92,-491.78 278.92,-497.78 272.92,-503.78 266.92,-503.78"/>
+<text xml:space="preserve" text-anchor="middle" x="151.96" y="-483" font-family="PingFang SC" font-size="12.00" fill="#25463a">task：目标、输入、协议、冻结要求、授权</text>
+</g>
+<!-- Lab -->
+<g id="diagram-1-node2" class="node">
+<title>Lab</title>
+<path fill="#edf3e9" stroke="#86a68f" stroke-width="1.1" d="M220.79,-270.78C220.79,-270.78 95.12,-270.78 95.12,-270.78 89.12,-270.78 83.12,-264.78 83.12,-258.78 83.12,-258.78 83.12,-231 83.12,-231 83.12,-225 89.12,-219 95.12,-219 95.12,-219 220.79,-219 220.79,-219 226.79,-219 232.79,-225 232.79,-231 232.79,-231 232.79,-258.78 232.79,-258.78 232.79,-264.78 226.79,-270.78 220.79,-270.78"/>
+<text xml:space="preserve" text-anchor="middle" x="157.96" y="-250.74" font-family="PingFang SC" font-size="12.00" fill="#25463a">rsi_lab：</text>
+<text xml:space="preserve" text-anchor="middle" x="157.96" y="-233.49" font-family="PingFang SC" font-size="12.00" fill="#25463a">Lab 执行与 Meta 修复</text>
+</g>
+<!-- Task&#45;&gt;Lab -->
+<g id="diagram-1-edge1" class="edge">
+<title>Task&#45;&gt;Lab</title>
+<path fill="none" stroke="#72947b" d="M152.39,-467.6C153.38,-428.2 155.83,-330.76 157.12,-279.17"/>
+<polygon fill="#72947b" stroke="#72947b" points="159.39,-279.37 157.28,-272.81 154.85,-279.25 159.39,-279.37"/>
+</g>
+<!-- Select -->
+<g id="diagram-1-node3" class="node">
+<title>Select</title>
+<path fill="#edf3e9" stroke="#86a68f" stroke-width="1.1" d="M296.92,-430.78C296.92,-430.78 187,-430.78 187,-430.78 181,-430.78 175,-424.78 175,-418.78 175,-418.78 175,-406.78 175,-406.78 175,-400.78 181,-394.78 187,-394.78 187,-394.78 296.92,-394.78 296.92,-394.78 302.92,-394.78 308.92,-400.78 308.92,-406.78 308.92,-406.78 308.92,-418.78 308.92,-418.78 308.92,-424.78 302.92,-430.78 296.92,-430.78"/>
+<text xml:space="preserve" text-anchor="middle" x="241.96" y="-410" font-family="PingFang SC" font-size="12.00" fill="#25463a">领域能力与版本选择</text>
+</g>
+<!-- Task&#45;&gt;Select -->
+<g id="diagram-1-edge2" class="edge">
+<title>Task&#45;&gt;Select</title>
+<path fill="none" stroke="#72947b" d="M173.75,-467.59C185.73,-458.14 200.73,-446.3 213.62,-436.14"/>
+<polygon fill="#72947b" stroke="#72947b" points="214.87,-438.05 218.56,-432.24 212.05,-434.48 214.87,-438.05"/>
+</g>
+<!-- Effects -->
+<g id="diagram-1-node5" class="node">
+<title>Effects</title>
+<path fill="#edf3e9" stroke="#86a68f" stroke-width="1.1" d="M166.92,-182C166.92,-182 33,-182 33,-182 27,-182 21,-176 21,-170 21,-170 21,-158 21,-158 21,-152 27,-146 33,-146 33,-146 166.92,-146 166.92,-146 172.92,-146 178.92,-152 178.92,-158 178.92,-158 178.92,-170 178.92,-170 178.92,-176 172.92,-182 166.92,-182"/>
+<text xml:space="preserve" text-anchor="middle" x="99.96" y="-161.22" font-family="PingFang SC" font-size="12.00" fill="#25463a">持久执行意图与资源预约</text>
+</g>
+<!-- Lab&#45;&gt;Effects -->
+<g id="diagram-1-edge5" class="edge">
+<title>Lab&#45;&gt;Effects</title>
+<path fill="none" stroke="#72947b" d="M139.29,-218.49C132.19,-208.83 124.13,-197.88 117.17,-188.41"/>
+<polygon fill="#72947b" stroke="#72947b" points="119.13,-187.23 113.45,-183.34 115.46,-189.93 119.13,-187.23"/>
+</g>
+<!-- Domain -->
+<g id="diagram-1-node4" class="node">
+<title>Domain</title>
+<path fill="#edf3e9" stroke="#86a68f" stroke-width="1.1" d="M302.67,-357.78C302.67,-357.78 185.25,-357.78 185.25,-357.78 179.25,-357.78 173.25,-351.78 173.25,-345.78 173.25,-345.78 173.25,-333.78 173.25,-333.78 173.25,-327.78 179.25,-321.78 185.25,-321.78 185.25,-321.78 302.67,-321.78 302.67,-321.78 308.67,-321.78 314.67,-327.78 314.67,-333.78 314.67,-333.78 314.67,-345.78 314.67,-345.78 314.67,-351.78 308.67,-357.78 302.67,-357.78"/>
+<text xml:space="preserve" text-anchor="middle" x="243.96" y="-337" font-family="PingFang SC" font-size="12.00" fill="#25463a">rsi_domains：领域包</text>
+</g>
+<!-- Select&#45;&gt;Domain -->
+<g id="diagram-1-edge3" class="edge">
+<title>Select&#45;&gt;Domain</title>
+<path fill="none" stroke="#72947b" d="M242.44,-394.59C242.68,-386.09 242.98,-375.65 243.24,-366.23"/>
+<polygon fill="#72947b" stroke="#72947b" points="245.51,-366.38 243.42,-359.82 240.97,-366.25 245.51,-366.38"/>
+</g>
+<!-- Domain&#45;&gt;Lab -->
+<g id="diagram-1-edge4" class="edge">
+<title>Domain&#45;&gt;Lab</title>
+<path fill="none" stroke="#72947b" stroke-dasharray="5,2" d="M227.78,-321.31C216.19,-308.78 200.25,-291.57 186.54,-276.76"/>
+<polygon fill="#72947b" stroke="#72947b" points="188.32,-275.33 182.23,-272.11 184.98,-278.42 188.32,-275.33"/>
+<text xml:space="preserve" text-anchor="middle" x="242.69" y="-294.28" font-family="PingFang SC" font-size="10.00" fill="#496c54">实现通用接口</text>
+</g>
+<!-- Tools -->
+<g id="diagram-1-node6" class="node">
+<title>Tools</title>
+<path fill="#edf3e9" stroke="#86a68f" stroke-width="1.1" d="M169.92,-109C169.92,-109 12,-109 12,-109 6,-109 0,-103 0,-97 0,-97 0,-85 0,-85 0,-79 6,-73 12,-73 12,-73 169.92,-73 169.92,-73 175.92,-73 181.92,-79 181.92,-85 181.92,-85 181.92,-97 181.92,-97 181.92,-103 175.92,-109 169.92,-109"/>
+<text xml:space="preserve" text-anchor="middle" x="90.96" y="-88.22" font-family="PingFang SC" font-size="12.00" fill="#25463a">模型、计算工具、分析适配器</text>
+</g>
+<!-- Effects&#45;&gt;Tools -->
+<g id="diagram-1-edge6" class="edge">
+<title>Effects&#45;&gt;Tools</title>
+<path fill="none" stroke="#72947b" d="M97.78,-145.81C96.7,-137.31 95.38,-126.87 94.19,-117.45"/>
+<polygon fill="#72947b" stroke="#72947b" points="96.45,-117.19 93.37,-111.02 91.93,-117.76 96.45,-117.19"/>
+</g>
+<!-- Evidence -->
+<g id="diagram-1-node7" class="node">
+<title>Evidence</title>
+<path fill="#edf3e9" stroke="#86a68f" stroke-width="1.1" d="M226.92,-36C226.92,-36 81,-36 81,-36 75,-36 69,-30 69,-24 69,-24 69,-12 69,-12 69,-6 75,0 81,0 81,0 226.92,0 226.92,0 232.92,0 238.92,-6 238.92,-12 238.92,-12 238.92,-24 238.92,-24 238.92,-30 232.92,-36 226.92,-36"/>
+<text xml:space="preserve" text-anchor="middle" x="153.96" y="-15.22" font-family="PingFang SC" font-size="12.00" fill="#25463a">不可变原始结果与派生产物</text>
+</g>
+<!-- Tools&#45;&gt;Evidence -->
+<g id="diagram-1-edge7" class="edge">
+<title>Tools&#45;&gt;Evidence</title>
+<path fill="none" stroke="#72947b" d="M106.21,-72.81C114.29,-63.7 124.34,-52.38 133.13,-42.47"/>
+<polygon fill="#72947b" stroke="#72947b" points="134.8,-44.03 137.41,-37.65 131.39,-41.01 134.8,-44.03"/>
+</g>
+<!-- Evidence&#45;&gt;Lab -->
+<g id="diagram-1-edge8" class="edge">
+<title>Evidence&#45;&gt;Lab</title>
+<path fill="none" stroke="#72947b" d="M170.85,-36.38C179.26,-46.26 188.55,-59.36 192.96,-73 207.87,-119.11 202.38,-135.16 189.96,-182 187.27,-192.16 182.72,-202.54 177.88,-211.84"/>
+<polygon fill="#72947b" stroke="#72947b" points="175.98,-210.58 174.88,-217.38 179.98,-212.75 175.98,-210.58"/>
+</g>
+</g>
+</svg>
+<figcaption>图 1 · 三层职责与证据循环（按本版 Mermaid 源码生成）</figcaption></figure>
+<details class="diagram-source"><summary>查看 Mermaid 源码</summary><pre class="mermaid"><code>flowchart TD
+    Task[task：目标、输入、协议、冻结要求、授权] --&gt; Lab[rsi_lab：Lab 执行与 Meta 修复]
+    Task --&gt; Select[领域能力与版本选择]
+    Select --&gt; Domain[rsi_domains：领域包]
+    Domain -.实现通用接口.-&gt; Lab
+    Lab --&gt; Effects[持久执行意图与资源预约]
+    Effects --&gt; Tools[模型、计算工具、分析适配器]
+    Tools --&gt; Evidence[不可变原始结果与派生产物]
+    Evidence --&gt; Lab</code></pre></details>
+<p>Scientific Memory 同样遵守三层边界：内核维护版本、引用、读取、依赖与未结工作；领域包解释对象身份、科学条件、可比性及结果语义；task 固定目标、来源权限与资源。科学状态不以候选数或评分为必需字段，具体契约见 §10.3。</p>
+<h3 id="a.2-代码与任务目录">A.2 代码与任务目录</h3>
+<p>以下为目标布局，不表示目录或能力已经实现。任务目录是配置和输入入口；运行目录是某次执行的可恢复状态，二者不混用。</p>
+<pre class="text"><code>packages/
+  rsi_lab/
+    contracts/              # 通用 schema、领域接口、能力声明
+    store/                  # 不可变事件、blob、事务投影、CAS 与回放
+    runtime/                # 能力加载、状态、调度、预算、等待、外部效果与恢复
+      agent_runtimes/       # CodexRuntimeAdapter、版本解析、CLI/app-server 协议适配
+    results/                # 产物来源、依赖图、有效性、复用与选择性重算
+    context/                # 有界工作视图、证据查询、页面与精确回执
+    memory/                 # 科研对象、版本关系、增量匹配、复核与归纳；复用 store/runtime
+    meta/                   # 发现、调查、构建变更提议与证据关联
+    changes/                # 隔离构建、局部验收、发布、恢复与续跑
+      codex/                # 指定 fork 的源码候选、构建配方、兼容与回退检查
+    reporting/              # 任务、修复、费用与未决义务
+  rsi_domains/
+    compound_screening/
+      schemas/              # 化合物、受体等领域对象
+      adapters/             # 计算、解析与分析后端
+      protocols/            # 协议 schema 与兼容性规则
+      validation/           # 科学结果有效性及完成判据
+    grid_fixture/           # 领域中立的轻量契约验收实现
+
+runtime_sources/codex/&lt;source_id&gt;/       # 固定来源/commit 的只读基线；候选在独立目录编辑
+runtime_artifacts/codex/&lt;bundle_hash&gt;/  # 不可变 binary、配置、启动配方、来源与检查清单
+supervisor/                            # 固定可信 launcher、进程代际 fencing 与恢复入口
+
+tasks/&lt;task_id&gt;/
+  task.yaml                 # TaskSpec；引用确切版本
+  protocols/                # 追加式科学协议版本
+  inputs/                   # 输入文件或内容寻址引用
+  acceptance/               # 冻结要求与允许的验收方式
+
+runs/&lt;run_id&gt;/
+  manifest.json             # 启动快照、版本和预算根账户
+  events/                   # 权威追加事件
+  artifacts/                # 不可变原始输出与派生结果
+  changes/                  # 修复差异、验收证据、发布与恢复记录
+  checkpoints/              # 恢复入口；不替代事件与原始证据</code></pre>
+<p>领域包可单独发布；task 可在兼容的内核版本上复用。内核、Codex harness、领域包、task、科学协议和运行策略分别版本化，不能只留一个含义不明的“系统版本”。supervisor 的恢复入口和发布权限独立于候选 Codex 进程，不属于本轮可修改产物。</p>
+<h3 id="a.3-task调度工作和外部执行的区别">A.3 <code>task</code>、调度工作和外部执行的区别</h3>
+<p><code>task</code> 是用户交付给系统的科学计算任务。一个 task 可以包含多个阶段、多轮模型决策和许多计算，不等于一次 API 调用或一次候选评分。</p>
+<ul>
+<li><code>TaskSpec</code>：科学目标、输入、约束和授权的声明。</li>
+<li><code>TaskRun</code>：执行该 task 的一次持续运行，持有预算账本和检查点。</li>
+<li><code>Work</code>：内核下一步可调度动作，例如请求一页证据、解析一个文件或检查一个补丁。</li>
+<li><code>Effect</code>：某项 Work 引起的实际外部调用，具有输入哈希、幂等键、资源预约和结果责任。</li>
+<li><code>Artifact</code>：原始或派生产物，持有创建它的版本与依赖关系。</li>
+</ul>
+<p>task 不要求所有领域都采用“生成候选—评分”的形态。内核调度带类型的计算步骤；候选生成、身份查重、评分与批次只是化合物等领域可以启用的执行模式。相应 schema 和 Worker 循环通过能力契约接入，不能成为其他领域必须伪造的数据结构。</p>
+<p><code>ScientificQuestion</code> 表达 task 内的科研问题；<code>ScientificInvestigation</code> 组织实验、分析、检索或推导，并关联 Step/Work/Effect。二者不替代 TaskSpec、调度 Work 或 Meta Issue；科研解释更新不自动变成系统修复，关闭问题不改变 task 的冻结完成条件。</p>
+<h3 id="a.4-通用接口与能力注册">A.4 通用接口与能力注册</h3>
+<p>接口定义留在 <code>rsi_lab.contracts</code>。领域包返回类型化计划和结果；内核执行副作用、管理状态和计费。</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>接口</th>
+<th>输入与输出</th>
+<th>边界</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>validate_task(spec)</code></td>
+<td><code>TaskSpec → ValidationReport</code></td>
+<td>检查领域输入、协议完整性和能力兼容性；不得擅填关键科学参数</td>
+</tr>
+<tr>
+<td><code>describe_capabilities()</code></td>
+<td><code>→ CapabilityManifest[]</code></td>
+<td>声明 schema、版本、资源、允许变更范围、恢复处理器和结果有效性规则</td>
+</tr>
+<tr>
+<td><code>plan_step(context, request)</code></td>
+<td><code>→ StepPlan</code></td>
+<td>只提出步骤、依赖与预期产物；不能直接执行工具</td>
+</tr>
+<tr>
+<td><code>canonicalize(entity)</code></td>
+<td><code>→ identity, normalized_ref, identity_version</code></td>
+<td>在适用领域定义科学对象身份；身份版本变化必须显式迁移</td>
+</tr>
+<tr>
+<td><code>execute(effect_input)</code></td>
+<td><code>→ RawResultRef / KnownFailure / Unknown</code></td>
+<td>只能由内核执行器在持久意图与预约之后调用</td>
+</tr>
+<tr>
+<td><code>parse(raw_ref, parser_version)</code></td>
+<td><code>→ DerivedArtifact[]</code></td>
+<td>从保存的原始输出产生新派生版本，不覆写原输出</td>
+</tr>
+<tr>
+<td><code>analyze(input_refs, analysis_spec)</code></td>
+<td><code>→ DerivedArtifact[]</code></td>
+<td>分析能力同样登记依赖、成本与工具调用，不能隐藏外部效果</td>
+</tr>
+<tr>
+<td><code>assess_validity(artifact, protocol)</code></td>
+<td><code>→ valid / invalid / unresolved + evidence_refs</code></td>
+<td>判定科学数据是否适用于协议；未知和失败不可伪装成有效值</td>
+</tr>
+<tr>
+<td><code>check_completion(artifacts, frozen_requirements)</code></td>
+<td><code>→ satisfied / unsatisfied / unresolved + evidence_refs</code></td>
+<td>按冻结任务条件判定完成；内核核对使用的要求与来源版本</td>
+</tr>
+<tr>
+<td><code>assess_impact(change, dependency_graph)</code></td>
+<td><code>→ invalidation_plan, reusable_refs, unresolved_refs</code></td>
+<td>提议影响范围，由内核验证依赖闭包和兼容性声明</td>
+</tr>
+<tr>
+<td><code>assess_comparability(evidence_refs, scientific_scope)</code></td>
+<td><code>→ comparable / non_comparable / unknown + reasons, rule_version</code></td>
+<td>领域包解释条件、单位、对象与方法是否可比较；未知不按兼容处理，模型辅助检查仍通过 Work/Effect 计费</td>
+</tr>
+</tbody>
+</table>
+<p><code>CapabilityManifest</code> 至少包含：<code>capability_id, package_version, implementation_hash, interface_version, input_schema, output_schema, protocol_compatibility, resource_contract, effect_kind, idempotency_support, recovery_handler, validation_contract</code>。</p>
+<p>纯代码解析和外部计算使用不同资源契约。适配器内部需要新外部调用时，必须返回新的执行计划交由内核预约；不得在解析回放或状态重建中偷偷调用服务。新增分析适配器验收成功后即可注册供后续 Work 使用，不要求重跑整轮 task。</p>
+<h3 id="a.5-任务规格与冻结要求">A.5 任务规格与冻结要求</h3>
+<p><code>TaskSpec</code> 最少登记以下内容。此表是实现契约，具体阈值从任务授权与科学协议读取，不由本文生成默认值。</p>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>字段</th>
+<th>内容</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>task_id, task_version, goal</code></td>
+<td>任务身份、版本和科学目标</td>
+</tr>
+<tr>
+<td><code>domain_id, domain_version, capability_bindings</code></td>
+<td>领域包及选用能力的确切版本</td>
+</tr>
+<tr>
+<td><code>input_manifest, protocol_ref, protocol_hash</code></td>
+<td>输入身份、内容哈希和科学协议</td>
+</tr>
+<tr>
+<td><code>frozen_requirements_ref/hash</code></td>
+<td>阈值、数量、有效性、去重与其他不可由 Meta 修改的要求</td>
+</tr>
+<tr>
+<td><code>step_dependencies, expected_artifacts</code></td>
+<td>计算依赖及交付产物</td>
+</tr>
+<tr>
+<td><code>budget, recovery_reserve</code></td>
+<td>总预算、资源口径及修复恢复预留</td>
+</tr>
+<tr>
+<td><code>meta_authorization_ref/hash</code></td>
+<td>可改模块、能力、参数、科学输入及变更预算</td>
+</tr>
+<tr>
+<td><code>completion_contract, stop_policy</code></td>
+<td>完成判据、停止条件、在途执行处理方式</td>
+</tr>
+<tr>
+<td><code>runtime_bindings</code></td>
+<td><code>rsi_kernel_artifact_hash</code>、按 Lab/Meta 角色登记的 <code>codex_runtime_binding_hash</code>、模型路由、上下文策略与工具版本</td>
+</tr>
+<tr>
+<td><code>memory_contract_ref/hash, memory_policy_ref/hash, source_access_ref</code></td>
+<td>科研对象 schema、初始读取/提议/维护策略与预算、允许来源及保留/迁移条件；来源权限和冻结科学要求不能由记忆提议扩大</td>
+</tr>
+</tbody>
+</table>
+<p><code>TaskSpec</code> 与启动 <code>RunConfig</code> 是不可变起点，表中的精确版本是初始绑定。运行中发布通过追加式 <code>ReleaseManifest / ActiveRunBinding</code> 更新当前版本，至少记录 <code>run_id, branch_id, parent_release_hash, task_spec_hash, frozen_requirements_hash, actual_protocol_hash, capability_bindings, rsi_kernel_artifact_hash, agent_runtime_bindings_by_role, memory_binding_hash, activation_seq</code>。每个角色的 runtime 绑定指向 §11.6 的完整不可变清单，明确 Codex binary/config、适配器与会话契约；旧 <code>runtime_artifact_hash</code> 经显式 schema 迁移保留其原义，不用于同时指代 RSI 内核和 Codex。修复不覆盖启动配置、不改变 task_spec_hash 或冻结要求；派发读取本运行的活动绑定，结果保存实际版本。新协议或新 Codex 产物登记本身不切换任何运行；只有明确作用于该 run/branch/role 的发布才生效，其他运行和角色保持自己的绑定。</p>
+<p>例如，当任务要求“至少 100 个达标 compound”时，数量下限 <code>100</code>、达标阈值、身份去重规则和所需科学证据均属于冻结要求。内核保存要求哈希；领域包负责解释 compound 和达标的科学含义。完成报告必须提供可追溯、去重后的合格名单及所用协议，不能把 100 次调用、100 条派生记录或同一化合物的多个构象算成 100 个合格 compound。</p>
+<p>少量样本可以证明解析器、适配器或上下文改动可用，但不能替代最终任务的数量要求。局部验收通过与整个 task 完成使用不同结果字段。</p>
+<p>task 启动后，Meta 不能通过修改配置、提示词、判定代码或新建协议版本间接降低上述要求。科学输入可在已授权范围内改变，但协议版本必须继续引用同一冻结要求；需要改变科学目标或冻结要求时，由用户提供新的明确任务定义，不能冒充原任务已经完成。</p>
+<p><code>MemoryRuntimeBinding</code> 是内容寻址清单，包含实际 <code>memory_contract_ref/hash, memory_policy_ref/hash, selector_ref/hash, projection_ref/hash, compatible_schema_versions, migration_ref/hash?</code>。初始值来自 TaskSpec；后续变更通过 ReleaseManifest/ActiveRunBinding 在安全点 CAS 切换，不能覆写初始配置或扩大来源权限。每个 packet/Effect 和科研提议保存实际 <code>memory_binding_hash</code> 与读取快照，按实际版本解释和恢复；在途调用保留原绑定。</p>
+<h3 id="a.6-版本来源与选择性重算">A.6 版本、来源与选择性重算</h3>
+<p>每项产物至少记录：<code>artifact_id/hash, artifact_kind, task_id/version, run_id, protocol_version/hash, capability_id/version, implementation_hash, input_refs/hashes, source_effect_id?, created_seq, supersedes_ref?, validity_status</code>。生成决策还记录实际使用的模型路由、上下文策略、能力版本及 <code>codex_runtime_binding_hash / runtime_generation</code>；其下游 Effect 关联来源决策。原始输出与解析结果拥有不同身份。</p>
+<p>复用不是只比较文件是否存在。每个计算步骤的复用键由它实际依赖的输入哈希、科学协议的相关字段、实现语义版本、工具/模型配置及随机种子等组成。协议整体版本变化会留下新的来源关系，但不要求所有未受影响的步骤失效；跨版本复用必须有可验证的字段依赖与兼容性依据。</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>变化</th>
+<th>保留</th>
+<th>追加或重算</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>结果解析 bug</td>
+<td>已保存原始输出、原调用成本和原始来源</td>
+<td>新解析结果及依赖错误字段的统计、判断、报告</td>
+</tr>
+<tr>
+<td>新增分析能力</td>
+<td>既有计算与有效产物</td>
+<td>小量已有数据上的验收产物，随后需要该分析的步骤</td>
+</tr>
+<tr>
+<td>上下文组织调整</td>
+<td>原页面、已认证回执、已完成计算</td>
+<td>新工作视图与后续调用；复核缺失必要信息造成的具体判断</td>
+</tr>
+<tr>
+<td>Codex harness 源码修复</td>
+<td>已完成调用的原始输出、费用和真实运行版本</td>
+<td>新 binary/config/adapter 绑定、后续调用及受影响判断；只沿依赖闭包复核，不默认重跑任务</td>
+</tr>
+<tr>
+<td>已授权科学输入改变</td>
+<td>与变更无依赖且仍兼容的产物</td>
+<td>新协议版本、受影响计算及其依赖闭包</td>
+</tr>
+</tbody>
+</table>
+<p>Meta 先提交 <code>invalidation_plan</code>，列出改变的语义、直接依赖、下游失效集合、可复用证据和恢复点。内核校验后追加失效事件，将旧派生结果标为当前用途不可用；旧记录保留。重算完成前，受影响工作等待，其他不依赖这些结果的工作继续。</p>
+<p>依赖信息不足时将相关产物标为 <code>unresolved</code> 并调查，不能默许复用；也不能以不确定为由默认启动整轮对照。确实全量受影响时才重算全部受影响节点，并记录原因。重算用于恢复结果正确性，不自动构成一项独立收益比较实验。</p>
+<p>恢复代码版本不会删除新版本已经产生的事实。若已发布版本随后失败，回退到已知可用实现，并识别该版本生成或影响的派生产物，追加失效/复核任务；原始输出、调用成本和运行轨迹继续保留。</p>
+<p>来源或协议变化也影响科研解释：相关 Claim、Method、研究计划及摘要进入待复核，按精确版本依赖检查。需要复核不等于必须重算全部原始数据；重解析、科学判断修订与外部重算分别计划和计费。旧判断和历史决定保留当时实际可见版本。</p>
+<p>科研状态额外保留实际 <code>memory_binding_hash, read_snapshot_seq, proposal_source_effect_id</code>。重建摘要、检查或判断时使用登记的 schema/选择/投影版本；缺少兼容实现时报告 blocked/unsupported，不能默认改用最新机制重解释旧记录。</p>
+<h3 id="a.7-meta-可修改的所有权边界">A.7 Meta 可修改的所有权边界</h3>
+<p>授权由 task 绑定，能力由注册表声明，二者交集决定 Meta 的实际可写范围。授权检查在内核执行，不能仅靠模型自述。</p>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>对象</th>
+<th>默认处理</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>已授权的解析器、分析适配器、上下文构建器与运行策略</td>
+<td>可自主修改、局部验收、版本化发布；记录补丁、证据、恢复点和后续应用</td>
+</tr>
+<tr>
+<td>已授权的内核可修复模块</td>
+<td>走相同路径，另外验证持久化、幂等、恢复与接口不变量；在安全边界切换实现</td>
+</tr>
+<tr>
+<td>已登记 fork 的 Codex harness 授权模块</td>
+<td>Meta 自动触发源码修复、隔离编译、契约与回归验收；由外部 supervisor 切换目标 run/branch/role 的不可变产物并续跑，失败回退，见 §11.6</td>
+</tr>
+<tr>
+<td>科学输入与协议</td>
+<td>在授权范围内追加协议版本和影响计划；保持冻结要求</td>
+</tr>
+<tr>
+<td>事件、原始输出、历史回执</td>
+<td>只读；修正通过追加记录表达</td>
+</tr>
+<tr>
+<td>授权执行器、预算硬上限、冻结要求及其验收定义、supervisor 恢复入口</td>
+<td>不在当前 Meta 自主可修改范围；候选 Codex 不能修改外部权限、发布注册表或回退执行器来批准自己</td>
+</tr>
+</tbody>
+</table>
+<p>Meta 构建候选版本时使用隔离目录与固定输入，不能边编辑正在运行的模块边继续派发。局部验收使用不可变基线要求与独立的核验入口；候选补丁不能同时改掉它必须通过的冻结判据。发布以版本绑定和安全点切换实现，已有外部调用仍按原版本归档。</p>
+<p>常规授权内操作无需逐次请示。只有缺少决定继续任务所必需的用户信息或授权时才提问；等待这一信息期间继续处理不依赖它的工作。预算不足、验收失败和技术错误先按已登记的停止、恢复或重规划规则处理，不把每次失败变成用户审批。</p>
+<h3 id="a.8-三层解耦的验收">A.8 三层解耦的验收</h3>
+<ol type="1">
+<li>内核不安装任何具体科学依赖也能运行契约 fixture；静态依赖检查不出现对具体 <code>rsi_domains</code> 实现的导入。</li>
+<li>同一内核通过注册表运行至少两个不同能力集合；更换 task 的科学输入与完成要求不修改内核代码。</li>
+<li>compound 阈值和至少 100 个达标结果的要求仅从该 task 的冻结配置取得，领域包实现解释，内核验证版本与执行边界。</li>
+<li>修改解析器可以重用原始输出，新增适配器可以处理已有数据；都能指出本次实际计算与复用的产物。</li>
+<li>科学输入改变后，可证明无关计算被复用、受影响结果被重算，旧协议的结果不能被无来源地冒充新协议结果。</li>
+<li>模块越界修改、预算扩张与冻结要求改变均被执行器拒绝；合法补丁能在局部验收后接入当前 task 的后续执行。</li>
+<li>同一 <code>AgentRuntimeAdapter</code> 可以按登记绑定运行原版和修复后的 Codex；构建、实际启动版本、当前任务续跑和失败回退都有独立证据，不因只生成 diff 就声称执行层修复完成。</li>
+</ol>
+<p>这些是目标架构的验收条件，不能从目录存在、接口声明完成或历史实验通过推断已经满足。</p>
+<h2 id="第二部分任务进行中的-lab-meta-编排">第二部分：任务进行中的 Lab / Meta 编排</h2>
+<h3 id="目标与默认路径">0. 目标与默认路径</h3>
+<p><strong>Lab 执行 → Meta 发现问题 → 调查原因 → 修改 → 小范围验收 → 发布到后续执行 → 接着运行。</strong></p>
+<p>编排的首要目标是让任务持续推进。Meta 在任务尚未结束时处理解析错误、能力缺口、上下文容量及科学输入问题。验收检查改动可用性、冻结约束和恢复能力，可以使用已保存数据、小样本或有限的后续批次；不默认重跑整轮任务，不要求先证明相对完整基线的收益。</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>情况</th>
+<th>默认处理</th>
+<th>最小验收和续跑证据</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>结果解析有 bug</td>
+<td>隔离错误派生结果，修复解析器，对原始输出重新解析</td>
+<td>已知错误样例得到正确结构/单位；旧合法样例不破坏；下游读取修订结果并继续，原计算调用不重复</td>
+</tr>
+<tr>
+<td>缺少分析能力</td>
+<td>在领域包实现并注册版本化适配器</td>
+<td>少量已有数据上的输入、输出、失败、来源与成本契约通过；后续步骤实际使用该能力</td>
+</tr>
+<tr>
+<td>上下文太大</td>
+<td>修改证据选择、分页或投影</td>
+<td>最终包满足字节/token 限制，冻结要求、未决义务及必要证据依赖完整；后续调用成功完成</td>
+</tr>
+<tr>
+<td>科学输入需要改变</td>
+<td>在授权范围内登记新协议版本和影响清单</td>
+<td>受影响结果重新计算或派生，未受影响结果带来源复用；原阈值与任务目标不变</td>
+</tr>
+<tr>
+<td>Codex harness 执行层缺陷</td>
+<td>Meta 修改授权 fork，编译验收后由 supervisor 切换版本；失败回退</td>
+<td>真实源码/构建证据、兼容检查、新 binary 实际使用、同一 task 从断点续跑；unknown 不重复执行</td>
+</tr>
+</tbody>
+</table>
+<p>配对比较、消融和整体收益推断属于可选研究模式（§12），默认关闭，不能阻塞以上闭环。没有收益证据不等于改动不可用；没有真正修好问题并继续任务，也不能把验收通过或版本登记写成 P4 完成。</p>
+<h3 id="架构和不变量">1. 架构和不变量</h3>
+<figure class="architecture-diagram"><svg role="img" aria-label="运行中编排与 Meta 主动检测、修复闭环" width="552pt" height="837pt"
+ viewBox="0.00 0.00 552.00 837.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="diagram-2-graph0" class="graph" transform="scale(1 1) rotate(0) translate(10.8 825.8)">
+<title>system</title>
+<!-- Task -->
+<g id="diagram-2-node1" class="node">
+<title>Task</title>
+<path fill="#edf3e9" stroke="#86a68f" stroke-width="1.1" d="M234.42,-815C234.42,-815 12,-815 12,-815 6,-815 0,-809 0,-803 0,-803 0,-791 0,-791 0,-785 6,-779 12,-779 12,-779 234.42,-779 234.42,-779 240.42,-779 246.42,-785 246.42,-791 246.42,-791 246.42,-803 246.42,-803 246.42,-809 240.42,-815 234.42,-815"/>
+<text xml:space="preserve" text-anchor="middle" x="123.21" y="-794.23" font-family="PingFang SC" font-size="12.00" fill="#25463a">计算任务 task：目标、协议、预算、授权</text>
+</g>
+<!-- Kernel -->
+<g id="diagram-2-node2" class="node">
+<title>Kernel</title>
+<path fill="#edf3e9" stroke="#86a68f" stroke-width="1.1" d="M285.79,-742C285.79,-742 206.62,-742 206.62,-742 200.62,-742 194.62,-736 194.62,-730 194.62,-730 194.62,-718 194.62,-718 194.62,-712 200.62,-706 206.62,-706 206.62,-706 285.79,-706 285.79,-706 291.79,-706 297.79,-712 297.79,-718 297.79,-718 297.79,-730 297.79,-730 297.79,-736 291.79,-742 285.79,-742"/>
+<text xml:space="preserve" text-anchor="middle" x="246.21" y="-721.23" font-family="PingFang SC" font-size="12.00" fill="#25463a">rsi_lab 控制面</text>
+</g>
+<!-- Task&#45;&gt;Kernel -->
+<g id="diagram-2-edge1" class="edge">
+<title>Task&#45;&gt;Kernel</title>
+<path fill="none" stroke="#72947b" d="M153.3,-778.63C170.13,-768.92 191.24,-756.73 209.09,-746.43"/>
+<polygon fill="#72947b" stroke="#72947b" points="210.2,-748.41 214.69,-743.19 207.93,-744.47 210.2,-748.41"/>
+</g>
+<!-- Lab -->
+<g id="diagram-2-node4" class="node">
+<title>Lab</title>
+<path fill="#edf3e9" stroke="#86a68f" stroke-width="1.1" d="M451.29,-669C451.29,-669 339.12,-669 339.12,-669 333.12,-669 327.12,-663 327.12,-657 327.12,-657 327.12,-645 327.12,-645 327.12,-639 333.12,-633 339.12,-633 339.12,-633 451.29,-633 451.29,-633 457.29,-633 463.29,-639 463.29,-645 463.29,-645 463.29,-657 463.29,-657 463.29,-663 457.29,-669 451.29,-669"/>
+<text xml:space="preserve" text-anchor="middle" x="395.21" y="-648.23" font-family="PingFang SC" font-size="12.00" fill="#25463a">Lab 执行与证据解释</text>
+</g>
+<!-- Kernel&#45;&gt;Lab -->
+<g id="diagram-2-edge3" class="edge">
+<title>Kernel&#45;&gt;Lab</title>
+<path fill="none" stroke="#72947b" d="M282.66,-705.63C303.49,-695.7 329.76,-683.19 351.67,-672.75"/>
+<polygon fill="#72947b" stroke="#72947b" points="352.36,-674.94 357.25,-670.09 350.41,-670.83 352.36,-674.94"/>
+</g>
+<!-- Patrol -->
+<g id="diagram-2-node9" class="node">
+<title>Patrol</title>
+<path fill="#dcebe6" stroke="#2f6c59" stroke-width="1.4" d="M307.17,-615C307.17,-615 155.25,-615 155.25,-615 149.25,-615 143.25,-609 143.25,-603 143.25,-603 143.25,-591 143.25,-591 143.25,-585 149.25,-579 155.25,-579 155.25,-579 307.17,-579 307.17,-579 313.17,-579 319.17,-585 319.17,-591 319.17,-591 319.17,-603 319.17,-603 319.17,-609 313.17,-615 307.17,-615"/>
+<text xml:space="preserve" text-anchor="middle" x="231.21" y="-594.23" font-family="PingFang SC" font-size="12.00" fill="#25463a">事件 / 巡检到期 / 停滞诊断</text>
+</g>
+<!-- Kernel&#45;&gt;Patrol -->
+<g id="diagram-2-edge9" class="edge">
+<title>Kernel&#45;&gt;Patrol</title>
+<path fill="none" stroke="#72947b" d="M244.12,-705.62C241.56,-684.28 237.2,-647.93 234.26,-623.44"/>
+<polygon fill="#72947b" stroke="#72947b" points="236.54,-623.32 233.51,-617.14 232.02,-623.86 236.54,-623.32"/>
+</g>
+<!-- Domain -->
+<g id="diagram-2-node3" class="node">
+<title>Domain</title>
+<path fill="#edf3e9" stroke="#86a68f" stroke-width="1.1" d="M458.92,-815C458.92,-815 281.5,-815 281.5,-815 275.5,-815 269.5,-809 269.5,-803 269.5,-803 269.5,-791 269.5,-791 269.5,-785 275.5,-779 281.5,-779 281.5,-779 458.92,-779 458.92,-779 464.92,-779 470.92,-785 470.92,-791 470.92,-791 470.92,-803 470.92,-803 470.92,-809 464.92,-815 458.92,-815"/>
+<text xml:space="preserve" text-anchor="middle" x="370.21" y="-794.23" font-family="PingFang SC" font-size="12.00" fill="#25463a">rsi_domains：领域能力与工作流</text>
+</g>
+<!-- Domain&#45;&gt;Kernel -->
+<g id="diagram-2-edge2" class="edge">
+<title>Domain&#45;&gt;Kernel</title>
+<path fill="none" stroke="#72947b" d="M339.88,-778.63C322.76,-768.83 301.25,-756.51 283.16,-746.15"/>
+<polygon fill="#72947b" stroke="#72947b" points="284.75,-744.44 277.97,-743.19 282.48,-748.39 284.75,-744.44"/>
+</g>
+<!-- Intent -->
+<g id="diagram-2-node5" class="node">
+<title>Intent</title>
+<path fill="#edf3e9" stroke="#86a68f" stroke-width="1.1" d="M376.67,-561C376.67,-561 245.75,-561 245.75,-561 239.75,-561 233.75,-555 233.75,-549 233.75,-549 233.75,-537 233.75,-537 233.75,-531 239.75,-525 245.75,-525 245.75,-525 376.67,-525 376.67,-525 382.67,-525 388.67,-531 388.67,-537 388.67,-537 388.67,-549 388.67,-549 388.67,-555 382.67,-561 376.67,-561"/>
+<text xml:space="preserve" text-anchor="middle" x="311.21" y="-540.23" font-family="PingFang SC" font-size="12.00" fill="#25463a">持久执行意图 / Outbox</text>
+</g>
+<!-- Lab&#45;&gt;Intent -->
+<g id="diagram-2-edge4" class="edge">
+<title>Lab&#45;&gt;Intent</title>
+<path fill="none" stroke="#72947b" d="M381.34,-632.5C367.3,-614.77 345.49,-587.25 329.92,-567.61"/>
+<polygon fill="#72947b" stroke="#72947b" points="331.86,-566.4 326.04,-562.72 328.3,-569.22 331.86,-566.4"/>
+</g>
+<!-- Tools -->
+<g id="diagram-2-node6" class="node">
+<title>Tools</title>
+<path fill="#edf3e9" stroke="#86a68f" stroke-width="1.1" d="M375.17,-488C375.17,-488 247.25,-488 247.25,-488 241.25,-488 235.25,-482 235.25,-476 235.25,-476 235.25,-464 235.25,-464 235.25,-458 241.25,-452 247.25,-452 247.25,-452 375.17,-452 375.17,-452 381.17,-452 387.17,-458 387.17,-464 387.17,-464 387.17,-476 387.17,-476 387.17,-482 381.17,-488 375.17,-488"/>
+<text xml:space="preserve" text-anchor="middle" x="311.21" y="-467.23" font-family="PingFang SC" font-size="12.00" fill="#25463a">模型 / 工具 / 科学计算</text>
+</g>
+<!-- Intent&#45;&gt;Tools -->
+<g id="diagram-2-edge5" class="edge">
+<title>Intent&#45;&gt;Tools</title>
+<path fill="none" stroke="#72947b" d="M311.21,-524.81C311.21,-516.31 311.21,-505.87 311.21,-496.45"/>
+<polygon fill="#72947b" stroke="#72947b" points="313.49,-496.54 311.21,-490.04 308.94,-496.54 313.49,-496.54"/>
+</g>
+<!-- Store -->
+<g id="diagram-2-node7" class="node">
+<title>Store</title>
+<path fill="#edf3e9" stroke="#86a68f" stroke-width="1.1" d="M392.17,-415C392.17,-415 246.25,-415 246.25,-415 240.25,-415 234.25,-409 234.25,-403 234.25,-403 234.25,-391 234.25,-391 234.25,-385 240.25,-379 246.25,-379 246.25,-379 392.17,-379 392.17,-379 398.17,-379 404.17,-385 404.17,-391 404.17,-391 404.17,-403 404.17,-403 404.17,-409 398.17,-415 392.17,-415"/>
+<text xml:space="preserve" text-anchor="middle" x="319.21" y="-394.23" font-family="PingFang SC" font-size="12.00" fill="#25463a">不可变原始结果与事件账本</text>
+</g>
+<!-- Tools&#45;&gt;Store -->
+<g id="diagram-2-edge6" class="edge">
+<title>Tools&#45;&gt;Store</title>
+<path fill="none" stroke="#72947b" d="M313.15,-451.81C314.11,-443.31 315.28,-432.87 316.34,-423.45"/>
+<polygon fill="#72947b" stroke="#72947b" points="318.6,-423.74 317.07,-417.03 314.08,-423.23 318.6,-423.74"/>
+</g>
+<!-- Store&#45;&gt;Lab -->
+<g id="diagram-2-edge7" class="edge">
+<title>Store&#45;&gt;Lab</title>
+<path fill="none" stroke="#72947b" d="M359.28,-415.48C374.22,-424.18 389.62,-436.25 398.21,-452 428.53,-507.6 413.66,-585.71 402.94,-625.14"/>
+<polygon fill="#72947b" stroke="#72947b" points="400.85,-624.17 401.27,-631.04 405.23,-625.4 400.85,-624.17"/>
+</g>
+<!-- Meta -->
+<g id="diagram-2-node8" class="node">
+<title>Meta</title>
+<path fill="#dcebe6" stroke="#2f6c59" stroke-width="1.4" d="M306.42,-342C306.42,-342 120,-342 120,-342 114,-342 108,-336 108,-330 108,-330 108,-318 108,-318 108,-312 114,-306 120,-306 120,-306 306.42,-306 306.42,-306 312.42,-306 318.42,-312 318.42,-318 318.42,-318 318.42,-330 318.42,-330 318.42,-336 312.42,-342 306.42,-342"/>
+<text xml:space="preserve" text-anchor="middle" x="213.21" y="-321.23" font-family="PingFang SC" font-size="12.00" fill="#25463a">Meta：主动巡检、调查、实施修复</text>
+</g>
+<!-- Store&#45;&gt;Meta -->
+<g id="diagram-2-edge8" class="edge">
+<title>Store&#45;&gt;Meta</title>
+<path fill="none" stroke="#72947b" d="M293.28,-378.63C279.01,-369.08 261.17,-357.13 245.95,-346.93"/>
+<polygon fill="#72947b" stroke="#72947b" points="247.53,-345.25 240.87,-343.52 245,-349.03 247.53,-345.25"/>
+</g>
+<!-- Candidate -->
+<g id="diagram-2-node10" class="node">
+<title>Candidate</title>
+<path fill="#edf3e9" stroke="#86a68f" stroke-width="1.1" d="M313.17,-269C313.17,-269 239.25,-269 239.25,-269 233.25,-269 227.25,-263 227.25,-257 227.25,-257 227.25,-245 227.25,-245 227.25,-239 233.25,-233 239.25,-233 239.25,-233 313.17,-233 313.17,-233 319.17,-233 325.17,-239 325.17,-245 325.17,-245 325.17,-257 325.17,-257 325.17,-263 319.17,-269 313.17,-269"/>
+<text xml:space="preserve" text-anchor="middle" x="276.21" y="-248.22" font-family="PingFang SC" font-size="12.00" fill="#25463a">隔离候选版本</text>
+</g>
+<!-- Meta&#45;&gt;Candidate -->
+<g id="diagram-2-edge11" class="edge">
+<title>Meta&#45;&gt;Candidate</title>
+<path fill="none" stroke="#72947b" d="M228.78,-305.45C236.87,-296.34 246.86,-285.08 255.58,-275.25"/>
+<polygon fill="#72947b" stroke="#72947b" points="257.2,-276.85 259.81,-270.48 253.8,-273.83 257.2,-276.85"/>
+</g>
+<!-- Patrol&#45;&gt;Meta -->
+<g id="diagram-2-edge10" class="edge">
+<title>Patrol&#45;&gt;Meta</title>
+<path fill="none" stroke="#72947b" d="M220.91,-578.59C211.55,-561.12 199.21,-533.11 199.21,-507 199.21,-507 199.21,-507 199.21,-396 199.21,-380.56 202.44,-363.58 205.79,-350.1"/>
+<polygon fill="#72947b" stroke="#72947b" points="207.92,-350.94 207.37,-344.07 203.52,-349.78 207.92,-350.94"/>
+</g>
+<!-- Gate -->
+<g id="diagram-2-node11" class="node">
+<title>Gate</title>
+<path fill="#dcebe6" stroke="#2f6c59" stroke-width="1.4" d="M376.17,-196C376.17,-196 230.25,-196 230.25,-196 224.25,-196 218.25,-190 218.25,-184 218.25,-184 218.25,-172 218.25,-172 218.25,-166 224.25,-160 230.25,-160 230.25,-160 376.17,-160 376.17,-160 382.17,-160 388.17,-166 388.17,-172 388.17,-172 388.17,-184 388.17,-184 388.17,-190 382.17,-196 376.17,-196"/>
+<text xml:space="preserve" text-anchor="middle" x="303.21" y="-175.22" font-family="PingFang SC" font-size="12.00" fill="#25463a">小范围验收与冻结约束检查</text>
+</g>
+<!-- Candidate&#45;&gt;Gate -->
+<g id="diagram-2-edge12" class="edge">
+<title>Candidate&#45;&gt;Gate</title>
+<path fill="none" stroke="#72947b" d="M282.75,-232.81C286.05,-224.13 290.11,-213.44 293.75,-203.89"/>
+<polygon fill="#72947b" stroke="#72947b" points="295.82,-204.82 296.01,-197.94 291.57,-203.2 295.82,-204.82"/>
+</g>
+<!-- Release -->
+<g id="diagram-2-node12" class="node">
+<title>Release</title>
+<path fill="#edf3e9" stroke="#86a68f" stroke-width="1.1" d="M423.67,-109C423.67,-109 298.75,-109 298.75,-109 292.75,-109 286.75,-103 286.75,-97 286.75,-97 286.75,-85 286.75,-85 286.75,-79 292.75,-73 298.75,-73 298.75,-73 423.67,-73 423.67,-73 429.67,-73 435.67,-79 435.67,-85 435.67,-85 435.67,-97 435.67,-97 435.67,-103 429.67,-109 423.67,-109"/>
+<text xml:space="preserve" text-anchor="middle" x="361.21" y="-88.22" font-family="PingFang SC" font-size="12.00" fill="#25463a">安全点发布 / 版本登记</text>
+</g>
+<!-- Gate&#45;&gt;Release -->
+<g id="diagram-2-edge13" class="edge">
+<title>Gate&#45;&gt;Release</title>
+<path fill="none" stroke="#72947b" d="M315.23,-159.39C323.84,-146.77 335.54,-129.63 344.98,-115.79"/>
+<polygon fill="#72947b" stroke="#72947b" points="346.77,-117.2 348.55,-110.55 343.01,-114.64 346.77,-117.2"/>
+<text xml:space="preserve" text-anchor="middle" x="346.18" y="-132.5" font-family="PingFang SC" font-size="10.00" fill="#496c54">通过</text>
+</g>
+<!-- Restore -->
+<g id="diagram-2-node14" class="node">
+<title>Restore</title>
+<path fill="#edf3e9" stroke="#86a68f" stroke-width="1.1" d="M251.67,-109C251.67,-109 114.75,-109 114.75,-109 108.75,-109 102.75,-103 102.75,-97 102.75,-97 102.75,-85 102.75,-85 102.75,-79 108.75,-73 114.75,-73 114.75,-73 251.67,-73 251.67,-73 257.67,-73 263.67,-79 263.67,-85 263.67,-85 263.67,-97 263.67,-97 263.67,-103 257.67,-109 251.67,-109"/>
+<text xml:space="preserve" text-anchor="middle" x="183.21" y="-88.22" font-family="PingFang SC" font-size="12.00" fill="#25463a">撤销候选 / 恢复已知版本</text>
+</g>
+<!-- Gate&#45;&gt;Restore -->
+<g id="diagram-2-edge16" class="edge">
+<title>Gate&#45;&gt;Restore</title>
+<path fill="none" stroke="#72947b" d="M276.33,-159.45C268.05,-153.95 258.95,-147.8 250.71,-142 238.03,-133.08 224.24,-122.95 212.45,-114.15"/>
+<polygon fill="#72947b" stroke="#72947b" points="213.9,-112.39 207.33,-110.32 211.17,-116.03 213.9,-112.39"/>
+<text xml:space="preserve" text-anchor="middle" x="287.46" y="-132.5" font-family="PingFang SC" font-size="10.00" fill="#496c54">失败或证据不足</text>
+</g>
+<!-- Resume -->
+<g id="diagram-2-node13" class="node">
+<title>Resume</title>
+<path fill="#edf3e9" stroke="#86a68f" stroke-width="1.1" d="M518.17,-36C518.17,-36 312.25,-36 312.25,-36 306.25,-36 300.25,-30 300.25,-24 300.25,-24 300.25,-12 300.25,-12 300.25,-6 306.25,0 312.25,0 312.25,0 518.17,0 518.17,0 524.17,0 530.17,-6 530.17,-12 530.17,-12 530.17,-24 530.17,-24 530.17,-30 524.17,-36 518.17,-36"/>
+<text xml:space="preserve" text-anchor="middle" x="415.21" y="-15.22" font-family="PingFang SC" font-size="12.00" fill="#25463a">重解析、选择性重算、继续未完成步骤</text>
+</g>
+<!-- Release&#45;&gt;Resume -->
+<g id="diagram-2-edge14" class="edge">
+<title>Release&#45;&gt;Resume</title>
+<path fill="none" stroke="#72947b" d="M374.28,-72.81C381.14,-63.79 389.66,-52.59 397.14,-42.76"/>
+<polygon fill="#72947b" stroke="#72947b" points="398.84,-44.28 400.97,-37.73 395.22,-41.52 398.84,-44.28"/>
+</g>
+<!-- Resume&#45;&gt;Lab -->
+<g id="diagram-2-edge15" class="edge">
+<title>Resume&#45;&gt;Lab</title>
+<path fill="none" stroke="#72947b" d="M439.17,-36.35C454,-49.26 470.21,-68.33 470.21,-90 470.21,-544 470.21,-544 470.21,-544 470.21,-577.59 444.81,-607.98 423.57,-627.53"/>
+<polygon fill="#72947b" stroke="#72947b" points="422.18,-625.71 418.84,-631.74 425.21,-629.11 422.18,-625.71"/>
+</g>
+<!-- Restore&#45;&gt;Meta -->
+<g id="diagram-2-edge17" class="edge">
+<title>Restore&#45;&gt;Meta</title>
+<path fill="none" stroke="#72947b" d="M185.45,-109.25C190.69,-149.62 203.78,-250.4 209.93,-297.72"/>
+<polygon fill="#72947b" stroke="#72947b" points="207.67,-297.98 210.76,-304.14 212.18,-297.4 207.67,-297.98"/>
+</g>
+</g>
+</svg>
+<figcaption>图 2 · 运行中编排与 Meta 主动检测、修复闭环（按本版 Mermaid 源码生成）</figcaption></figure>
+<details class="diagram-source"><summary>查看 Mermaid 源码</summary><pre class="mermaid"><code>flowchart TD
+    Task[计算任务 task：目标、协议、预算、授权] --&gt; Kernel[rsi_lab 控制面]
+    Domain[rsi_domains：领域能力与工作流] --&gt; Kernel
+    Kernel --&gt; Lab[Lab 执行与证据解释]
+    Lab --&gt; Intent[持久执行意图 / Outbox]
+    Intent --&gt; Tools[模型 / 工具 / 科学计算]
+    Tools --&gt; Store[不可变原始结果与事件账本]
+    Store --&gt; Lab
+    Store --&gt; Meta[Meta：主动巡检、调查、实施修复]
+    Kernel --&gt; Patrol[事件 / 巡检到期 / 停滞诊断]
+    Patrol --&gt; Meta
+    Meta --&gt; Candidate[隔离候选版本]
+    Candidate --&gt; Gate[小范围验收与冻结约束检查]
+    Gate --&gt;|通过| Release[安全点发布 / 版本登记]
+    Release --&gt; Resume[重解析、选择性重算、继续未完成步骤]
+    Resume --&gt; Lab
+    Gate --&gt;|失败或证据不足| Restore[撤销候选 / 恢复已知版本]
+    Restore --&gt; Meta</code></pre></details>
+<p>确定性指相同已提交事件、配置和版本产生相同控制状态；模型和外部计算本身不要求确定。事件回放只消费归档，不重新调用外部服务。</p>
+<ol type="1">
+<li><strong>I1 原始事实不可变。</strong> 调用输入、原始输出、评价、页面和回执只追加；修订结果引用旧版本，不覆盖历史。</li>
+<li><strong>I2 冻结要求不可自改。</strong> Meta 不能更改任务目标、阈值、达标定义、已冻结的数量要求（如本化合物任务的至少 100 个达标 compound）、预算上限或自己的授权边界。</li>
+<li><strong>I3 调度不伪造证据。</strong> 到期、容量变化和租约释放只推进调度版本。</li>
+<li><strong>I4 等待不占派发槽。</strong> parked 事项和 pending 请求不占执行租约；未知外部效果仍持有未决责任。</li>
+<li><strong>I5 执行先有持久意图。</strong> 所有外部调用都绑定已提交 effect、版本、输入哈希、预算预约和幂等键。</li>
+<li><strong>I6 未知不等于失败。</strong> 无法确认未执行的动作不自动重发，也不释放相关身份和费用预约。</li>
+<li><strong>I7 交付按实际内容认证。</strong> 摘要、指针、存根和请求成功不代替原页 ACK 或原生记录回执。</li>
+<li><strong>I8 版本和影响可追踪。</strong> 每个结果绑定实际代码、领域包、协议、输入和解析器版本；只重算受影响依赖。</li>
+<li><strong>I9 发布与回退有责任人。</strong> 发布必须有验收证据；恢复、未决效果和迁移义务不能因释放名额而丢失。</li>
+<li><strong>I10 预算守恒。</strong> 实际消费与未决预约不超过授权上限；失败、修补、验收和恢复都计费。</li>
+<li><strong>I11 修复完成需要续跑。</strong> 通过测试、写入配置和实际解决问题分别记录；续跑以真实后续事件证明。</li>
+<li><strong>I12 工程结论与收益结论分开。</strong> 验收通过不自动建立任务分数、科学发现或总体效率的因果提升。</li>
+</ol>
+<h3 id="labmeta-与代码执行器">2. Lab、Meta 与代码执行器</h3>
+<p>Lab 和 Meta 是逻辑职责，可由多次调用完成。默认保留 Lab Worker、Meta Inspector 和 Meta Worker（调查与修复执行者）三种调用模式；Meta Worker 负责主动取证、根因定位、修复组织、验收与续跑跟进，不需要增加常驻 agent。</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>角色/处理器</th>
+<th>职责与允许命令</th>
+<th>权限边界</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Lab Worker</td>
+<td>提出研究/计算步骤、候选与知识请求；提交科研判断/结果解释，处理 memory_review 和科学等待处置；报告机制问题</td>
+<td>使用任务执行额度与实际交付来源；不改权威分数或冻结目标，不自签支持检查，不绕过受控工具</td>
+</tr>
+<tr>
+<td>Meta Inspector</td>
+<td>独立巡检目标、行为和证据；request_evidence / propose_issue / attach_evidence / request_scientific_review / no_action</td>
+<td>纯内容疑点转交 Lab 复核；机制缺陷进入 Issue；不直接覆写科研判断或活动版本，缺失材料不能视为无问题</td>
+</tr>
+<tr>
+<td>Meta Worker</td>
+<td>request_evidence / request_scientific_review / propose_change / prepare_patch / request_validation / request_release / park / close_issue</td>
+<td>在任务授权和预算内调查、修改、验收与发布；内容修订交授权科研角色，不自签检查或扩大权限</td>
+</tr>
+<tr>
+<td>Disposition（按 typed owner 路由）</td>
+<td>收窄/重规划请求、搁置受影响 Work；Meta owner 可按契约 close_issue，科学 owner 转 Lab 或登记的科研处理器</td>
+<td>最小诊断包仅用于处置；科学等待不能调用 close_issue、关闭 ScientificQuestion 或认证科学支持；用途与费用归原 owner</td>
+</tr>
+<tr>
+<td>PatchExecutor</td>
+<td>在隔离候选目录运行授权的编辑、构建、测试和适配器注册操作</td>
+<td>实际进程/外部调用归档计费；不能原地覆盖活动二进制或数据</td>
+</tr>
+<tr>
+<td>AcceptanceGate / ReleaseManager</td>
+<td>校验冻结要求、验收结果、影响范围；原子切换版本、恢复与登记续跑义务</td>
+<td>代码作出登记规则下的决定，不用模型自评替代检查</td>
+</tr>
+<tr>
+<td>RuntimeSupervisor / AgentRuntimeAdapter</td>
+<td>解析实际 Codex 产物，持久化切换意图，停止/启动和健康检查，验证进程代际，恢复旧版本并重建会话</td>
+<td>独立于被修改的 Codex 运行；只有受信执行器能改变活动绑定，Meta 崩溃不影响确定性回退</td>
+</tr>
+<tr>
+<td>Explainer / Strategist，可选</td>
+<td>解释已登记结果，提出搜索策略变更</td>
+<td>不改历史结论、不跳过同一变更路径</td>
+</tr>
+</tbody>
+</table>
+<p><strong>自主权限默认契约：</strong> 只要路径/能力/操作类型已授权、资源足够且冻结要求保持，Meta 可连续调查、修改、验收、发布和续跑，无需逐次请用户确认。优先查任务、配置、证据和已有用户决定；仅在缺少决定下一步所必需且无法推导的用户信息时提问。范围外修改、目标变更或预算增加视作缺少相应授权，不自行推定；暂停依赖该决定的步骤，其他合法工作继续。</p>
+<p>所有模型命令校验 schema、来源 effect、作用域、版本和引用权限。非法命令留档并返回具体原因。Meta 可以修改允许范围内的内核实现，但不能在同一变更中修改约束/验收判据来批准自己的补丁；冻结判据和发布执行器从任务固定的可信版本读取。</p>
+<h3 id="账本实体与版本">3. 账本、实体与版本</h3>
+<h4 id="存储契约">3.1 存储契约</h4>
+<p>初版采用单写者 SQLite 短事务、外键、提交持久化和版本 CAS。大输入/输出先写内容寻址 blob 并持久化，再提交引用。事件、受影响投影、Work 状态、预算变化和 outbox 意图在同一事务提交；未引用的孤立 blob 可离线回收。</p>
+<p>共同字段为 <code>id, task_id, run_id, branch_id, version, created_seq, updated_seq</code>；事件包含 <code>event_id, commit_seq, type, entity_id, entity_version, causation_id, idempotency_key, payload_ref, config_hash</code>。<code>(branch_id, idempotency_key)</code> 唯一。排序使用提交序号，墙钟用于归档和已持久化的 deadline。</p>
+<h4 id="核心实体">3.2 核心实体</h4>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>实体</th>
+<th>必须记录</th>
+<th>状态/含义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Task / ProtocolVersion</td>
+<td>冻结目标、成功判据、输入、预算、授权、协议 parent/hash</td>
+<td>task 是科学计算任务；协议版本不可原地修改</td>
+</tr>
+<tr>
+<td>ReleaseManifest / ActiveRunBinding</td>
+<td>run/branch/role、父 release、冻结要求 hash、实际协议/能力、RSI 内核与 Codex 分离绑定、memory_binding_hash</td>
+<td>manifest 只追加，当前指针 CAS 更新；不覆盖启动 TaskSpec/RunConfig；记忆机制绑定见 A.5</td>
+</tr>
+<tr>
+<td>CodexRuntimeSpec / CodexRuntimeBinding</td>
+<td>固定 fork/commit、可写范围、构建/检查契约；实际 source/binary/config/adapter/session hash</td>
+<td>spec 定义授权和配方；binding 只引用已构建且内容寻址的实际产物，见 §11.6</td>
+</tr>
+<tr>
+<td>RuntimeActivation</td>
+<td>change/release、目标角色、旧/新绑定、checkpoint、generation、进程句柄、健康证据、恢复义务</td>
+<td><code>prepared, quiescing, starting, ready, active, restoring, restored, recovery_required</code>；目标指针与进程健康分别取证</td>
+</tr>
+<tr>
+<td>Step</td>
+<td>输入/结果依赖、执行能力、版本、resume point、影响范围</td>
+<td><code>pending, ready, running, blocked, completed, failed, superseded</code></td>
+</tr>
+<tr>
+<td>Proposal / Issue</td>
+<td>结构化问题键、证据引用、证据/调度版本、理由</td>
+<td>Proposal 可排队/合并/拒绝；Issue 为 open/resolved/declined/closed_unresolved</td>
+</tr>
+<tr>
+<td>Inspection</td>
+<td>触发来源、事件截止/消费游标、检查范围与来源版本、逐项结果、未检查 backlog、后续计划</td>
+<td><code>due, queued, running, completed, deferred</code>；完成一次巡检不代表全部检查通过</td>
+</tr>
+<tr>
+<td>Work</td>
+<td>typed owner_refs（step/issue/change/scientific_question/claim/investigation）、purpose、actor_binding、budget_account、dependency_refs、blocking_scope、kind/trigger/期望版本/ready_seq</td>
+<td>queued / ready / leased / blocked / succeeded / failed / cancelled；科研、Meta 和恢复用途显式区分，见 §7</td>
+</tr>
+<tr>
+<td>Wait / Request</td>
+<td>具体生产者、已见版本、epoch、deadline、cursor、容量签名</td>
+<td>等待是依赖状态，不是占用执行槽</td>
+</tr>
+<tr>
+<td>DeliveryPage</td>
+<td>内容 hash、token、cursor、依赖清单、实际 packet</td>
+<td><code>materialized, presented, acked, superseded</code></td>
+</tr>
+<tr>
+<td>Effect</td>
+<td>work_id、种类、输入/packet hash、读取快照、memory_binding_hash、幂等键、provider handle、预约和结果；模型调用另绑 runtime/generation/session</td>
+<td>prepared / dispatching / succeeded / failed_definite / unknown / cancelled；TX2 是最终派发准入边界</td>
+</tr>
+<tr>
+<td>Reservation</td>
+<td>owner、parent、资源单位、unallocated/delegated/consumed/released</td>
+<td><code>held, consumed, released, unknown</code></td>
+</tr>
+<tr>
+<td>ResultRevision</td>
+<td>raw_ref、派生链、实际版本、协议适用范围、supersedes、有效性</td>
+<td>历史不可变；当前有效结果由版本化投影选择</td>
+</tr>
+<tr>
+<td>Change</td>
+<td>spec/hash、基准/候选版本、影响范围、锁、验收、恢复和续跑点</td>
+<td>生命周期见 §11；不是统计试验</td>
+</tr>
+<tr>
+<td>Continuation</td>
+<td>change/release、resume point、首个使用事件、后续结果、未决义务</td>
+<td><code>pending, running, verified, blocked, failed</code></td>
+</tr>
+<tr>
+<td>Batch / Attempt</td>
+<td>可选领域批次、策略/协议版本、候选/评价身份和费用</td>
+<td>属于领域工作流，不能成为通用内核唯一进度单位</td>
+</tr>
+<tr>
+<td>ResearchExperiment，可选</td>
+<td>独立研究协议、分支、分配、分析计划和成本</td>
+<td>默认关闭，不参与工程发布门槛</td>
+</tr>
+<tr>
+<td>ScientificQuestion</td>
+<td>问题、范围、子问题、未知、竞争解释及继续/停止理由</td>
+<td>open / investigating / paused / resolved / reopened；不改变 task 冻结目标</td>
+</tr>
+<tr>
+<td>ScientificEvidence</td>
+<td>原生来源、版本/定位、内容、条件、来源组、Artifact/ResultRevision/Effect 引用</td>
+<td>类型化证据视图；不复制权威分数、原始产物或费用</td>
+</tr>
+<tr>
+<td>ClaimRevision</td>
+<td>命题、范围、支持/挑战、依赖、预期版本、检查与修订理由</td>
+<td>判断、来源支持检查、依赖新鲜度分别记录，详见 §10.3.3</td>
+</tr>
+<tr>
+<td>ScientificInvestigation</td>
+<td>问题/判断版本、方法、输入、可选检验承诺、Step/Work/Effect 与产物绑定</td>
+<td>执行、结果判定、解释状态分开；不是 Meta investigation 或可选 ResearchExperiment</td>
+</tr>
+<tr>
+<td>MethodExperienceRevision</td>
+<td>真实尝试、方法、环境、失败/恢复、反例、验证范围</td>
+<td>可复用解释保留条件；可执行方法变更仍走 ChangeEngine</td>
+</tr>
+<tr>
+<td>ScientificDecision</td>
+<td>调用、实际读取快照、相关判断、选择及理由、未知、后续行动</td>
+<td>保留当时依据；显式引用不证明因果收益</td>
+</tr>
+<tr>
+<td>SourceTombstone，可选</td>
+<td>source_ref/version、允许保留的 hash/provenance、授权/原因、删除处理器与状态</td>
+<td>pending_delete / deleted；仅在许可的来源删除能力启用时使用，读取 unavailable 与存储损坏分开</td>
+</tr>
+</tbody>
+</table>
+<p><code>Work.kind</code> 为封闭注册表：<code>lab_step, candidate_evaluate, meta_worker_decision, inspector_discovery, disposition, evidence_retrieve, effect_reconcile, patch_build, validation_step, reparse, recompute, release, rollback, resume, change_settle, change_explain, memory_match, memory_review, memory_consolidate</code>。可选研究另注册 <code>replication_step</code>；获准开启来源删除能力时另注册 <code>source_retire</code>，绑定受信保留政策处理器。新 kind 必须同时提供权限检查、资源单位、执行器、恢复处理器和终态；本地协调 Work 不持有包住子调用的外部租约。</p>
+<p>Codex 修改复用这些 Work kind：<code>patch_build</code> 产生源码和二进制，<code>validation_step</code> 产生真实检查回执，<code>release / rollback / resume</code> 由 RuntimeSupervisor 执行已登记处理器。命令行构建、探测和进程操作也保存 Effect 与资源预约；本地进程句柄不可查询时按 unknown 处理，不把重启本身当作再次执行许可。</p>
+<p>问题键由 <code>component, mechanism_type, intervention_target, applicability, key_schema_version</code> 规范生成。重复同一事件幂等返回；重复同一事实只增加 seen_count，不增加证据版本。新反证、条件变化或显式重审才生成新的调查工作。有效但暂无资源的提案保留 queued，不能当作已否决。</p>
+<h3 id="工作集依赖与安全点">4. 工作集、依赖与安全点</h3>
+<p>Issue 描述问题；Work 描述下一动作；Wait 描述依赖。open/queued/parked 持久条目不设执行名额上限。默认 8 条仅指可淘汰的工作摘要缓存，不参与正确性准入。真实存储容量耗尽应报告资源问题，不能丢弃已有义务。</p>
+<p>资源分别计量：外部任务执行许可默认 1、只读恢复探测许可默认 1、候选/计算身份预约、变更发布锁。初版同一运行最多一个候选版本进入发布/试用阶段；多项调查和候选准备可排队，锁不阻止无冲突的 Lab 工作。后续可扩展按组件作用域加锁。</p>
+<p>安全点有三类：正常步骤/批次边界；失败或容量阻塞后且外部效果已确定的恢复边界；经检查点确认的受控进程重启边界。不能要求一个已卡住的批次先正常结束，才允许 Meta 修复它。必要时暂停受影响 Work，保存成功前缀和 resume point；独立工作继续。</p>
+<p>安全点只能切换未开始工作的版本。已派发 Effect 保留真实输入版本，迟到结果按其实际版本归档。需要中止未完成 Batch 时登记 aborted/superseded，保留已完成评价和成本，恢复只从未执行或明确需重算的部分开始。</p>
+<p><code>close_issue(resolved)</code> 要求问题的验收与续跑证据齐全。失败/未决效果、回退、未结算评价或迁移义务仍存在时保持 open；可取消请求显式取消，已产生的页面和回执不删除。无可行修复可以有理由关闭为 closed_unresolved，不能伪称已解决。</p>
+<p>科研待解释结果、待复核判断与未完成计划作为持久工作集映射到已注册 Work/Wait；不设新的“记忆槽位”准入上限。必要失效通知与当前任务义务优先，可选归纳在共同资源内接受有界服务。队列超出上下文时返回数量与继续入口，不丢弃未处理对象；维护记录本身不创造科学进度。</p>
+<h3 id="配置授权与预算">5. 配置、授权与预算</h3>
+<h4 id="启动配置">5.1 启动配置</h4>
+<p>运行开始时冻结版本化 RunConfig。以下是工程默认值，不是科学阈值或最优性能声明；领域批次参数由 <code>rsi_domains</code> 提供，task 选择并冻结。</p>
+<div class="sourceCode" id="cb2"><pre class="sourceCode yaml"><code class="sourceCode yaml"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="fu">schema_version</span><span class="kw">:</span><span class="at"> </span><span class="dv">2</span></span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a><span class="fu">execution</span><span class="kw">:</span></span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">max_external_in_flight</span><span class="kw">:</span><span class="at"> </span><span class="dv">1</span></span>
+<span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">max_recovery_probes</span><span class="kw">:</span><span class="at"> </span><span class="dv">1</span></span>
+<span id="cb2-5"><a href="#cb2-5" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">recovery_probe_attempts_per_effect</span><span class="kw">:</span><span class="at"> </span><span class="dv">3</span></span>
+<span id="cb2-6"><a href="#cb2-6" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">recovery_probe_backoff_seconds</span><span class="kw">:</span><span class="at"> </span><span class="kw">[</span><span class="dv">5</span><span class="kw">,</span><span class="at"> </span><span class="dv">30</span><span class="kw">,</span><span class="at"> </span><span class="dv">120</span><span class="kw">]</span></span>
+<span id="cb2-7"><a href="#cb2-7" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">max_concurrent_release_candidates</span><span class="kw">:</span><span class="at"> </span><span class="dv">1</span></span>
+<span id="cb2-8"><a href="#cb2-8" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">resident_view_cache_entries</span><span class="kw">:</span><span class="at"> </span><span class="dv">8</span></span>
+<span id="cb2-9"><a href="#cb2-9" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">event_page_size</span><span class="kw">:</span><span class="at"> </span><span class="dv">256</span></span>
+<span id="cb2-10"><a href="#cb2-10" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">code_work_per_tick</span><span class="kw">:</span><span class="at"> </span><span class="dv">128</span></span>
+<span id="cb2-11"><a href="#cb2-11" aria-hidden="true" tabindex="-1"></a><span class="fu">meta</span><span class="kw">:</span></span>
+<span id="cb2-12"><a href="#cb2-12" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">optional_initial_credits</span><span class="kw">:</span><span class="at"> </span><span class="fl">1.0</span></span>
+<span id="cb2-13"><a href="#cb2-13" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">optional_credits_per_progress_unit</span><span class="kw">:</span><span class="at"> </span><span class="fl">0.3</span></span>
+<span id="cb2-14"><a href="#cb2-14" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">optional_credit_capacity</span><span class="kw">:</span><span class="at"> </span><span class="fl">2.0</span></span>
+<span id="cb2-15"><a href="#cb2-15" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">inspector_initial_tokens</span><span class="kw">:</span><span class="at"> </span><span class="dv">1</span></span>
+<span id="cb2-16"><a href="#cb2-16" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">inspector_token_every_progress_units</span><span class="kw">:</span><span class="at"> </span><span class="dv">4</span></span>
+<span id="cb2-17"><a href="#cb2-17" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">inspector_token_capacity</span><span class="kw">:</span><span class="at"> </span><span class="dv">1</span></span>
+<span id="cb2-18"><a href="#cb2-18" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">patrol_max_interval_seconds</span><span class="kw">:</span><span class="at"> </span><span class="dv">300</span></span>
+<span id="cb2-19"><a href="#cb2-19" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">stall_triage_after_seconds</span><span class="kw">:</span><span class="at"> </span><span class="dv">300</span></span>
+<span id="cb2-20"><a href="#cb2-20" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">stall_triage_episodes_per_epoch</span><span class="kw">:</span><span class="at"> </span><span class="dv">1</span></span>
+<span id="cb2-21"><a href="#cb2-21" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">stall_triage_episodes_per_run</span><span class="kw">:</span><span class="at"> </span><span class="dv">3</span></span>
+<span id="cb2-22"><a href="#cb2-22" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">stall_triage_model_calls_per_episode</span><span class="kw">:</span><span class="at"> </span><span class="dv">3</span></span>
+<span id="cb2-23"><a href="#cb2-23" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">investigation_initial_evidence_requests</span><span class="kw">:</span><span class="at"> </span><span class="dv">3</span></span>
+<span id="cb2-24"><a href="#cb2-24" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">inspection_retries_per_input_revision</span><span class="kw">:</span><span class="at"> </span><span class="dv">1</span></span>
+<span id="cb2-25"><a href="#cb2-25" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">backlog_high</span><span class="kw">:</span><span class="at"> </span><span class="dv">8</span></span>
+<span id="cb2-26"><a href="#cb2-26" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">backlog_low</span><span class="kw">:</span><span class="at"> </span><span class="dv">4</span></span>
+<span id="cb2-27"><a href="#cb2-27" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">ordinary_meta_worker_calls_per_issue</span><span class="kw">:</span><span class="at"> </span><span class="dv">8</span></span>
+<span id="cb2-28"><a href="#cb2-28" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">aging_meta_worker_opportunities</span><span class="kw">:</span><span class="at"> </span><span class="dv">8</span></span>
+<span id="cb2-29"><a href="#cb2-29" aria-hidden="true" tabindex="-1"></a><span class="fu">wait</span><span class="kw">:</span></span>
+<span id="cb2-30"><a href="#cb2-30" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">deadline_after_progress_units</span><span class="kw">:</span><span class="at"> </span><span class="dv">8</span></span>
+<span id="cb2-31"><a href="#cb2-31" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">deadline_after_seconds</span><span class="kw">:</span><span class="at"> </span><span class="dv">300</span></span>
+<span id="cb2-32"><a href="#cb2-32" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">dispositions_per_epoch</span><span class="kw">:</span><span class="at"> </span><span class="dv">1</span></span>
+<span id="cb2-33"><a href="#cb2-33" aria-hidden="true" tabindex="-1"></a><span class="fu">change</span><span class="kw">:</span></span>
+<span id="cb2-34"><a href="#cb2-34" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">scoped_code_patch</span><span class="kw">:</span><span class="at"> </span><span class="ch">true</span></span>
+<span id="cb2-35"><a href="#cb2-35" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">codex_runtime_patch</span><span class="kw">:</span><span class="at"> </span><span class="ch">true</span><span class="co">  # 主闭环能力；须绑定具体 RuntimeSpec、授权和可用执行器</span></span>
+<span id="cb2-36"><a href="#cb2-36" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">default_validation_order</span><span class="kw">:</span><span class="at"> </span><span class="kw">[</span><span class="at">saved_data</span><span class="kw">,</span><span class="at"> small_sample</span><span class="kw">,</span><span class="at"> bounded_followup</span><span class="kw">]</span></span>
+<span id="cb2-37"><a href="#cb2-37" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">release_boundary</span><span class="kw">:</span><span class="at"> safe_point</span></span>
+<span id="cb2-38"><a href="#cb2-38" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">full_rerun_required</span><span class="kw">:</span><span class="at"> </span><span class="ch">false</span></span>
+<span id="cb2-39"><a href="#cb2-39" aria-hidden="true" tabindex="-1"></a><span class="fu">research</span><span class="kw">:</span></span>
+<span id="cb2-40"><a href="#cb2-40" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">enabled</span><span class="kw">:</span><span class="at"> </span><span class="ch">false</span></span>
+<span id="cb2-41"><a href="#cb2-41" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">budget</span><span class="kw">:</span><span class="at"> </span><span class="dv">0</span></span></code></pre></div>
+<p>必填任务配置：<code>domain_package/version, workflow/version, task_spec/hash, frozen_requirements/hash, protocol/hash, model_routes, tokenizer/version, allowed_operations, allowed_write_scopes, dependency_policy, compute/token/tool/wall_time limits, repair_allowance, recovery_reserve, checkpoint_policy, registered_acceptance_checks</code>。科学阈值必须来自明确 task 规范；缺少关键值就定位为用户信息缺口，不由 Meta 猜测。<code>scoped_code_patch: true</code> 只启用授权内的受控修复，不赋予任意路径写权限。</p>
+<p>Codex 自修改能力还必须绑定 <code>codex_runtime_spec_ref/hash, initial_runtime_bindings_by_role, trusted_supervisor_ref/hash, known_good_runtime_bindings, runtime_activation_policy</code>。后者登记静止/启动/健康检查 deadline、启动和回退次数上限、generation fencing、会话恢复方式和回退目标；构建 CPU/内存/磁盘/墙钟及验证 token/工具费用均受总预算约束。启动校验并报告该能力为 ready、blocked 或 unsupported；缺少源码、工具链、授权或恢复执行器时不能只凭布尔开关显示“可自动修改”。缺口不阻塞无依赖的普通 Lab 工作。</p>
+<p>进度单位由任务工作流注册为完成 Step 或逻辑 Batch；一次子调用、同批修补、重复回调不能凭空增加进度或产生额外 Meta credit。登记完成判据和时钟推进规则必须可重放。</p>
+<p>主动巡检在启动时安排一次，此后每 4 个进度单位或距上次巡检 300 秒先到者登记到期；有未检查的任务事实才发起常规模型巡检。时间到期可以申请一次巡检机会，不增发 optional credit 或总预算；与进度到期合并，令牌仍最多 1。没有新事实但预期进展逾期时使用有界停滞诊断。上述间隔、重试和取证次数是可登记的工程初值，须通过 §17 的活性与成本验收，不能称为已验证的最佳参数。</p>
+<p>启动还校验初始 MemoryRuntimeBinding、各科研 Work 的 actor/budget 路由、读取与维护上限，以及支持检查处理器。缺少配置时标记相应能力 blocked/unsupported，不能把未知规则当零成本或无限额度。模型辅助复核使用登记的 Lab 角色与 schema；它不是新增常驻角色，也不由 Meta 发现 credit 控制。</p>
+<h4 id="三类额度">5.2 三类额度</h4>
+<ul>
+<li><strong>任务执行额度</strong>：Lab 的模型、工具和科学计算。</li>
+<li><strong>修复与验收额度</strong>：调查、编码、重解析、小样本及必要后续验收。启动时预留，避免 Lab 卡住后只能等新的批次产生 credit。</li>
+<li><strong>恢复预留</strong>：已承诺的对账、取消和恢复。恢复/结算的纯代码操作不需要模型 credit，始终可以调度。</li>
+</ul>
+<p>三者都是任务总预算内部的子账户，不能重复算作新增额度。<strong>Meta 的</strong>常规巡检、修复解释和系统策略探索使用 Meta credit；Lab 科研解释与 <code>memory_review</code> 使用任务执行子预算，不要求 Inspector token 或 Meta discovery credit，仍受共同真实资源限额约束。已确认阻塞的必要机制修复用 repair_allowance，不因发现令牌耗尽而饿死。repair_allowance 还预留疑似阻塞初诊：每个停滞 epoch 最多 1 个 episode，每个 run 最多 3 个 episode，每个 episode 最多 3 次模型调用，允许“提出取证 → 获得材料 → 判别”的闭环在未确诊时执行。该预留包含在 repair_allowance 内，须登记 token、时间和工具上限，不是额外预算；取证后的续调和格式重试共用 episode 上限，无需新的进度/token/可选 credit。不能要求先有进度才能发现为何没有进度。每个 Issue 的调查和修复尝试总量有上限，重开或 wait 不能清零。</p>
+<p>准入预约最大费用，实际用量结算差额；unknown 保留最坏情况预约。支持父子转拨：<code>outstanding(node)=unallocated(node)+sum(outstanding(children))</code>，根账户满足 <code>limit=free+consumed_once+outstanding</code>。父 delegated 是关系字段，不再占一次额度；released 仅为审计字段。<code>limit-consumed</code> 与可新派发的 <code>limit-consumed-outstanding</code> 分开报告。</p>
+<p>时间使用登记 deadline，不能以调用数近似。模型调用上限可为空，但真实 token、时间和计算额度必须明确。新变更在准入时同时预约验收、必要续跑检查和恢复资源；修复局部预算耗尽则停止该修复、结清效果并撤销候选，释放后任务可用剩余合法预算继续。回滚后仍有原故障时只暂停该依赖，不谎称可以安全继续。</p>
+<p>科学记忆检索、解释复核与归纳从任务执行额度中的登记子预算支付；Meta 对记忆机制的修复使用相应修复额度，已承诺对账遵循恢复预留。所有模型、工具、索引与摘要工作分别记录实际资源，既有调用内处理的解释不重复收费。记忆写入数、摘要数和维护事件不能增加 credit 或重置尝试次数。</p>
+<h3 id="外部效果与崩溃恢复">6. 外部效果与崩溃恢复</h3>
+<p><strong>TX1 准备事务：</strong> 重查 Work、权限、版本、必需依赖与预算；以固定读取快照和实际 runtime/memory binding 构造完整 packet/input blob 及候选交付清单并持久化；提交 Effect(prepared)、Work(leased)、预约和 outbox。此时仅物化内容，不授予实际读取权限或 ACK；提交失败绝不调用外部服务。</p>
+<p><strong>TX2 领取事务：</strong> 在同一短事务内重查 Work、§13 的用途/停止准入规则、权限、当前必需依赖及失效水位、该 Work 实际依赖的活动 runtime/memory 绑定和有效预约；模型调用另查 generation，再 CAS prepared→dispatching 并登记本次准入版本。finalizing 禁止新科研推理，但已登记的必要对账/取消/回退/恢复可按恢复权限与预留准入，不得借此启动新科研工作。检查失败保留原 packet 与来源，取消尚未派发意图并释放确定未消耗的预约，后继 Work 按新快照重建；不能原地替换原 packet。已 dispatching/unknown 的 Effect 不走此取消路径。TX2 提交是派发许可的线性化边界，随后退出事务才执行外部 IO；并发更正若在此之后发生，保留实际调用及费用，在结果提交时重新处理适用性，不盲目重发。</p>
+<p><strong>TX3 结果事务：</strong> 先持久化原始结果/错误，再核对 Effect、provider handle、实际绑定、传输/完成回执和 packet hash；根据受信证据登记实际交付、原生读取权限及页面 ACK。原子登记结果、合法提议或逐项拒绝、后继工作/待处理水位和预约结算；支持检查及记忆提议在提交时再次核对精确依赖版本。调用期间来源已更正的解释可按历史快照保留，但由控制器标记 needs_review，不能作为当前已检查依据；相关后继动作受阻并排入新版本复核。非法/过期解释不丢弃真实结果、已认证交付和费用，也不让一次成功计算重新变成未执行。数据库事务失败从已落盘回执幂等重放。</p>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>崩溃窗口</th>
+<th>恢复动作</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>TX1 前</td>
+<td>没有外部动作</td>
+</tr>
+<tr>
+<td>prepared 后、dispatching 前</td>
+<td>恢复原意图并先通过 TX2 的停止/权限/依赖/实际绑定检查；通过才以同身份派发，失效则取消未派发意图并重建</td>
+</tr>
+<tr>
+<td>dispatching 后、发送状态不明</td>
+<td>标记 unknown；先查询 provider 或同键恢复，不新建身份绕过</td>
+</tr>
+<tr>
+<td>原始结果已落盘、TX3 前</td>
+<td>幂等摄取已保存结果，不重调计算</td>
+</tr>
+<tr>
+<td>TX3 后重复回调</td>
+<td>同结果 no-op；异结果 conflict 隔离，不覆盖旧事实</td>
+</tr>
+</tbody>
+</table>
+<p>网络超时、断连和进程丢失默认 unknown。只有已知未执行或明确失败才为 failed_definite。若外部服务无查询/幂等能力，明确报告未决，不宣称自动 exactly-once。</p>
+<p>未知任务 effect 保留原许可、身份和费用。只读恢复通道可在独立许可下查询原动作，默认最多三次、退避 5/30/120 秒；不借探测通道重发任务。探测超时且客户端连接已关闭可释放探测许可，但保留未明费用，不递归“查询自己的查询”。本地恢复继续运行；全局唯一任务许可被 unknown 占用时，新外部工作必须等待对账。</p>
+<h3 id="调度与运行中修复">7. 调度与运行中修复</h3>
+<div class="sourceCode" id="cb3"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> control_tick(trigger):</span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a>    persist_trigger_once(trigger)</span>
+<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a>    ingest_durable_results(limit<span class="op">=</span><span class="dv">256</span>)</span>
+<span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a>    enforce_frozen_requirements()</span>
+<span id="cb3-5"><a href="#cb3-5" aria-hidden="true" tabindex="-1"></a>    advance_required_rollback_and_reconciliation()</span>
+<span id="cb3-6"><a href="#cb3-6" aria-hidden="true" tabindex="-1"></a>    settle_ready_changes_and_continuations()</span>
+<span id="cb3-7"><a href="#cb3-7" aria-hidden="true" tabindex="-1"></a>    consume_event_page(limit<span class="op">=</span><span class="dv">256</span>)</span>
+<span id="cb3-8"><a href="#cb3-8" aria-hidden="true" tabindex="-1"></a>    resolve_dependencies_and_deadlines(limit<span class="op">=</span><span class="dv">128</span>)</span>
+<span id="cb3-9"><a href="#cb3-9" aria-hidden="true" tabindex="-1"></a>    refresh_impact_and_reuse_views()</span>
+<span id="cb3-10"><a href="#cb3-10" aria-hidden="true" tabindex="-1"></a>    advance_inspection_coverage_and_due_work()</span>
+<span id="cb3-11"><a href="#cb3-11" aria-hidden="true" tabindex="-1"></a>    update_discovery_backpressure()</span>
+<span id="cb3-12"><a href="#cb3-12" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> immediately_executable_critical_local_work_exists():</span>
+<span id="cb3-13"><a href="#cb3-13" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> CONTINUE_CODE_TICK</span>
+<span id="cb3-14"><a href="#cb3-14" aria-hidden="true" tabindex="-1"></a>    work <span class="op">=</span> choose_affordable_ready_work()</span>
+<span id="cb3-15"><a href="#cb3-15" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> work <span class="kw">is</span> <span class="va">None</span>:</span>
+<span id="cb3-16"><a href="#cb3-16" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> QUIESCENT_OR_BLOCKED_WITH_REASON</span>
+<span id="cb3-17"><a href="#cb3-17" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> prepare_effect_or_local_transition(work)</span></code></pre></div>
+<p>executor 独立领取 outbox 并在事务外调用。tick 只处理当时已提交事件截止序号；没新事件、到期条件或可执行工作就等待通知，不忙循环。unknown、无预算或未来 deadline 不算立即可处理的关键本地积压。</p>
+<p>派发顺序：必要对账/恢复 → 已预约的结果获取与验收/续跑义务 → 阻塞当前步骤的有界修复 → 每个 epoch 一次处置 → 普通 Meta → Lab。局部优先只影响相关依赖；正常 Lab 不应被无限调查饿死。普通批间最多一次可选 Meta，再交回 Lab；必要修复按登记额度执行，耗尽即明确挂起而非无限优先。</p>
+<p>普通 Meta Worker 使用登记 priority_band（0–2）和 <code>(ready_seq, work_id)</code> 稳定排序。连续可负担且被跳过 8 次普通准入机会的 Work 进入 aging FIFO；依赖不满足不算饥饿，seen_count 不影响优先级。有限服务延迟只在资源可用、外部能结束且负载可服务时成立。</p>
+<p>常规 Inspector 发现需要 token 与可选 credit，积压达到 8 暂停、降至 4 恢复。积压按去重的有效 Proposal 和 ready Meta Worker Work 计，parked 不混入。暂停发现不阻断证据入账、覆盖 backlog、已有请求、恢复、修复或结算，也不阻断独立计额的疑似阻塞初诊。预算或反压导致的未巡检记录为 deferred，不能输出 no_action 或标为已经检查。</p>
+<p>fastlane 仅由确定性规则产生 ChangeProposal，省掉一次提议调用；按 <code>(rule_id, input_revision, baseline_hash)</code> 去重，仍走同一权限、验收、发布、恢复和续跑路径。失败或不确定变更不因下一 tick 自动重试；需新证据、候选版本或有界显式重审。</p>
+<p><strong>科研记忆 Work 的派发归属：</strong><code>memory_match</code> 仅做有界本地索引匹配，计入 code_work_per_tick，并持久化待处理水位；不能把全量匹配/语义推断标为无限优先的 critical local backlog。需要模型解释的部分登记 <code>memory_review</code>，由 Lab 或 task 指定的科研处理器执行，使用任务执行额度。必需复核作为受影响 Lab 步骤的前置依赖，只阻塞该 blocking_scope；无关 Lab 工作继续。普通复核进入 Lab 通道并按 ready_seq/work_id 与登记的 aging 规则服务，不消耗 Meta discovery credit。独立 <code>memory_consolidate</code> 是可选低优先维护，只在有可分配额度且不挤占必要义务时准入，可记 maintenance_deferred；不得为保证写入量阻塞任务结束。</p><p>§7 派发顺序中的“Lab”包含上述科学解释与复核；用于修复机制本身的诊断仍属 Meta，按原修复优先级执行。证据到达、读回执和维护结束本身不产生新科学进度。前置复核不能等待被自己阻塞的后继步骤才触发：准入依赖必须指向已有来源或独立生产者，发现等待环按 §8 处置。</p>
+<h4 id="主动发现的责任与唤醒">7.1 主动发现的责任与唤醒</h4>
+<p><strong>Meta 对发现问题负责。</strong> Lab 不上报、工具不报错、已有检测规则不命中，都不能免除巡检。Inspector 根据冻结目标、当前计划、实际行为和原始产物判断系统是否在做正确且有用的工作；可以提出规则未覆盖的新假设。确定性规则负责提醒和强制不变量，不能定义模型允许发现的全部问题。</p>
+<p>巡检范围包含登记的 Codex harness 及其适配器。事件协议异常、工具调用/重试偏离、压缩后的证据丢失、会话恢复失败或无告警的行为异常都可触发调查；确认执行层根因后自动进入 §11.6。已预授权的源码修改、编译、验收、切换和回退连续执行，不等待用户再次逐步指令。</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>入口</th>
+<th>主动检查什么</th>
+<th>调度约束</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>启动</td>
+<td>目标、完成要求、工具能力、预期产物是否相互匹配，是否存在显然缺失的步骤</td>
+<td>在首个正常调度机会安排；不能等待 Lab 先报问题</td>
+</tr>
+<tr>
+<td>增量巡检</td>
+<td>新决策、新结果、证据选择和任务进展；包含返回成功的样本</td>
+<td>每 4 个进度单位或 300 秒先到者到期；无需已有告警；受可选额度约束</td>
+</tr>
+<tr>
+<td>事件提前检查</td>
+<td>错误、证据矛盾、来源修订、异常重复/消耗、容量拒绝、预期结果缺失</td>
+<td>按来源版本合并唤醒；已有关联 Issue 时直接更新该调查</td>
+</tr>
+<tr>
+<td>疑似停滞初诊</td>
+<td>没有预期进展的具体 Step、生产者、依赖与可恢复动作</td>
+<td>watchdog 登记一次 stall epoch；使用预留初诊额度，不等待新进度或问题预先确诊</td>
+</tr>
+<tr>
+<td>变更后跟进</td>
+<td>修复是否实际生效、相关后续结果是否正常、是否产生回归</td>
+<td>走已有 Continuation 和已预约验收；不再重复收费创建等价巡检</td>
+</tr>
+</tbody>
+</table>
+<p>watchdog 使用注册工作流的预期里程碑、结果 deadline 和相关状态；默认在应有进展但持续 300 秒无相关进展时生成疑点。已声明时长内正常运行的计算、等待尚未到期的外部依赖不因“没有新批次”自动判为故障。没有新证据、没有逾期预期、没有必要跟进时，定时 tick 只推进本地检查，不调用模型。</p>
+<p><code>stall_epoch</code> 绑定 run、受阻对象、预期里程碑和相关状态签名，定时器、重复回调和 Meta 自己的日志不能刷新它。一次初诊 episode 后必须登记转入已确认问题的修复、具体依赖等待、关闭疑点或初诊额度不足；同状态不按下一次时钟重复诊断。额度耗尽但未确诊时保持 deferred/具体等待，不能自动升级为无限必要修复。只有相关执行/依赖状态实质变化并形成新的逾期条件才产生新 epoch，整个 run 的初诊次数也不重置；同 episode 的取证返回继续原调查，不另开 episode。</p>
+<h4 id="检查正常路径与未知问题">7.2 检查正常路径与未知问题</h4>
+<p>每次巡检由 <code>InspectionPlan</code> 明确检查项、适用范围、原始来源索引、取样规则和最大费用。通用检查关注运行与证据关系；单位、分数方向、科学有效性和资格要求由领域契约提供，不能写死在内核。</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>检查面</th>
+<th>典型疑点</th>
+<th>最小判别证据</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>目标与能力</td>
+<td>计划持续绕开必需步骤；报告完成却缺合格产物；工具能力无法支持目标</td>
+<td>冻结要求、计划、能力清单、实际产物和领域完成判据</td>
+</tr>
+<tr>
+<td>成功结果与解析</td>
+<td>状态成功但字段缺失、单位/方向错误、缺失值被补零、摘要与 raw 不一致</td>
+<td>保存的 raw、解析代码/版本、字段契约、代表性正常样本</td>
+</tr>
+<tr>
+<td>证据与科学判断</td>
+<td>只保留支持材料、遗漏反证、引用失效结果、跨协议混用</td>
+<td>实际交付 packet、支持/反对来源、依赖和协议版本</td>
+</tr>
+<tr>
+<td>行为与进展</td>
+<td>重复低价值查询/计算、同一失败重试、调用很多但必需产物长期不增长</td>
+<td>规范化输入、调用与费用、有效产物增量、已有处理历史</td>
+</tr>
+<tr>
+<td>资源与后续可行性</td>
+<td>剩余预算可能无法覆盖必需步骤、未决预约或恢复义务</td>
+<td>预算账本、剩余工作、成本估计及其不确定性</td>
+</tr>
+<tr>
+<td>修复与恢复</td>
+<td>补丁已发布却没有被使用、问题复发、旧错误结果继续进入下游</td>
+<td>Release、真实使用事件、Continuation、结果依赖与有效性</td>
+</tr>
+<tr>
+<td>Codex 执行层</td>
+<td>成功退出但工具响应遗漏；重复重试；压缩丢约束；恢复后状态或实际版本不符</td>
+<td>精确 runtime binding、源码、事件/工具轨迹、压缩前后材料、会话契约、实际启动与进程代际证据</td>
+</tr>
+</tbody>
+</table>
+<p>至少从本轮新增的成功路径中选择一个有来源的样本核对；无此样本时明确不适用。取样应轮转覆盖组件/版本并保留未检查积压，不能只选最容易通过的样本。计数、趋势和抽样不足以证明全体正确。低产出、成本偏高和搜索平台期首先是疑点，可能由任务难度、合理探索或工具局限解释，不能自动归因于 Harness bug。</p>
+<p>固定检查之外，Inspector 必须审视“当前计划有没有遗漏目标所需的能力或证据”“现有摘要有没有掩盖另一种解释”，可登记新的检查项与最小取证动作。新项不能替换本轮既定项，也不能修改冻结科学规则；没有值得追查的问题时允许有依据地结束，无须凑出 patch。</p>
+<h4 id="主动取证与持续调查">7.3 主动取证与持续调查</h4>
+<p>发现与修改使用不同门槛。可疑但尚未确诊的现象即可建立 provisional Issue，由 Meta Worker 接手；只有证据、影响、授权和可验证方案足够时才进入 Change。根因未明时问题键使用可核对的症状与作用域，后续根因细化保留同一 Issue 或显式合并关系，不以改名重置历史和额度。</p>
+<p>Inspector 和 Meta Worker 均可主动请求授权范围内的事件原文、调用输入输出、raw/派生结果对照、相关代码与配置版本、检索遗漏记录和依赖信息。初次调查默认最多 3 个有界取证请求，并受实际调用/token/字节/时间预算约束；不足时须在同一 Issue 内提出具体后续计划和剩余额度，由控制面准入，不重建问题来获取新额度。已获得材料尽量复用，但实际交付认证仍按 §9 处理。</p>
+<p>Meta Worker 接手时独立核对 Inspector 的依据，保存：</p>
+<pre class="text"><code>Investigation
+  issue_id, scope, source_versions, meta_worker_work_id
+  observed_facts[], hypotheses[], alternative_explanations[], counterevidence[]
+  evidence_received_refs[], evidence_delivered_refs[], missing_evidence[]
+  impact_if_true, next_action, discriminating_check, stop_condition
+  related_work/result/component_refs[], wake_condition
+  remaining_attempts, budget_account, incurred_cost</code></pre>
+<p>调查按“最能区分解释且成本最低的下一步”推进：先读原始记录，再对照实现/协议，再运行授权内的最小复现或检查。已有 raw 可解决的问题不重新调用科学计算。每一步明确预期观察与什么结果会推翻当前解释；单次直接实现证据可以足以定位 bug，不必机械等待重复报错。</p>
+<p>合法取证、局部复现与修复不逐次询问用户。缺材料时优先自行查找；只有必要用户信息或授权确实无法取得才提问。<code>unavailable / truncated / not_delivered</code> 保持不同原因，不能变成“证据支持无问题”。影响冻结正确性的未决依赖继续阻塞；其他合法工作继续。</p>
+<p>Issue 订阅相关 Work、结果、协议/组件版本和验收/续跑事件。新材料到达自动恢复同一 Meta Worker 的下一步；停放必须带具体依赖和唤醒条件。相同范围已有可执行调查时优先继续它，巡检附加新证据，避免不断开新问题而不完成旧调查。该优先级仍受 §7 的 Lab 公平性和总额度限制。</p>
+<p>Inspector / Meta Worker 发现失效引用、解释遗漏或内容性疑点时，可用 <code>request_scientific_review</code> 关联目标科研版本、实际交付来源、发现与局限。控制器按目标/来源版本和用途去重为 Lab 的 memory_review；接收调用重新交付所需来源，不能继承 Meta 的引用权限。纯内容复核无需先建代码 Change，也不授予 Meta 覆写 Claim 的权限；同一发现若同时表明检索/运行机制故障，可另建关联 Issue/Change。复核完成返回来源绑定结果，机制 Issue 仍按其验收与续跑契约结算。</p>
+<h4 id="覆盖证明与有条件的-no_action">7.4 覆盖证明与有条件的 no_action</h4>
+<p>巡检输出必须逐项覆盖本轮登记的检查项，包含明确的负面判断。控制面检查漏项、重复项、未知项、来源版本和交付权限；格式完整只能证明报告完整，不能证明模型判断正确。</p>
+<pre class="text"><code>InspectionResult
+  inspection_id, trigger_refs[], plan_hash, source_cutoff_seq
+  check_assessments[{check_id, scope, outcome, evidence_refs[], reason,
+                     limitations[], next_action?}]
+  additional_findings[], issue_links[], evidence_requests[], scientific_review_requests[]
+  checked_source_refs[], uninspected_refs_or_cursor, next_inspection_condition
+
+outcome = suspected_problem | no_issue_found | insufficient_evidence | not_applicable</code></pre>
+<p><code>no_issue_found</code> 只对已读来源与本次范围成立；<code>not_applicable</code> 必须说明适用性理由。未完成检查或关键证据不可得时必须是 <code>insufficient_evidence</code>，并安排取证、等待或留下明确未决。<code>no_action</code> 仅允许在本轮检查项均有依据地无问题/不适用、没有可行动新发现时输出，并带覆盖范围、抽样限制和下次条件；它不宣称全系统健康。</p>
+<p>分开记录事件消费游标、实际交付范围和完成检查的来源版本。扫描过索引不等于模型看过原文，交付过也不等于完成审阅；仅由已归档且通过结构校验的巡检结果更新完成覆盖。完成覆盖只更新实际交付且已作出 <code>suspected_problem</code> 或 <code>no_issue_found</code> 判断的来源范围；<code>not_applicable</code> 只完成该检查项的适用性判定，<code>insufficient_evidence</code> 及未交付来源继续保留为未完成覆盖。截断、容量不足、反压和预算不足的材料留在持久 backlog；增量摘要或缓存淘汰不推进其已检查状态。</p>
+<p>同一输入版本的模型失败/非法结果最多按配置重试一次，每次计费；耗尽后巡检保留 deferred 及未覆盖项，不伪造 no_action。仅新相关来源/能力版本、容量改变或登记的有界显式重审可重新安排；重启和重复通知不重置次数。日常巡检输出、ACK、预算结算等自身事件不算新的科学事实，避免巡检观察自己而无限自激。</p>
+<h4 id="主动性如何验收">7.5 主动性如何验收</h4>
+<p>验收分两层：脚本化 Meta 和故障注入证明无报告唤醒、去重、取证、连续调查及预算路径可达；真实模型在预先留出的有标签案例与正常案例上评测是否能发现并解释问题。不得只给模型标好的 issue 描述后把成功修复算作自主检测，也不能用 scripted 输出证明模型识别能力。</p>
+<p>报告无 Lab 报告的发现数、首次可见线索至发现/调查的延迟、各组件/版本的已检查和未检查范围、真实问题检出/遗漏、正常案例误报、调查完成率、重复调查率和每个已验证问题的总成本。检出率/误报率需要独立参考标签和明确分母；未知真值的在线运行只报告可核对的过程指标。</p>
+<p>未报告问题不自动等于漏检，产生更多问题也不自动等于更主动。成功标准是系统在用户介入前发现可行动疑点、主动取得判别证据、在预算内处理到明确结果，并使任务得到实际推进；合法的无问题判断与被反证关闭的假设同样保留。</p>
+<h4 id="参考原型与本项目扩展">7.6 参考原型与本项目扩展</h4>
+<p>本节参考 <a href="https://github.com/deepseek-ai/dsh-superagent-prototype/tree/8c32a9dc5d72c033816c6a8110b37f40cf94fba4">DeepSeek Superagent 公开原型</a>，核对版本为 <code>8c32a9dc5d72c033816c6a8110b37f40cf94fba4</code>。以下区分源码机制、提示约定与本项目新增设计，不能把参考原型描述为已经实现 RSI-Lab 的主动科学审计或自我修复。</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>可借鉴机制</th>
+<th>参考来源</th>
+<th>本项目采用方式</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>每个启用规则必须恰有一次 assessment；缺项/重复/未知项由代码拒绝</td>
+<td><a href="https://github.com/deepseek-ai/dsh-superagent-prototype/blob/8c32a9dc5d72c033816c6a8110b37f40cf94fba4/src/policy.ts">src/policy.ts</a></td>
+<td>每轮检查项完整覆盖，保留负面与不可判断结果</td>
+</tr>
+<tr>
+<td>评估时主动读取原始/相邻/分页上下文；区分不可取得和不匹配</td>
+<td><a href="https://github.com/deepseek-ai/dsh-superagent-prototype/blob/8c32a9dc5d72c033816c6a8110b37f40cf94fba4/prompts/admission.md">prompts/admission.md</a>、<a href="https://github.com/deepseek-ai/dsh-superagent-prototype/blob/8c32a9dc5d72c033816c6a8110b37f40cf94fba4/src/app/assessment.ts">src/app/assessment.ts</a></td>
+<td>取证权限和交付由内核落实；提示中的只读约定本身不能替代工具权限</td>
+</tr>
+<tr>
+<td>worker 独立复核接纳依据；订阅后续事件持续跟进</td>
+<td><a href="https://github.com/deepseek-ai/dsh-superagent-prototype/blob/8c32a9dc5d72c033816c6a8110b37f40cf94fba4/prompts/work.md">prompts/work.md</a>、<a href="https://github.com/deepseek-ai/dsh-superagent-prototype/blob/8c32a9dc5d72c033816c6a8110b37f40cf94fba4/prompts/subscriptions.md">prompts/subscriptions.md</a></td>
+<td>Meta Worker 继续调查与复核；提示约定落实为持久 Work/Wait 和闭环条件</td>
+</tr>
+<tr>
+<td>周期与事件推进编排、持久效果、失败后有界重排</td>
+<td><a href="https://github.com/deepseek-ai/dsh-superagent-prototype/blob/8c32a9dc5d72c033816c6a8110b37f40cf94fba4/src/app/passes.ts">src/app/passes.ts</a>、<a href="https://github.com/deepseek-ai/dsh-superagent-prototype/blob/8c32a9dc5d72c033816c6a8110b37f40cf94fba4/src/app/effects.ts">src/app/effects.ts</a>、<a href="https://github.com/deepseek-ai/dsh-superagent-prototype/blob/8c32a9dc5d72c033816c6a8110b37f40cf94fba4/src/core/evals.ts">src/core/evals.ts</a></td>
+<td>唤醒与恢复可靠执行；定时推进队列不等于每次调用模型</td>
+</tr>
+</tbody>
+</table>
+<p>公开原型以消息、规则接纳与 worker 协作为主；本项目增加无告警的成功路径巡检、科学证据语义检查、静默停滞初诊和修复后验证。独立观察、未审阅 backlog 与调查责任归属由本节契约明确；实际实现须分别通过对应验收。</p>
+<h3 id="等待与容量处置">8. 等待与容量处置</h3>
+<p>Wait 必须绑定具体 dependency_id、已见版本和可查询的生产者。注册类型包括 <code>request_outcome_changed, capacity_signature_changed, issue_evidence_changed, change_outcome_available, continuation_available, protocol_revision_available, scientific_evidence_changed, scientific_result_available, memory_review_due, timer_due</code>；可选研究另提供 replication_finished。已失败/取消生产者立即产生相应处理，不注册永远等成功的 Wait；依赖闭环触发一次处置。</p>
+<p>默认 deadline 为 8 个进度单位或 300 秒先到者；到期先落持久事件。唯一键 <code>(wait_id, wait_epoch, disposition)</code> 保证即时容量阻塞和后续 deadline 共用一次处置。处置准入原子消费 allowance，模型失败也不能重置已尝试事实。相关依赖/容量版本真正变化才能建新 epoch，纯时间和计数增长不能重置。</p>
+<p>容量不足时 Request 保持 blocked_capacity，保存 need/have、packet 版本、容量签名和原 page_token；另建只含身份、容量、义务与允许动作的最小处置 Work。存根不产生 ACK、不推进 cursor、不授权引用。已物化页面如需收窄，supersede 原请求后建新请求，原页与回执保留。</p>
+<p>容量签名包括内容、必需依赖、策略、投影及可用 byte/token，不含无关的全局序号或时间戳。每签名最多自动重规划一次。模型处置包本身也放不下时直接报 packet_unrepresentable；不要继续发超限调用。预算不足保留具体未决对象与可恢复动作，不将 parked 写成已解决。</p>
+<p>每个 Wait / disposition 继承 <code>owner_refs, purpose, actor_binding, budget_account, blocking_scope</code>。Meta 问题按原 close_issue 等命令处置；科研等待仅允许收窄/重规划请求或搁置相关 Work，由 Lab/登记科研处理器处理，最小诊断包不能关闭 ScientificQuestion 或产生支持结论。科学处置 allowance 来自任务执行预算，不要求 Meta token；同 Wait epoch 仍最多一次。计时 deadline 处理等待，没有科学进度时也可到期，不以归纳/复核次数伪造时钟。</p>
+<h3 id="上下文证据与-ack">9. 上下文、证据与 ACK</h3>
+<p>最终 UTF-8 序列化字节与登记 tokenizer 的 token 数都须通过，并预留输出空间。规划与派发使用同一纯构造函数 <code>build_packet</code>，返回 packet/hash 与<strong>候选</strong> delivery manifest，完整 hash 和实际 memory/runtime binding 进入 Effect；禁止检查后追加内容。预览、选中或物化不证明实际交付。实际交付权限与 ACK 仅由 §6 TX3/受信交付对账根据真实回执登记，不能由构造函数或模型自报产生。</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>调用模式</th>
+<th>初版工程默认</th>
+<th>必须保留</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Lab Worker</td>
+<td>总 packet 80,000 B；初始分配：指令/计划 4,096 B，观察/反馈 48,000 B，原生证据 24,576 B；共享总预算，重分配需验收</td>
+<td>任务/协议/冻结要求、当前动作、未决状态、必要证据依赖</td>
+</tr>
+<tr>
+<td>Inspector</td>
+<td>packet 24,576 B；增量 6,144 B、账本 2,048 B、诊断页最多 8,192 B</td>
+<td>冻结目标/要求、检查计划、能力/进展/预算摘要、正常与异常来源、覆盖缺口和已有调查</td>
+</tr>
+<tr>
+<td>Meta Worker</td>
+<td>原生信封 24,576 B；操作包 13,500 B；core 目标 8,000 B；reserve 768 B</td>
+<td>义务、版本、问题、验收规则、必要证据</td>
+</tr>
+<tr>
+<td>Disposition</td>
+<td>packet 4,096 B</td>
+<td>请求身份、容量、义务和受限动作</td>
+</tr>
+</tbody>
+</table>
+<p>Meta Worker 页预算为 <code>min(page_limit, 13500-core_bytes-768, 24576-core_bytes-native_groups-native_envelope-768)</code>。最小诊断页默认 1,400 B，原生依赖组最多 48；先减少可选完整组，必需闭包仍超限则阻塞。默认是可变工程配置，修改须经过上下文验收；不得通过删掉冻结要求或关键反证使包“放得下”。</p>
+<p>上下文修复必须输出保留/省略清单，检查任务要求、义务、必要来源和依赖仍完整；摘要保存 source_range/hash、projection_version、omitted 信息。摘要、索引和工作上下文是可重建视图，不替代原始证据；科研问题、判断、方法与决定是持久版本状态，其历史不能随缓存淘汰而丢弃。精确查重仍用完整索引，不让模型承担不可见全历史的成员测试。</p>
+<p>每页绑定 <code>request_id, page_token, from/to_cursor, content_hash, scope, dependency_manifest</code>。ACK 按 <code>(request_id, page_token)</code> 唯一，并关联已完成调用、实际 packet hash 与受信交付回执；重读可有多次呈现但 cursor 只推进一次。模型输出格式无效不抹去已认证交付，命令拒绝另记；只有派发意图、服务端接收或未知完成状态时，不推断完整交付。页面 ACK 和原生引用分别认证；部分交付不能写成全请求 delivered。原生权限限定到 call、版本和 locator；用于校验提议的 <code>actual_read_manifest</code> 由控制器查询受信记录，不能接受模型提供的清单作为权威。</p>
+<p>Inspector→Meta Worker 交接重新算容量，原未确认页保持不变；不因消费者改变删回执，也不自动授权另一调用引用。记忆判断追加支持/反证、适用协议和来源；依赖修订后标记 needs_review，不能继续静默引用失效结论。</p>
+<p>Scientific Memory 的检索结果是 <code>build_packet</code> 的输入，最终只物化一个完整 packet，实际派发后按受信回执认证，不在检查后追加另一份记忆。观察卡的内容、条件和精确引用来自同一原生证据：完整 record 与字段投影使用不同 locator，投影另存规则版本与 source manifest；实际交付哪部分只认证哪部分。工作上下文优先恢复未结工作、相关对照/反证和失效提示，选择策略及省略原因一并留档。</p>
+<p><strong>Agent 局部上下文与共享数据的边界。</strong>角色、会话、数据作者与访问范围是不同维度。Lab / Meta 是职责角色；同一角色可以有多次调用或多个实例。记录由某个 agent 产生，不等于只供该 agent 使用；位于共享数据库，也不等于自动进入所有 agent 的上下文。</p>
+<table>
+<thead><tr><th>数据层</th><th>保存内容与归属</th><th>读取、写入和恢复边界</th></tr></thead>
+<tbody>
+<tr><td>Agent 局部会话 / 工作草稿</td><td>对话历史、局部计划、压缩摘要、scratch 和会话检查点；按 run / branch / agent instance / session 归属</td><td>用于继续该 agent 的工作。影响他人调度、恢复或科学判断的义务与结论必须经控制器显式登记；局部草稿不能直接覆盖共享事实</td></tr>
+<tr><td>共享运行账本与原始产物</td><td>Work、Effect、Request、交付回执、工具输入输出、预算和恢复状态</td><td>控制器通过事务和受信结果入口写入；为不同角色提供授权视图。恢复与去重依据持久账本，不能只依赖会话摘要</td></tr>
+<tr><td>共享 Scientific Memory</td><td>有作用域和版本的科研问题、证据、判断、研究行动、方法经验与决定</td><td>共享范围由 task / run / branch 和访问规则确定。agent 提交提议，控制器检查来源、实际交付和版本；跨任务复用另走许可版本包</td></tr>
+<tr><td>本次调用的 context packet</td><td>从共享数据及必要局部状态选择的工作视图，按 call / Effect 归档</td><td>保存快照、选择策略、内容 hash、来源与实际交付。归档用于审计；文件存在或上轮读过，不表示下轮自动看见</td></tr>
+</tbody>
+</table>
+<p>实现时分别记录生产者 <code>agent_instance_id / role / call_id</code>、局部状态所属 <code>session_id</code> 和受信作用域 <code>task_id / run_id / branch_id / access_class</code>；这些是目标元数据约定，不表示旧存储均已具备。按角色选取不同 packet 不等于角色级硬隔离。目录名、role 标签或单写者锁都不能阻止具有任意文件/SQL 权限的进程；模型端仅暴露获准的读取与提议接口，共享写入口由控制器掌握。部署若要求 agent 间保密，还须限制实际工具能力、文件可见范围或服务访问权限。</p>
+<p><strong>两种上下文模式。</strong>初版可采用每次显式重建 packet 的无持久会话调用；连续性来自共享记录。若启用原生持续会话，本次有效上下文必须包含新输入以及仍保留的历史、摘要和工具结果，不能只对新增 prompt 计数或记来源。适配器须绑定 session / checkpoint / compaction 版本，在派发前核对完整有效输入的预算、来源与新鲜度；实际交付仍仅由 §6 TX3 / 受信交付对账根据本次真实回执登记，不能由会话保留或输入物化直接认证。历史摘要不授予原文读取权。无法核验保留内容时，从共享状态和必要检查点重建新会话。单个会话丢失不能使已登记实验、预算或未决 Effect 丢失，也不能触发已完成副作用重做。</p>
+<h3 id="lab-执行和领域批次">10. Lab 执行和领域批次</h3>
+<h4 id="通用步骤契约">10.1 通用步骤契约</h4>
+<p>Lab 选择已注册能力，控制面检查输入、权限、依赖、版本和预算，再创建 Effect。完成原始计算、解析、分析和科学判断分别建结果节点，避免一个解析器错误让整个计算回滚重跑。task 的完成条件由领域 validator 在当前有效结果上检查；模型报告“完成”只是提议。</p>
+<p>相关步骤携带 ScientificQuestion / ScientificInvestigation 引用，按真实输入身份绑定回执和产物。执行完成后登记待解释结果，下一次相关 Lab 调用可修订判断或说明证据不足；执行完成、解释完成和 task 达标分开。仅声明为前瞻检验的步骤需要事前冻结预测与比较规则。</p>
+<h4 id="化合物工作流示例">10.2 化合物工作流示例</h4>
+<p>以下属于 <code>rsi_domains</code> 的筛选工作流，不写死在 <code>rsi_lab</code> 中。默认每批最多 8 项、最多 2 次生成尝试、一次缺口修补；修补拒绝比例默认 0.5，合法范围 [0,1]。这些工程参数与冻结科学阈值分别存放。repair 在对应适配器验收通过后可在当前任务安全点开启，无需配对实验。</p>
+<ol type="1">
+<li>begin_batch 冻结历史、策略、协议和预算；target_count 取配置与可分配评价额度的小者，评价预约从父账户转拨。</li>
+<li>attempt 0 保存完整原始输出、解析版本和候选来源；预检结构、规范身份、全历史/同批重复及他方未决预约，不做评价。</li>
+<li>合法新候选保留。首轮空/格式错误或缺口且拒绝比例达登记条件时，attempt 1 仅补缺口；多余候选记 surplus，不扩批或追加第三次。</li>
+<li>派发前按最新历史、协议兼容性和身份预约复检，逐项执行评价并提交，保留成功前缀。</li>
+<li>已准入效果均确定后只提交一次 batch_committed；unknown 则 blocked_unknown，不重复评价已成功项、不虚增进度。</li>
+</ol>
+<p>Batch、Attempt、Call/Effect、Evaluation 是四种身份；修补调用照常计费，但不增加批次、Meta credit 或巡查时钟。连续三批零产出触发一次停滞处置；无合法修复/新策略则 stalled，不无限生成。</p>
+<p>候选身份使用领域 canonicalizer，命中哈希后核对规范表示。<strong>计算查重键同时包含实际输入、评价语义/协议兼容性及计算能力版本</strong>：同 compound 的同一有效计算不重复；协议变化需要重新计算时不会被“历史见过该分子”错误禁止。至少 100 个达标 compound 按冻结身份和资格规则去重计数，重新解析或同分子多次评价不能增加独立 compound 数。</p>
+<p>重复、无效、未接纳、已执行及 unknown 均保留逐项身份回执。已有结果的真实值、协议与证据引用反馈给后续合法生成步骤，不要求模型判断未呈现全历史的成员关系；独立重复或协议改变仍按冻结规则处理。新回执不扩充本批尝试次数或实际评价额度。</p>
+<h4 id="可选知识和记忆">10.3 Scientific
+Memory：通用科研状态与记忆机制</h4>
+<p>Scientific Memory
+以<strong>研究问题组织记忆，以证据约束判断，以新结果推动修订</strong>，支持实验、计算分析、观察、复现、文献综合与理论推导。它保存研究状态，并为下一步行动重建相关上下文。以下是目标契约。当前仓库中的运行账本与版本化事实不等于本节六类科研对象和完整记忆机制均已实现；功能及科研收益须分别验证。</p>
+
+
+<figure class="architecture-diagram memory-diagram"><svg role="img" aria-label="Scientific Memory：证据、科研状态、工作上下文与研究行动闭环" width="384pt" height="522pt"
+ viewBox="0.00 0.00 384.00 522.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="scientific-memory-diagram-graph0" class="graph" transform="scale(1 1) rotate(0) translate(14.4 508.08)">
+<title>memory</title>
+<!-- evidence -->
+<g id="scientific-memory-diagram-node1" class="node">
+<title>evidence</title>
+<path fill="#edf3e9" stroke="#86a68f" d="M241.67,-493.68C241.67,-493.68 49.25,-493.68 49.25,-493.68 43.25,-493.68 37.25,-487.68 37.25,-481.68 37.25,-481.68 37.25,-453.9 37.25,-453.9 37.25,-447.9 43.25,-441.9 49.25,-441.9 49.25,-441.9 241.67,-441.9 241.67,-441.9 247.67,-441.9 253.67,-447.9 253.67,-453.9 253.67,-453.9 253.67,-481.68 253.67,-481.68 253.67,-487.68 247.67,-493.68 241.67,-493.68"/>
+<text xml:space="preserve" text-anchor="middle" x="145.46" y="-473.64" font-family="PingFang SC" font-size="12.00" fill="#25463a">实际来源与证据档案</text>
+<text xml:space="preserve" text-anchor="middle" x="145.46" y="-456.39" font-family="PingFang SC" font-size="12.00" fill="#25463a">Artifact · ResultRevision · Effect</text>
+</g>
+<!-- state -->
+<g id="scientific-memory-diagram-node2" class="node">
+<title>state</title>
+<path fill="#edf3e9" stroke="#86a68f" d="M154.92,-396.9C154.92,-396.9 12,-396.9 12,-396.9 6,-396.9 0,-390.9 0,-384.9 0,-384.9 0,-357.12 0,-357.12 0,-351.12 6,-345.12 12,-345.12 12,-345.12 154.92,-345.12 154.92,-345.12 160.92,-345.12 166.92,-351.12 166.92,-357.12 166.92,-357.12 166.92,-384.9 166.92,-384.9 166.92,-390.9 160.92,-396.9 154.92,-396.9"/>
+<text xml:space="preserve" text-anchor="middle" x="83.46" y="-376.86" font-family="PingFang SC" font-size="12.00" fill="#25463a">版本化科研状态</text>
+<text xml:space="preserve" text-anchor="middle" x="83.46" y="-359.61" font-family="PingFang SC" font-size="12.00" fill="#25463a">问题 · 判断 · 方法 · 决定</text>
+</g>
+<!-- evidence&#45;&gt;state -->
+<g id="scientific-memory-diagram-edge1" class="edge">
+<title>evidence&#45;&gt;state</title>
+<path fill="none" stroke="#72947b" d="M129.17,-441.89C121.47,-430.12 112.2,-415.94 104.02,-403.44"/>
+<polygon fill="#72947b" stroke="#72947b" points="106.15,-402.54 100.68,-398.34 102.34,-405.03 106.15,-402.54"/>
+<text xml:space="preserve" text-anchor="middle" x="145.55" y="-417.4" font-family="PingFang SC" font-size="10.00" fill="#50635b">关联 / 复核</text>
+</g>
+<!-- retrieve -->
+<g id="scientific-memory-diagram-node3" class="node">
+<title>retrieve</title>
+<path fill="#edf3e9" stroke="#86a68f" d="M226.92,-314.12C226.92,-314.12 36,-314.12 36,-314.12 30,-314.12 24,-308.12 24,-302.12 24,-302.12 24,-274.34 24,-274.34 24,-268.34 30,-262.34 36,-262.34 36,-262.34 226.92,-262.34 226.92,-262.34 232.92,-262.34 238.92,-268.34 238.92,-274.34 238.92,-274.34 238.92,-302.12 238.92,-302.12 238.92,-308.12 232.92,-314.12 226.92,-314.12"/>
+<text xml:space="preserve" text-anchor="middle" x="131.46" y="-294.08" font-family="PingFang SC" font-size="12.00" fill="#25463a">按问题检索与依赖展开</text>
+<text xml:space="preserve" text-anchor="middle" x="131.46" y="-276.83" font-family="PingFang SC" font-size="12.00" fill="#25463a">精确结果 · 对照 · 反证 · 未结工作</text>
+</g>
+<!-- evidence&#45;&gt;retrieve -->
+<g id="scientific-memory-diagram-edge3" class="edge">
+<title>evidence&#45;&gt;retrieve</title>
+<path fill="none" stroke="#72947b" d="M170.19,-441.76C173.53,-437.14 176.49,-432.11 178.46,-426.9 182.38,-416.56 182.6,-353.58 179.46,-345.12 176.2,-336.31 170.86,-327.96 164.9,-320.52"/>
+<polygon fill="#72947b" stroke="#72947b" points="166.7,-319.13 160.76,-315.66 163.24,-322.08 166.7,-319.13"/>
+</g>
+<!-- state&#45;&gt;retrieve -->
+<g id="scientific-memory-diagram-edge2" class="edge">
+<title>state&#45;&gt;retrieve</title>
+<path fill="none" stroke="#72947b" d="M98.38,-344.89C102.86,-337.37 107.82,-329.01 112.52,-321.11"/>
+<polygon fill="#72947b" stroke="#72947b" points="114.24,-322.66 115.61,-315.91 110.33,-320.34 114.24,-322.66"/>
+</g>
+<!-- context -->
+<g id="scientific-memory-diagram-node4" class="node">
+<title>context</title>
+<path fill="#edf3e9" stroke="#86a68f" d="M219.42,-217.34C219.42,-217.34 43.5,-217.34 43.5,-217.34 37.5,-217.34 31.5,-211.34 31.5,-205.34 31.5,-205.34 31.5,-177.56 31.5,-177.56 31.5,-171.56 37.5,-165.56 43.5,-165.56 43.5,-165.56 219.42,-165.56 219.42,-165.56 225.42,-165.56 231.42,-171.56 231.42,-177.56 231.42,-177.56 231.42,-205.34 231.42,-205.34 231.42,-211.34 225.42,-217.34 219.42,-217.34"/>
+<text xml:space="preserve" text-anchor="middle" x="131.46" y="-197.3" font-family="PingFang SC" font-size="12.00" fill="#25463a">本次工作上下文</text>
+<text xml:space="preserve" text-anchor="middle" x="131.46" y="-180.05" font-family="PingFang SC" font-size="12.00" fill="#25463a">统一预算 · 精确交付 · 显式缺口</text>
+</g>
+<!-- retrieve&#45;&gt;context -->
+<g id="scientific-memory-diagram-edge4" class="edge">
+<title>retrieve&#45;&gt;context</title>
+<path fill="none" stroke="#72947b" d="M131.46,-262.33C131.46,-250.99 131.46,-237.42 131.46,-225.26"/>
+<polygon fill="#72947b" stroke="#72947b" points="133.74,-225.53 131.46,-219.03 129.19,-225.53 133.74,-225.53"/>
+</g>
+<!-- lab -->
+<g id="scientific-memory-diagram-node5" class="node">
+<title>lab</title>
+<path fill="#edf3e9" stroke="#86a68f" d="M186.42,-134.56C186.42,-134.56 76.5,-134.56 76.5,-134.56 70.5,-134.56 64.5,-128.56 64.5,-122.56 64.5,-122.56 64.5,-94.78 64.5,-94.78 64.5,-88.78 70.5,-82.78 76.5,-82.78 76.5,-82.78 186.42,-82.78 186.42,-82.78 192.42,-82.78 198.42,-88.78 198.42,-94.78 198.42,-94.78 198.42,-122.56 198.42,-122.56 198.42,-128.56 192.42,-134.56 186.42,-134.56"/>
+<text xml:space="preserve" text-anchor="middle" x="131.46" y="-114.52" font-family="PingFang SC" font-size="12.00" fill="#25463a">Lab / 研究者</text>
+<text xml:space="preserve" text-anchor="middle" x="131.46" y="-97.27" font-family="PingFang SC" font-size="12.00" fill="#25463a">研究行动与解释修订</text>
+</g>
+<!-- context&#45;&gt;lab -->
+<g id="scientific-memory-diagram-edge5" class="edge">
+<title>context&#45;&gt;lab</title>
+<path fill="none" stroke="#72947b" d="M131.46,-165.33C131.46,-158.26 131.46,-150.45 131.46,-142.98"/>
+<polygon fill="#72947b" stroke="#72947b" points="133.74,-143.06 131.46,-136.56 129.19,-143.06 133.74,-143.06"/>
+</g>
+<!-- lab&#45;&gt;state -->
+<g id="scientific-memory-diagram-edge7" class="edge">
+<title>lab&#45;&gt;state</title>
+<path fill="none" stroke="#72947b" d="M176.46,-134.92C186.56,-140.29 197.29,-145.78 207.46,-150.56 223.52,-158.11 234.55,-150.84 244.46,-165.56 257.32,-184.65 254.87,-196.82 244.46,-217.34 239.35,-227.41 229.07,-222.27 223.96,-232.34 220.94,-238.29 220.56,-241.61 223.96,-247.34 231.07,-259.31 244.35,-250.37 251.46,-262.34 263.21,-282.13 264.92,-295.45 251.46,-314.12 246.23,-321.37 211.11,-333.56 174.32,-344.71"/>
+<polygon fill="#72947b" stroke="#72947b" points="173.97,-342.44 168.4,-346.48 175.28,-346.79 173.97,-342.44"/>
+<text xml:space="preserve" text-anchor="middle" x="250.21" y="-237.84" font-family="PingFang SC" font-size="10.00" fill="#50635b">版本化提议</text>
+</g>
+<!-- execution -->
+<g id="scientific-memory-diagram-node6" class="node">
+<title>execution</title>
+<path fill="#edf3e9" stroke="#86a68f" d="M215.67,-51.78C215.67,-51.78 47.25,-51.78 47.25,-51.78 41.25,-51.78 35.25,-45.78 35.25,-39.78 35.25,-39.78 35.25,-12 35.25,-12 35.25,-6 41.25,0 47.25,0 47.25,0 215.67,0 215.67,0 221.67,0 227.67,-6 227.67,-12 227.67,-12 227.67,-39.78 227.67,-39.78 227.67,-45.78 221.67,-51.78 215.67,-51.78"/>
+<text xml:space="preserve" text-anchor="middle" x="131.46" y="-31.74" font-family="PingFang SC" font-size="12.00" fill="#25463a">ScientificInvestigation</text>
+<text xml:space="preserve" text-anchor="middle" x="131.46" y="-14.49" font-family="PingFang SC" font-size="12.00" fill="#25463a">由 Step / Work / Effect 执行</text>
+</g>
+<!-- lab&#45;&gt;execution -->
+<g id="scientific-memory-diagram-edge6" class="edge">
+<title>lab&#45;&gt;execution</title>
+<path fill="none" stroke="#72947b" d="M131.46,-82.55C131.46,-75.48 131.46,-67.67 131.46,-60.2"/>
+<polygon fill="#72947b" stroke="#72947b" points="133.74,-60.28 131.46,-53.78 129.19,-60.28 133.74,-60.28"/>
+</g>
+<!-- execution&#45;&gt;evidence -->
+<g id="scientific-memory-diagram-edge8" class="edge">
+<title>execution&#45;&gt;evidence</title>
+<path fill="none" stroke="#72947b" d="M173.54,-52.13C186.47,-60.94 200.24,-71.48 211.46,-82.78 242.94,-114.47 252.06,-124.01 268.46,-165.56 279.48,-193.48 276.23,-202.41 278.46,-232.34 281.16,-268.6 287.71,-279.55 276.46,-314.12 257.69,-371.84 241.57,-383.19 199.46,-426.9 196.3,-430.18 192.85,-433.39 189.26,-436.47"/>
+<polygon fill="#72947b" stroke="#72947b" points="187.87,-434.67 184.3,-440.56 190.76,-438.18 187.87,-434.67"/>
+<text xml:space="preserve" text-anchor="middle" x="317.76" y="-237.84" font-family="PingFang SC" font-size="10.00" fill="#50635b">真实结果 / 来源</text>
+</g>
+</g>
+</svg>
+<figcaption>通用科研记忆复用权威事件、来源和执行账本，按问题形成工作上下文。</figcaption></figure>
+<h5 id="scientific-memory-objects">10.3.1 三层职责与六类科研对象</h5>
+<p><code>rsi_lab.memory</code>
+负责对象版本、来源关系、依赖新鲜度、检索协调与待处理状态，复用
+store、results、context 和 runtime。<code>rsi_domains</code>
+提供对象身份、科学条件、可比性及结果解释规则；task
+提供冻结目标、来源权限、协议和资源上限。Question 的细化或修订不能改变
+TaskSpec 的冻结要求。</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>对象</th>
+<th>保存内容</th>
+<th>与现有系统的连接</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ScientificQuestion</td>
+<td>问题、范围、子问题、竞争解释、未知、继续/停止理由</td>
+<td>属于 task 的研究状态；open / investigating / paused / resolved /
+reopened 不等于 Task succeeded 或 Meta Issue resolved</td>
+</tr>
+<tr>
+<td>ScientificEvidence</td>
+<td>来源、版本、定位、实际内容、对象、条件、独立来源组与处理过程</td>
+<td>引用现有 Artifact / ResultRevision / Effect
+回执，不复制权威分数、原始文件或费用账本</td>
+</tr>
+<tr>
+<td>ClaimRevision</td>
+<td>一个有范围的命题、支持、挑战、竞争解释、局限与可改变它的信息</td>
+<td>解释追加版本；旧命题和旧关系保留，不改写原始证据</td>
+</tr>
+<tr>
+<td>ScientificInvestigation</td>
+<td>研究目的、方法、输入、产物、执行与解释状态；可选事前检验承诺</td>
+<td>关联一个或多个 Step / Work / Effect；区别于 Meta
+对系统问题的调查，也区别于 §12 的 ResearchExperiment</td>
+</tr>
+<tr>
+<td>MethodExperienceRevision</td>
+<td>方法步骤、适用条件、真实尝试、失败与恢复、已验证范围</td>
+<td>可复用经验保持来源；执行成功不自动证明科学结论或跨任务有效性</td>
+</tr>
+<tr>
+<td>ScientificDecision</td>
+<td>当时读到的版本、选择/暂不选择的方案、理由、关键未知与下一步</td>
+<td>连接实际调用与研究行动；显式引用不证明记忆的因果使用，不要求保存模型内部思维过程</td>
+</tr>
+</tbody>
+</table>
+<p>通用引用为
+<code>{kind, id, version, locator}</code>，权限由运行时固定的
+task/run/branch 与访问范围约束。科学适用范围与访问权限分开：未知条件保留
+null
+或明确缺项，不能解释为通配。数据形态可为数值、分布、文本、图表、定性编码或推导；单位、关系符、测量不确定性和理论前提由领域契约保存。</p>
+<p>ScientificInvestigation
+组织科研意图，不另建调度器或预算账户。普通判断修订使用来源验证与
+CAS；检索算法、可执行 Method、运行策略或代码的修改仍走 §11
+ChangeEngine。关闭或搁置科研问题不能解除未决
+Effect、恢复义务或任务完成条件。</p>
+<h5 id="scientific-memory-update">10.3.2 登记、关联与判断修订</h5>
+<ol type="1">
+<li><strong>登记实际材料。</strong>
+适配器保存实际取得的内容与定位，区分全文、摘要、元数据、截断和不可访问。原始观察、模型预测、协议评价、文献陈述、推导与执行失败分别标识。外部材料是来源，不从其文本继承执行指令或权限。</li>
+<li><strong>关联问题与条件。</strong>
+按对象、方法、问题和科学范围建立候选关系；领域检查返回 comparable /
+non_comparable / unknown
+与原因。相似文本不自动建立支持或矛盾，同源转述不增加独立支持。</li>
+<li><strong>匹配新增证据。</strong>
+新材料到达后，有界匹配开放问题与当前判断，提出 supports / challenges /
+context / derived_from
+关系并排入复核。该入口独立于旧来源更正，避免尚无依赖边的新反证被遗漏。语义判断需要解释检查，匹配本身不能确认矛盾。</li>
+<li><strong>提交解释版本。</strong> Lab
+或已授权分析角色可提出新判断、修订或暂不判断。校验实际交付引用、预期版本和权限后，将新版本、替代关系、依赖与投影一致提交。重复相同提议幂等返回；过期写入不能覆盖较新解释。</li>
+<li><strong>传播来源变化。</strong>
+来源更正、撤稿、解析修复或方法变更触发相关
+Claim、ScientificInvestigation、Method
+和摘要复核。沿版本依赖传播，并在读取/执行前检查新鲜度；批量传播未完或检查达到上限时返回
+needs_review 与未完成范围。</li>
+</ol>
+<p>支持与挑战关系绑定具体命题版本。新版本缩小适用范围时，旧反例仍保留，但可通过显式理由改变它与新命题的关系，不能机械继承标签或静默删除。分支合并保留不同解释，最后写入者不代表科学共识。</p>
+<p><strong>提交时复检与持久队列：</strong>来源/结果登记事务同时写入对应 dirty 水位或幂等 pending 标记；有界匹配推进 processed 水位与创建复核 Work 必须同事务提交。崩溃重放不得先推进游标再遗漏后继工作。新 Claim、支持检查或结果解释提交时，将读取的精确依赖与当前相关失效水位再次比较；仅检查目标 Claim 的 expected_version 不足以发现来源在调用期间变化。旧解释/检查绑定原快照保留，其当前投影为 needs_review；旧版本复核不能关闭新 dirty_revision 的义务，后继动作重新检查所需条件。提议失败单独留原因，不回滚已登记的执行事实或重复结算。</p><p>新证据/更正与真正的命题版本变化可触发有界匹配。支持检查登记、ACK、队列状态、归纳摘要与无变化 bookkeeping 不作为新的独立原始证据；其必要状态变化只唤醒已有依赖工作，不能自触发无限新复核或归纳。待检查、已检查与已替代等状态来自追加事件和投影，历史命题、证据关系及检查记录不原地改写。</p>
+<h5 id="scientific-memory-judgment">10.3.3
+判断、支持检查和新鲜度分别保存</h5>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>状态维度</th>
+<th>记录方式</th>
+<th>解释边界</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>科学判断</td>
+<td>tentative / supported_in_scope / contested / rejected</td>
+<td>是带适用条件的 agent 或研究者判断</td>
+</tr>
+<tr>
+<td>来源支持检查</td>
+<td>pending / checked；另记 supported / partial / unsupported /
+inconclusive，以及方法、检查者、版本、定位和局限</td>
+<td>引用合法不等于 checked；检查完成也可能不支持命题</td>
+</tr>
+<tr>
+<td>依赖新鲜度</td>
+<td>current / needs_review / unavailable</td>
+<td>旧检查仅对原版本有效；来源更新不自动推翻判断</td>
+</tr>
+<tr>
+<td>验证范围</td>
+<td>已检查的数据、群体、方法、环境或理论前提，独立验证来源与未知项</td>
+<td>一次成功、重复转述或自报 confidence 不构成普遍可信度</td>
+</tr>
+</tbody>
+</table>
+<p>保留来源提供的不确定性，不把模型自报置信度当作校准概率。未检出效应是否挑战判断，取决于测量灵敏度、设计和不确定性；执行失败、未知、未测、未交付、没有搜到文献均不是负科学结果。若采用概率更新，领域包必须声明依赖假设、模型与校准评价方式。</p>
+<h5 id="scientific-memory-retrieval">10.3.4
+按问题构建本次工作上下文</h5>
+<p>一次读取指定
+<code>question_ref, decision_context, scientific_scope, snapshot, role, budget</code>；调用者不能用自行填写的
+scope 扩大权限。选择顺序为：</p>
+<ol type="1">
+<li>恢复目标、约束、未结行动、新结果、提交回执和关键失效提示。</li>
+<li>精确查询已有工作、对象、数据/方法版本和显式来源引用。</li>
+<li>取回相关判断、可比较的参照、支持、反证、竞争解释与执行经验。</li>
+<li>以剩余容量补充关键词、结构或语义召回；相关性只决定候选材料，不决定科学支持。</li>
+<li>将判断与关键依赖/已知反证作为组交付。可选材料可省略并记录缺口；当前判断或行动的必需依赖未完整交付时，必须阻塞该判断/行动，补充分页或合法收窄任务后再执行，无关工作可继续。收窄不能删掉冻结要求或原行动所需的关键反证。</li>
+</ol>
+<p>较旧、低分、失败或否定结果可以比近期高分记录更重要。精确查重使用完整授权索引与领域兼容性规则；已有结果的身份、条件和真实回执反馈给后续合法调用。指定的独立重复实验使用新行动身份并接受协议检查，不因曾见过相似对象而自动禁止。</p>
+<p>观察卡由同一原生证据生成，显示对象、内容、条件与精确引用。实际交付整条
+record 才能认证该 locator；字段投影使用单独版本化的 projection locator
+和 source manifest，展示摘要不能授予全文引用。页面 ACK
+与原生引用继续分别认证，遵循 §9。</p>
+<p>所有内容进入 §9 同一次 <code>build_packet</code> 的字节和 token
+总预算，不能将 memory
+当作检查后的额外附件。记录最终序列化内容/hash、实际交付引用、选中/省略原因、查询与投影版本。语义检索不保证发现尚未关联的所有反证，需独立测量漏检；许可访问、实际交付、显式引用和因果使用分别报告。</p>
+<h5 id="scientific-memory-investigation">10.3.5
+研究行动、结果与下一次选择</h5>
+<p>ScientificInvestigation
+支持普通探索计划，以及需要声明时启用的前瞻检验承诺。探索性分析可形成事后假设；前瞻检验须在新结果产生前冻结
+<code>claim_refs, inputs/controls, prediction, comparison_rule, exclusions, known_confounds</code>
+和内容 hash。已有结果可作为参照，不能重新计为前瞻预测。</p>
+<p>同一响应提出的新判断与计划，先提交合法
+Claim，再解析为精确版本，冻结计划后才准入执行。非法实验卡记录原因；本身合法的工作可按
+task 预先登记的规则作为未归因探索接纳。普通探索不必编造假设或预测。</p>
+<p>请求、对象/样本、输入版本和产物通过稳定身份绑定。过滤、去重、重排、并行完成及预算截断后，不按列表位置配对。执行状态、结果判定和解释状态分开：完成执行不代表完成解释；未知外部结果走
+§6 对账，不盲目重试。</p>
+<p>前瞻结果按冻结规则判定，并保留多指标、部分结果、同分/不确定及无法比较。定性材料保留判定规则与复核者；理论结果保留前提、证明义务和反例。下一次相关研究调用可保留判断、缩小范围、修改解释或暂不判断，结果与
+ScientificDecision 关联；最后一批没有后续解释时明确
+awaiting_review。</p>
+<p>未结工作包括待解释结果、待复核判断、未完成计划与信息需求。运行时将其映射到已登记
+Work/Wait，按当前决策影响、依赖失效和等待时间分配服务；显示剩余数量。等待有具体生产者、唤醒条件和
+§8
+deadline，不能因存在唤醒条件永久绕过检查。搁置保留原因和恢复入口，不删除未决义务。</p>
+<h5 id="scientific-memory-long-term">10.3.6
+长期归纳、遗忘与跨任务迁移</h5>
+<p>相关行动完成、阶段结束或工作集压力增大时，可归纳局部规律、失败条件与可复用方法。归纳产出新的
+Claim / MethodExperienceRevision
+或派生摘要，注明覆盖范围、遗漏、来源独立性、反例和推广限制；独立性未知时明确记录未知。</p>
+<p>归纳不是新的独立原始证据。摘要逐项链接原始来源和命题版本；后续检查不能仅依赖摘要链。摘要、索引和工作上下文可重建，科研判断及决定的版本历史需要持久保存。维护使用
+dirty/processed 水位与有界批次；摘要、checkpoint 和无变化 bookkeeping
+不触发自身的新一轮归纳。</p>
+<p>工作集可淘汰低相关缓存，原始来源按 task 的容量、许可与保留政策归档。获准删除来源时先登记受信 <code>SourceTombstone</code>（来源身份/版本、允许保留的 hash/provenance、原因、授权与删除状态）并使相关依赖不可作为当前支持，再由幂等删除处理器完成；崩溃后按该记录对账。该机制不删除事件、预算、Effect/ACK 历史或必要恢复入口；不能以缓存清理抹除反证。读取与回放区分有 tombstone 的 unavailable 和无记录的 missing/corrupt；历史快照也不能假称已删除正文仍可读取。</p>
+<p>跨任务共享采用明确许可的只读版本包，保留来源、条件、反例、方法版本和访问限制。接收任务重新检查适用性；来源项目中的经验不自动推广。独立验证反馈不得回流到声称仍独立的比较输入。</p>
+<h5 id="scientific-memory-runtime">10.3.7 角色、计费与领域预设</h5>
+<p>默认在 Lab 的正常调用中处理相关结果与记忆提议，无需新增常驻 Memory
+Agent。没有新信息或证据不足时允许空提议，不以写入量为成功目标。来源登记与执行回执由可信系统完成，不因模型未写判断而缺失。</p>
+<p>耗时检索复用
+<code>evidence_retrieve</code>；增量匹配、独立复核和可选归纳登记为
+<code>memory_match / memory_review / memory_consolidate</code>。每种处理器同时提供权限、资源、恢复和终态；纯本地索引工作计量
+CPU/时间，额外模型/工具调用另建 Effect
+并共享任务预算。已有调用内的轻量解释不重复计费；维护不能把同一费用记两次，也不能占着外部许可等待子调用。</p>
+<p>原有“每逻辑批次最多一个知识查询和一个记忆提议，两次尝试合计；每运行
+12 查询 / 48 传输”仅保留为 §10.2
+化合物工作流的可配置预设，不成为所有领域的内核规则。一般 task
+显式配置读取、提议与维护预算及选择策略版本。provider、范围、条数和费用登记，source_call_id
+由控制器认证；查询/提议在后续合法步骤使用，不增加该工作流的生成尝试次数。</p>
+<p>科学解释更新不自动触发代码发布；改变检索机制、工作流或可执行方法时由
+Meta 通过 ChangeEngine
+处理。科研进展时钟只接受任务登记的真实进展，重复记忆、维护次数与归纳事件不制造进度或重新发放额度。</p>
+<p>具体 actor、准入通道、Work owner 和 Wait 处置按 §2、§7–8；科学复核不能因 Meta credit 为零而被错误拒绝，也不借用修复额度绕过任务执行上限。<code>memory_match</code> 的纯本地部分不隐式调用模型/外部检索；需要这类效果时分别生成已登记 review/retrieve Work。最终停止状态优先于维护队列，规则见 §13.1。</p>
+<h5 id="scientific-memory-validation">10.3.8 机制验收与科研收益</h5>
+<p>首先验证引用、版本、条件、修订传播、实际交付和结果绑定；再测试关键证据与反证召回、条件/否定保真、复核延迟、未结工作恢复及成本。§17
+的 SM01–SM20
+为功能验收，不能用写入量、引用数或读到材料代替科学质量。</p>
+<p>需要评估科研收益时按 §12
+单独登记协议，比较有界原始历史、平面检索与结构化科研记忆。共同保留授权原始材料、工具和资源口径，所有整理/检索/复核均计费；不能隐藏基线证据。不同任务采用冻结的质量、复现、证明或证据覆盖终点，不强行压成统一分数。独立收益研究不成为
+P4 工程修复发布的门槛。</p>
+<h3 id="统一-changeengine修复验收发布续跑">11. 统一 ChangeEngine：修复、验收、发布、续跑</h3>
+<h4 id="可修改范围">11.1 可修改范围</h4>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>类型</th>
+<th>示例</th>
+<th>默认发布条件</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>T0 反馈/基础能力</td>
+<td>重复反馈、一次修补、新分析适配器</td>
+<td>已有数据或小样本上的能力契约通过，当前安全点接入</td>
+</tr>
+<tr>
+<td>T1 参数/证据组织</td>
+<td>批量、查询、历史选择、分页、引用优先级</td>
+<td>输入与权限合法，必要信息和预算不破坏，后续调用验证</td>
+</tr>
+<tr>
+<td>T2 提示模板</td>
+<td>Lab/Meta 的登记模板</td>
+<td>输出 schema、权限、必要约束保持，代表性样例可执行</td>
+</tr>
+<tr>
+<td>T3 授权代码修复</td>
+<td>解析器、适配器、上下文构建器、允许范围内的内核缺陷，以及登记 fork 的 Codex harness 源码</td>
+<td>隔离构建、针对性回归、兼容/恢复检查；Codex 另执行 §11.6 的真实编译、进程切换和续跑验收</td>
+</tr>
+<tr>
+<td>ProtocolUpdate</td>
+<td>已授权的科学输入、工具计算设置变化</td>
+<td>新协议版本、冻结要求检查、依赖影响与复用证明、局部重算计划</td>
+</tr>
+</tbody>
+</table>
+<p>T3 是主闭环所需能力，不能整体后置到可选扩展。tier 表示修改面，不决定必须使用何种统计实验。尚无执行/恢复契约的个别能力仍明确 unsupported；Meta 可在允许范围内实现并经验收注册，不能仅在 prompt 中宣称可用。</p>
+<p>普通科研判断和证据关系修订按 §10.3 的读取/CAS 契约登记，不创建代码 Change；检索/投影/归纳策略、可执行 Method 及 schema 变更按实际修改面进入 T1/T2/T3 或协议流程。其影响检查覆盖当前判断、待执行研究计划和工作上下文，不能通过改变支持检查规则为自身科学结论背书。</p>
+<h4 id="changespec-与-acceptancespec">11.2 ChangeSpec 与 AcceptanceSpec</h4>
+<pre class="text"><code>ChangeSpec
+  change_id, issue_id, source, task_id, run_id, branch_id, authorization_ref/hash
+  baseline_release_hash, change_intent_ref, change_kind
+  target_components[], write_scopes[], planned_affected_steps/results[]
+  task_spec_hash, frozen_requirements_hash
+  source_protocol_hash, proposed_input_delta_ref?
+  acceptance_spec_hash, rollback_release_hash, recovery_plan
+  checkpoint_hash, resume_point, release_boundary
+  max_attempts, max_calls/tokens/compute/tool_requests/wall_seconds
+  validation_reservations, continuation_reservations, recovery_reservations
+  codex_change?: runtime_spec_hash, baseline_runtime_binding_hash,
+    target_roles[], source_revision, build_profile_hash, compatibility_contract_hash
+
+CandidateManifest（构建完成后追加）
+  change_spec_hash, candidate_id, candidate_artifact_hash, patch_ref
+  actual_target_protocol_hash, capability_bindings, impact_manifest_hash
+  build_effect_refs[], source_hashes[], required_check_bindings
+  codex_candidate?: runtime_binding_hash, source_tree_hash, patch_hash,
+    dependency_lock_hash, toolchain_hash, build_recipe_hash, build_environment_hash,
+    binary_hash, launch_config_hash, adapter_hash, session_compatibility_report_ref
+
+AcceptanceSpec
+  problem_statement, reproduction_refs[], expected_behavior
+  required_checks[{check_id, trusted_version, inputs, pass_condition}]
+  invariant_checks[], frozen_requirements_hash
+  data_plan=saved_data|small_sample|bounded_followup|combination
+  sample_refs_or_selection_rule, maximum_scope, maximum_cost
+  followup_limit?, failure_actions, rollback_check
+  continuation_condition, required_continuation_evidence</code></pre>
+<p>准入时冻结 ChangeSpec 与 AcceptanceSpec；此时无需尚未构建的候选哈希。构建完成后追加不可变 CandidateManifest，验收记录绑定其 hash，发布仅使用通过验收的同一产物。若构建产物超出原定范围/预算或需要改变判据，必须重新准入，不能沿用旧批准。</p>
+<p>这些字段保证工程检查可执行，不要求 minimum_effect、多 seed、完整基线或固定全任务样本量。所需样本和检查针对问题定义，不能测试失败后删条件凑通过。admitted 后规格不可原地修改；需要改变时结清旧候选并追加新 ID/版本，保存失败和成本。</p>
+<p>受信检查器和冻结要求由任务固定，Meta 可添加复现样例和领域检查，但不能让新增检查替代必需约束。验收既检查 bug 复现已消失，也检查相关正常路径、结果来源/单位和恢复能力；不要求每个小改动运行无关全量测试。</p>
+<h4 id="生命周期与发布事务">11.3 生命周期与发布事务</h4>
+<pre class="text"><code>detected → investigating → proposed → admitted → preparing → validating
+  validating(pass) → ready_to_release → released → resuming → settled
+  validating(fail/incomplete) → discarding_or_restoring → settled
+  released/resuming(regression) → restoring → settled
+  any stage(unknown effect / rollback failure) → recovery_required</code></pre>
+<ol type="1">
+<li>调查保存真实复现、原始输出、失败日志和影响范围；先判断能否只重解析/重建视图。</li>
+<li>准入检查授权、冻结要求、当前基准、预算和冲突；保存 checkpoint、恢复目标与续跑点。隔离工作区生成候选，活动版本保持不变。</li>
+<li>优先在已有数据执行验收；仍需新数据时用最小样本。验证输出是带 effect、输入和产物 hash 的记录，不接受 Meta 的自然语言“测试通过”作为发布证据。</li>
+<li>通过后在安全点以 expected active hash 做 CAS，原子登记 Release、版本指针、结果有效性投影、后继 Work 和 Continuation。CAS 失配保留候选与结果，重新评估适用性，不覆盖其他版本。</li>
+<li>续跑从保存点执行：重解析、局部重算或继续下一个未完成步骤。第一次真实使用候选的派发事件证明生效；问题相关的后续成功结果才证明修复闭环完成。</li>
+</ol>
+<p>有些能力必须在后续批次验收：先通过全部静态/历史检查，再建立有范围和预算限制的 <code>provisional</code> release，只有指定步骤可使用。窗口通过则在原版本上转为 accepted，<strong>不先恢复旧基线再重发同一版本</strong>；失败或信息不足则撤销试用版本。试用数据及其下游在通过前不得进入正式达标统计；失败时隔离受影响派生结果，原始输出与费用仍保留。</p>
+<p>无需试用的改动通过小范围检查即可 accepted 并续跑，后续观察不会强制重启整轮任务。accepted 版本不因固定批数到期自动回退；出现可靠回归证据时发起恢复/修复事件。</p>
+<h4 id="代码数据和协议的恢复">11.4 代码、数据和协议的恢复</h4>
+<p>代码以不可变构建产物发布；依赖/导入检查、目标回归、启动兼容和版本回退必须可执行。运行进程不原地热改文件：组件可重载则在安全点切指针；需要重启则 supervisor 保存 checkpoint 后按新产物恢复。控制面变更也受同一版本与检查约束。</p>
+<p>发布前失败只丢弃候选，不干扰活动版本；发布后失败恢复已知版本，并按依赖标记候选产生的错误/试用结果不可用于正式下游。回退不删除真实计算、费用和回执，不把错误旧结果恢复成有效证据。旧版本仍有原 bug 时相关步骤维持 blocked，Meta 可在剩余额度内修改下一候选。</p>
+<p>数据迁移采用追加式或可恢复投影重建；未经预授权的不可逆 schema 破坏不属于默认修复。原始数据和旧事件不迁移覆盖。未知外部效果、恢复 CAS 失败或尚未终止的进程保留 recovery_required 和锁；数据证据无效但所有实际义务已结清时正常以 invalid/incomplete 结算，不能永久持锁。</p>
+<p>协议变更先核对冻结要求和输入授权，再登记新版本与影响清单。复用须证明版本/输入兼容；存在不确定依赖就把该依赖闭包标记 needs_review，不能静默当作可复用。即使新协议整体更改全部输入而确需全量重算，也应由影响分析说明原因，而不是为了做默认基线对照。重算超预算时等待所缺授权或返回部分结果，不降低验收标准。</p>
+<p>记忆策略、选择器、投影或 schema 变更的发布清单必须包含 MemoryRuntimeBinding 与兼容检查。切换前验证旧事件/科研版本、未决计划和实际读取清单能由新版本解释；迁移保存追加事件或可恢复投影。回退也需能读取运行期间已提交的新状态，或使用事先验收的兼容适配器；不支持时进入 recovery_required，不能强行用旧代码重解释未知 schema。回退机制版本不回滚已产生证据、费用、决定与判断历史；受候选机制影响的解释/摘要标记待复核，不自动继承旧 checked 状态。</p>
+<h4 id="结算语义">11.5 结算语义</h4>
+<pre class="text"><code>ChangeOutcome
+  acceptance = passed | failed | incomplete | invalid
+  deployment = not_released | provisional | released | restored | unchanged | recovery_required
+  continuation = not_started | running | verified | blocked | failed
+  problem_status = resolved | unresolved
+  frozen_requirements_unchanged, verification_manifest_hash
+  actual_release_hash, actual_protocol_hash, resumed_from
+  runtime_change?: old_binding_hash, actual_binding_hash, activation_id,
+    runtime_generation, rollback_activation_id?, resumed_session_ref
+  reused_result_refs[], reparsed_refs[], recomputed_refs[], invalidated_refs[]
+  actual_cost, reason_codes[], remaining_obligations[]
+  benefit_claim = not_evaluated</code></pre>
+<p>来源无效先隔离；可靠约束失败立即停止相关派发并恢复；必需数据缺失则 incomplete，不补零、不宣称通过。一次失败修复可以如实结算，不要求每个候选都发布；但 P4 必须有成功修复并 verified 的真实案例。后续发现回归追加新事件/关联变更，不改写旧验收记录。</p>
+<p>Issue resolved 必须同时满足：问题对应检查通过、冻结要求保持、版本实际生效且续跑条件已由真实结果认证。解释模型可选，失败不改变结算；任务完成与 Issue 解决另外判断。</p>
+<h4 id="开源-codex-harness-的自动修改与版本切换">11.6 开源 Codex harness 的自动修改与版本切换</h4>
+<p><strong>本节定义必须实现的执行层自修复路径。</strong> <code>component=codex_runtime</code> 与应用代码共用 Issue、ChangeSpec、AcceptanceSpec 和 Release，不建立绕过预算与验收的第二套自修改机制。Meta 在登记范围内从发现到续跑全程自主推进，无需用户逐次发出“改代码”“编译”“切换”指令；源码、构建工具或恢复器未就绪时报告具体依赖，不能声称已启用该能力。</p>
+<pre class="text"><code>主动巡检 / 错误或停滞证据
+  → Meta 调查：定位 codex_runtime、冻结复现与修复范围
+  → PatchExecutor：指定 fork 的隔离候选 → 修改源码 → 真实编译
+  → AcceptanceGate：回归 + 接口/会话兼容 + 冻结要求 + 回退检查
+  → RuntimeSupervisor：检查点 → 安全点切换 → 新进程握手
+  → 当前 task 继续未完成步骤 → 真实结果认证 → Issue resolved
+
+编译/验收失败       → 丢弃候选，活动版本不变
+启动/握手/续跑回归  → 停止受影响派发 → 恢复已知产物与兼容检查点
+无法确认外部效果    → recovery_required，对账后再续跑，不盲目重发</code></pre>
+<p><strong>a. 登记来源、修改范围与运行绑定</strong></p>
+<p><code>CodexRuntimeSpec</code> 由 task 选择并在准入时固定；<code>CodexRuntimeBinding</code> 描述实际构建的版本，二者分别存储。能力注册表与 task 授权相交决定可改模块和操作，不能仅设置 <code>scoped_code_patch: true</code> 就获得任意源码修改权。</p>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>契约</th>
+<th>必填内容与用途</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>源码与修改面</td>
+<td><code>runtime_id, repository_ref, baseline_commit, source_snapshot_hash, allowed_write_scopes, excluded_scopes, dependency_policy</code>；登记具体 fork/commit，隔离副本的实际 diff 必须在授权范围内</td>
+</tr>
+<tr>
+<td>构建与资源</td>
+<td><code>build_profile_ref/hash, toolchain_ref/hash, dependency_lock_hash, target_platform, build_environment_hash, resource_contract</code>；配方包含适用于该 commit 的真实构建/检查命令、工作目录、依赖来源、输出位置及 CPU/内存/磁盘/时长上限</td>
+</tr>
+<tr>
+<td>接口与恢复</td>
+<td><code>adapter_ref/hash, transport, cli_contract_hash, event_tool_contract_hash, session_contract_hash, checkpoint_contract_hash, acceptance_checks, recovery_handler</code>；transport 选择 <code>exec</code> 或 <code>app_server</code>，使用哪种接口就检查对应契约</td>
+</tr>
+<tr>
+<td>自主操作与作用域</td>
+<td><code>allowed_operations, target_run/branch/roles, repair_allowance, continuation_reserve, recovery_reserve</code>；登记源码编辑、编译、测试、启动探测、切换、续跑和回退，Lab 与 Meta 角色分别绑定</td>
+</tr>
+<tr>
+<td>实际运行绑定</td>
+<td><code>binding_hash, runtime_spec_hash, source_commit, source_tree_hash, patch_hash, build_manifest_hash, binary_ref/hash, launch_recipe_ref/hash, launch_config_hash, adapter_hash, compatibility_report_ref</code>；清单不可变，hash 覆盖引用的配置和依赖</td>
+</tr>
+</tbody>
+</table>
+<p>launcher 使用已验证的绝对产物位置及内容 hash，不依赖全局 <code>PATH</code> 中恰好存在的 <code>codex</code>，不覆盖系统安装或其他项目的二进制。启动参数、插件/工具清单、环境变量允许清单与隔离的配置/会话目录随绑定记录；凭证仅保存引用，不写入构建产物或日志。模型路由、任务冻结要求及外部授权保持原绑定，修改它们需要对应的已登记变更范围，不能混进一次 harness 修复。</p>
+<p><strong>b. 自动发现、定位和准入</strong></p>
+<p>Inspector 按 §7 的周期与停滞机制独立读取 Codex 的事件流、调用输入输出、进程退出/超时、工具往返、压缩前后必要证据、重试和会话恢复记录。即使 CLI 返回成功，也可发现工具结果未进入上下文、必要约束丢失、重复调度或恢复后状态偏离。授权代码与确切版本可作为取证材料；发现缺少诊断能力时，可提出范围内的观测补丁并走同一验收路径。</p>
+<p>Meta Worker 先区分领域错误、RSI 适配器错误、远端服务失败和 Codex harness 缺陷。只有证据支持修改执行层时，才创建 <code>change_kind=codex_runtime_patch</code>，列出复现输入、目标机制、预期行为、受影响角色/步骤、冻结验收和回退目标。规则可以直接登记提议，但不能跳过定位与准入；同一根因/版本重复告警合并到原 Issue，调查、失败候选和重试共用其预算与次数。</p>
+<p>Codex 内部工具调用必须保留在 RSI 的资源与效果控制范围：科学工具、外部写操作经授权代理/MCP 网关进入内核 Effect 账本，使用稳定的任务/Work/逻辑调用标识去重。候选 runtime 不能获得绕过账本的执行通道；本地编辑、构建和测试也在对应隔离执行器内计费。无法关联或约束的副作用使该 runtime 契约不满足，不得靠 prompt 声称幂等或严格预算。</p>
+<p>每次真实模型请求、自动重试和上下文压缩请求也必须通过登记的调用代理或 runtime 计量接口先预约，再关联子 Effect 并结算；最终一条 turn usage 只能用于核对，不能替代事前准入。无法观测/限制内部请求的 runtime 标为不满足该资源契约。长驻进程、会话和父 agent turn 是协调生命周期，不持有包住子请求的外部执行许可；父预算只转拨、不重复计费，许可按实际模型/工具请求持有和释放。模型返回工具请求后释放本次请求许可，再调度工具，因此单槽配置也能推进完整回合；未知子 Effect 按 §6 保留责任。</p>
+<p><strong>c. 隔离修改、真实编译和验收</strong></p>
+<ol type="1">
+<li>固定当前 runtime binding、源码基线、复现材料、AcceptanceSpec、回退产物和兼容检查点；预留构建、验证、必要真实续跑和恢复资源。下载依赖、失败构建和测试调用均归属当前 Change，不重置任务总预算。</li>
+<li>PatchExecutor 创建只包含授权源码/输入的候选目录；Meta 修改代码并保存完整 patch。检查路径越界、符号链接、生成文件和依赖变化的实际影响，候选编辑/构建不得写活动源码、二进制、配置和会话目录。验证使用会话副本，checkpoint 保持不可变；活动 runtime 可按原契约追加自己的会话记录。构建脚本本身作为候选代码在隔离环境运行，不能获得发布注册表或 supervisor 写权限。</li>
+<li>使用该 commit 登记的工具链、依赖锁与配方真实编译。保留命令/环境清单、退出状态、完整日志引用和每个产物 hash；缓存复用必须命中相同源码、工具链、依赖、配方及平台，不能把旧二进制当作新源码构建成功。</li>
+<li>执行固定检查：原 bug 的可重现用例及相关正常路径；所选 exec/app-server 的请求、事件、结构化输出与工具往返；必要约束和证据保留；预算/权限与效果去重；会话恢复、停止/重启、旧产物可启动和回退检查。涉及远端调用的验证单独计费；fixture 只证明对应契约，不能替代真实续跑。</li>
+<li>形成不可变 CandidateManifest 和验收记录。编译成功、<code>--version</code> 输出或 Meta 自述均不足以发布；必须通过预登记的必需检查。缺少平台工具链、接口兼容或恢复条件时保留具体 blocked/incomplete 原因，不默默改用系统 Codex。</li>
+</ol>
+<p><strong>d. 版本切换、会话恢复与当前任务续跑</strong></p>
+<p>切换由进程外的 RuntimeSupervisor 执行。Meta 即便运行在正在修复的 Codex 上，也只提交持久化请求；supervisor、授权检查、冻结验收入口和恢复资源由固定可信版本提供。构建和验证阶段保留可工作的 Meta 旧版本；若它本身故障，使用任务预先登记且兼容的已知版本继续诊断，缺少可用恢复路径则明确 blocked。</p>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>阶段</th>
+<th>必须持久化的行为与完成条件</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>准备与静止</td>
+<td>保存 <code>RuntimeActivation</code>、预期活动 hash、旧/新绑定、目标角色、checkpoint、续跑点和有界 deadline；停止目标作用域的新派发，允许无关工作继续。等待已有本地调用完成，或按契约取消并确认状态</td>
+</tr>
+<tr>
+<td>效果对账</td>
+<td>核对所有受影响 Effect 的 provider handle、原版本、费用和预约。终止 CLI 不等于取消远端调用；unknown 保留义务并阻止冲突续跑，不能用新进程/thread ID 重新执行同一工作</td>
+</tr>
+<tr>
+<td>启动与检查</td>
+<td>分配递增 <code>runtime_generation</code>，以确切 binary/config/adapter 启动候选，保存进程句柄并验证实际文件 hash、协议握手、会话加载及健康状态。仅允许登记探测，不提前派发生产工具调用；exec 模式探测通过后，每次后续调用仍校验同一绑定</td>
+</tr>
+<tr>
+<td>提交活动绑定</td>
+<td>在安全点 CAS 核对旧 release 和 activation 状态，原子追加 Release、角色绑定、激活序号与 Continuation。事务只提交本地事实和待执行意图，不声称 OS 进程操作属于数据库事务；崩溃由 activation 记录与进程查询对账</td>
+</tr>
+<tr>
+<td>从断点继续</td>
+<td>新调用使用新 binding 和 generation；已完成计算不重做，旧代结果按真实来源摄取，旧代命令不得改变当前状态。首个真实派发及问题相关后续成功结果同时留档，才能认证版本生效和 <code>continuation=verified</code></td>
+</tr>
+</tbody>
+</table>
+<p>旧进程的生产派发权限在切换时撤销，工具网关按 generation 校验；停止超时或无法确认旧进程是否仍可产生效果时，不启用冲突的新派发。每个 activation 的 deadline、启动/恢复次数和剩余额度必须有界；等待不能无限续租或刷新预算。</p>
+<p><code>runtime_generation</code> 按 run/branch/role 持久单调递增；启动重试和回退到同一旧 binary 也分配新代际，不能恢复旧 generation。工具/模型代理和控制面共同校验该代际，防止旧进程的迟到命令在回退后重新获得权限；旧事实的摄取仍使用原 Effect 身份和来源。</p>
+<p>会话兼容采用明确的 <code>resume_mode=native_compatible | validated_migration | reconstruct_from_checkpoint</code>。原生恢复须有兼容测试；迁移在副本上执行并保留旧状态；不兼容时从 RSI 外部证据、任务状态和检查点构造新会话，保留必要约束、引用与未决义务，并重新认证实际交付。旧回执保留，但不能冒充新会话已读取材料；不重放已执行的模型/工具副作用。恢复材料不足则 blocked，不能静默丢失上下文后宣布续跑。</p>
+<p><strong>e. 自动回退与后续责任</strong></p>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>失败位置</th>
+<th>自动处置</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>源码检查、编译或发布前验收失败</td>
+<td>丢弃/归档候选及费用；活动绑定不变。原故障仍阻塞时保留 Issue，Meta 在剩余额度内准备下一候选</td>
+</tr>
+<tr>
+<td>候选启动、握手或恢复探测失败</td>
+<td>未提交活动绑定则取消激活并恢复可用旧进程；已提交则按预期活动 hash 追加恢复 Release。二者均验证旧产物与旧配置、会话契约仍可工作</td>
+</tr>
+<tr>
+<td>新版本后续执行回归或试用窗口失败</td>
+<td>停止受影响派发，对账在途效果；隔离错误/试用派生结果，恢复登记的已知 binary/config/adapter 和兼容会话，从未完成位置继续。回退不删除新产生的原始事实，也不回滚预算账本</td>
+</tr>
+<tr>
+<td>回退失败、版本冲突或效果未知</td>
+<td>保留 <code>recovery_required</code>、发布锁和具名恢复义务；由外部恢复器有界重试/对账。无法继续则返回具体阻塞原因，不宣称任务恢复成功，不覆盖其他更新</td>
+</tr>
+</tbody>
+</table>
+<p>回退不依赖新 Codex 或 Meta 生成一条“请回退”的回答。旧版本仍有原 bug 时保持相关步骤 blocked，其他合法工作继续；不能将“恢复旧版本”自动记为问题已解决。只因性能收益尚不显著不撤销已通过工程验收的修复；accepted 版本按 §11.3 保留，发生可靠回归才发起恢复。</p>
+<p><strong>f. 完成证据</strong></p>
+<p>记录 <code>trigger/inspection → issue → source diff → build → checks → activation/release → actual process binding → continuation → result</code>，同时保留失败与回退链。只有实际启动了候选产物、后续调用使用该版本且原问题对应条件通过，才能报告“Codex harness 已修改并继续任务”；仅修改应用 prompt、写配置、生成 diff 或编译成功分别报告其实际进度。故障覆盖见 H01–H11；真实运行证明见 §17.3，收益结论仍按 §12 单独研究。</p>
+<h3 id="可选的独立收益研究">12. 可选的独立收益研究</h3>
+<p>研究问题是“整体任务效果/成本是否改善”，与工程问题“能否修好并继续”分开。需要研究时单独登记 ResearchExperimentSpec、明确预算和分析计划，不借工程修复自动启动对照实验。默认研究额度为零，P0–P4 不依赖研究 runner。</p>
+<p>可选模式为同快照选择/生成比较 paired_snapshot、同检查点隔离完整运行 paired_rollout。完整运行只在研究问题需要时使用。每对固定 checkpoint、control/treatment 版本、seed、顺序与每臂预算；两臂的历史、记忆、候选身份、缓存、请求和随机流不共享可写状态，只共享冻结只读输入。</p>
+<p>子运行不得递归申请配对研究、改父任务或写父发布注册表。runner 的协调步骤不占包住子调用的外部租约，每个子 effect 单独申请许可。共用执行容量时任务修复优先，研究等待或使用显式独立资源；不能因可选研究强制暂停主任务闭环。</p>
+<p>失败、缺失、重试和全部费用保留；不只挑成功 pair、不依据结果补 seed。研究计划固定估计对象、指标/单位/分母、样本与缺失规则、停止条件和分析器。无正式推断方案只报告描述性差异，不宣称统计显著或因果收益。父停止传播到子运行，在途结果对账后才能结清研究义务。</p>
+<p>ScientificInvestigation 是完成原 task 的科研行动，§10.3 记忆机制的功能验收不依赖本节的对照 runner。若单独评价记忆收益，应冻结来源访问、工具、模型、总资源和任务终点，比较有界原始历史、平面检索与结构化记忆；整理、检索与检查成本全部计入，不通过隐藏基线证据制造收益。</p>
+<h3 id="停止收尾与恢复">13. 停止、收尾与恢复</h3>
+<h4 id="停止新工作">13.1 停止新工作</h4>
+<p>task 的冻结完成判据满足、预算/时长耗尽、用户停止、不可恢复错误或有界停滞处理失败时进入 finalizing。停止新 Lab、发现、变更，以及新的科研解释/归纳/外部检索 Effect；已排队 memory_review / memory_consolidate 不因不叫 lab_step 而绕过停止。继续幂等摄取已承诺的在途结果、确定性失效标记、待处理状态持久化和必要恢复；不为清空记忆队列新增模型/工具调用。</p>
+<p>处理顺序：摄取已落盘结果 → 对账未知效果 → 撤销未验收试用版本/完成必要恢复 → 结算可判定变更与 Continuation → 处理未决 Wait 或记录资源不足 → 验证当前结果和任务完成条件 → 输出义务与预算总账。已 accepted 的修复不无条件退回旧基线。</p>
+<p>收尾不额外启动整轮对照，也不偷偷增加评价来凑达标数或验收样本。合法在途预约按停止策略处理。对于冻结了至少 100 个达标 compound 要求的任务，若有效达标数少于 100，即使停止原因是预算耗尽或修复完成，也不能标记科学任务成功；其他领域使用各自冻结完成判据。</p>
+<h4 id="报告相互独立的状态">13.2 报告相互独立的状态</h4>
+<pre class="text"><code>stop_reason = goal_met | compute_budget | token_budget | wall_time | user_stop | stalled | error
+task_status = succeeded | partial | blocked | failed
+settlement_status = settled | blocked_external | resource_exhausted | failed
+work_status = empty | pending_queued | parked_dependencies | unresolved_effects</code></pre>
+<p>settled 表示外部效果和恢复义务已结清，不表示所有 Issue 已解决或任务达标。报告必须列出未决对象、原因、负责处理器和可恢复动作。</p>
+<p>科研记忆报告使用 <code>scientific_memory_report = {scope, as_of_seq, flags[], pending_object_refs[]}</code>；flags 可同时包含 <code>review_pending, source_unavailable, maintenance_deferred, support_check_pending</code>。空集合仅表示该范围没有已登记的对应未决项，不宣称所有判断均正确或已审阅。最后一批未解释结果保留 awaiting_review，未完成支持检查不写成 checked；冻结完成条件要求的复核未完成时，task 不能 succeeded。该报告不重定义 task_status 或 settlement_status。</p>
+<h4 id="重启与旧轨迹迁移">13.3 重启与旧轨迹迁移</h4>
+<p>启动校验配置、冻结要求 hash、实际 runtime/memory binding、schema、blob 与事件/投影一致性。先摄取已落盘回执，恢复 unknown、版本及依赖的持久状态并安排有界对账；未决效果保留，仅阻塞冲突动作和其占用许可，不要求所有 unknown 已解决才能继续独立本地恢复与报告。prepared outbox 重新通过 §6 TX2，不在启动扫描中直接重发。恢复中断 Step/Batch 与科研义务后，普通 Lab、科研复核/归纳和新检索仅在非 finalizing 且通过依赖/权限/预算门槛时派发；已承诺的必要对账、取消、回退与恢复可在 finalizing 中按登记权限和恢复预留执行。预算、问题尝试次数、wait_epoch、身份预约和进度不重置。</p>
+<p>已有历史默认只读保留。接入新编排使用明确 child/checkpoint：冻结父边界/哈希，验证父 prefix，按 <code>(parent_checkpoint_hash, target_schema_version, migration_version)</code> 幂等追加迁移事件，使用新 branch namespace。旧等待映射为带原原因的 Wait 并获得一次 legacy_wait_reassessment；不宣称新原因已验证。旧活动试验由兼容恢复器结清，unknown 先对账。所有新执行、重审与费用位于新边界之后。</p>
+<p>记忆恢复保留来源版本、科学问题、判断关系、实际交付清单、未结研究行动、复核/匹配水位和 Wait epoch；不重新执行已确定的外部动作。迁移旧自由文本时保留原文和来源，推断出的结构化对象标为待检查；不能伪造旧调用已读引用、历史支持检查或事前检验承诺。跨任务导入使用明确许可的只读版本包，目标任务重查适用性。</p>
+<p>有合法 SourceTombstone 的来源缺失按 unavailable 恢复，其依赖动作继续受阻，无关工作可以恢复；没有该记录的丢失、hash 不符或损坏报告完整性错误，不自动补写 tombstone 掩盖。恢复的是历史交付事实，不把旧 call 的 actual_read_manifest 转授给新 call 或新会话；新的科学提议必须引用该调用实际重新交付的来源。同一已完成 call 的幂等结果重放使用原记录，不重复调用或结算。</p>
+<h3 id="模块和-api">14. 模块和 API</h3>
+<p>模块通过组合连接。以下是实现目标，不表示已创建或已完成重构。</p>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>位置</th>
+<th>唯一责任</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>rsi_lab/contracts/</code></td>
+<td>task、step、effect、change、协议/结果引用和能力接口</td>
+</tr>
+<tr>
+<td><code>rsi_lab/store/</code></td>
+<td>不可变事件、blob、事务投影、CAS、回放</td>
+</tr>
+<tr>
+<td><code>rsi_lab/runtime/</code></td>
+<td>Work/Wait、调度、预算、outbox、执行与恢复</td>
+</tr>
+<tr>
+<td><code>rsi_lab/runtime/agent_runtimes/</code></td>
+<td>CodexRuntimeAdapter、exec/app-server 协议适配、不可变运行绑定与会话契约</td>
+</tr>
+<tr>
+<td><code>rsi_lab/context/</code></td>
+<td>packet、依赖投影、页面与 ACK</td>
+</tr>
+<tr>
+<td><code>rsi_lab/meta/</code></td>
+<td>巡检计划与覆盖、主动取证、持续调查、候选修改编排与证据关联</td>
+</tr>
+<tr>
+<td><code>rsi_lab/changes/</code></td>
+<td>隔离构建、AcceptanceGate、ReleaseManager、回退与 Continuation</td>
+</tr>
+<tr>
+<td><code>rsi_lab/changes/codex/</code></td>
+<td>指定 Codex fork 的源码候选、构建清单、二进制与配置产物、兼容及回退检查</td>
+</tr>
+<tr>
+<td><code>supervisor/</code></td>
+<td>进程外的可信启动、健康检查、generation fencing、激活对账与自动回退；不随候选 Codex 更新</td>
+</tr>
+<tr>
+<td><code>rsi_lab/results/</code></td>
+<td>版本来源、依赖有效性、影响分析、复用与选择性重算</td>
+</tr>
+<tr>
+<td><code>rsi_lab/reporting/</code></td>
+<td>任务/修复/成本/未决义务报告</td>
+</tr>
+<tr>
+<td><code>rsi_domains/&lt;domain&gt;/</code></td>
+<td>领域 schema、工作流、解析/分析/评价、资格判断与验收插件</td>
+</tr>
+<tr>
+<td><code>tasks/&lt;task_id&gt;/</code></td>
+<td>具体目标、输入、冻结要求、授权、预算与协议版本</td>
+</tr>
+<tr>
+<td><code>research/</code>，可选</td>
+<td>独立对照 runner 和分析器；不被内核必需路径导入</td>
+</tr>
+<tr>
+<td><code>rsi_lab/memory/</code></td>
+<td>科研对象与精确关系、CAS 修订、增量匹配/复核、方法归纳；通过 store 持久化、context 交付、runtime 调度、results 关联产物</td>
+</tr>
+</tbody>
+</table>
+<pre class="text"><code>load_task(task_ref) -&gt; immutable_task_contract | missing_information
+register_domain(package_ref, contract_checks) -&gt; capability_manifest
+register_codex_runtime(runtime_spec, readiness_checks) -&gt; runtime_id, ready | blocked | unsupported
+prepare_step(step_id, expected_versions) -&gt; effect_id | blocked_reason
+ingest_effect_result(effect_id, raw_ref, provider_evidence) -&gt; committed | duplicate | conflict
+build_packet(role, snapshot, budget) -&gt; packet_ref, hash, candidate_delivery_manifest | blocked
+record_scientific_evidence(source_ref, conditions, provenance) -&gt; typed_ref | rejected
+retire_source(source_ref, expected_version, retention_authorization) -&gt; tombstone_ref, retirement_work | reasons
+propose_memory_revision(object_ref, expected_version, proposal, actual_read_manifest) -&gt; revision_ref | reasons
+record_support_check(claim_ref, source_refs, check_receipt, method_version) -&gt; check_ref | rejected
+prepare_scientific_context(question_ref, decision_context, snapshot, budget) -&gt; selection_manifest, required_groups, gaps
+lookup_scientific_work(identity, conditions, snapshot) -&gt; reusable_refs, pending_refs, unknown
+register_scientific_investigation(plan, dependencies, optional_test_commitment) -&gt; investigation_ref | reasons
+attach_scientific_result(investigation_ref, effect_receipt, evidence_refs) -&gt; result_binding, review_work
+review_scientific_result(investigation_ref, interpretation, revisions, actual_read_manifest) -&gt; decision_ref | reasons
+schedule_inspection(trigger, source_versions, expected_coverage_version) -&gt; work_id | merged | deferred
+record_inspection(inspection_id, result, delivery_manifest) -&gt; coverage_revision | rejected
+request_investigation_evidence(issue_or_inspection_id, selectors, limits) -&gt; request_id | reason
+request_scientific_review(target_ref, finding, source_refs, source_effect_id) -&gt; review_work_id | merged | reasons
+propose_change(issue_id, change_spec) -&gt; change_id | reasons
+prepare_candidate(change_id) -&gt; artifact_hash, impact_manifest
+build_codex_candidate(change_id, runtime_spec_hash) -&gt; runtime_binding_hash, build_evidence | failure
+check_runtime_compatibility(binding_hash, checkpoint_ref) -&gt; compatibility_report, resume_mode | incompatible
+validate_change(change_id) -&gt; acceptance_record
+release_change(change_id, expected_active_hash) -&gt; release_id | stale | denied
+rollback_change(change_id, expected_active_hash) -&gt; restored | recovery_required
+prepare_runtime_activation(change_id, expected_active_hash, checkpoint_ref) -&gt; activation_id | reason
+reconcile_runtime_activation(activation_id) -&gt; ready | active | restored | recovery_required
+resume_task(task_id, run_id, branch_id, change_id, resume_point) -&gt; continuation_id
+register_protocol_revision(task_id, run_id, branch_id, parent_hash, input_delta) -&gt; protocol_hash, impact_plan
+reparse_result(raw_ref, parser_hash, protocol_hash) -&gt; result_revision
+plan_recompute(protocol_hash, dependency_snapshot) -&gt; affected, reusable, needs_review
+settle_change(change_id, continuation_manifest) -&gt; immutable_outcome
+finalize_run(reason) -&gt; report_ref</code></pre>
+<p>所有 API 返回机器可读 reason_code；“没有工作”不能同时指容量满、unknown、缺信息、权限不足和预算耗尽。注册适配器、协议和验收器都必须经过相应权限/兼容检查，不能让可执行文本直接绕过接口。</p>
+<p><code>build_codex_candidate</code> 是 <code>prepare_candidate</code> 的登记后端；激活准备与对账是 <code>release_change / rollback_change / resume_task</code> 调用的受信处理器，不能作为跳过 AcceptanceGate 的旁路。长操作通过 Work/Effect 异步推进，前端请求超时不等于构建、启动或回退已停止。</p>
+<p><code>prepare_scientific_context</code> 只返回选择计划，<code>build_packet</code> 物化 packet 和候选交付清单，二者都不认证读取权限。实际交付由 §6 TX3 的受信回执路径登记。证据与支持检查登记只接受可核对的来源/执行或检查回执，模型只能提议，不能自签通过；<code>actual_read_manifest</code> 是控制器解析的调用记录。长操作按 §3 的 Work.kind 登记，新外部效果继续经过预算、outbox 和最终派发检查。</p>
+<p><code>retire_source</code> 仅由已登记保留政策授权的受信处理器调用；通过 source_retire Work 的准入/恢复契约完成，模型记忆提议无此权限。删除意图、执行、tombstone 与依赖失效均可恢复；未启用该能力时返回 unsupported_capability，不在普通缓存淘汰或摘要重建中隐式删除来源。</p>
+<h3 id="运行指标与审计">15. 运行指标与审计</h3>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>类别</th>
+<th>必须报告</th>
+<th>结论边界</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>完整性</td>
+<td>事件/投影、hash、预算守恒、身份唯一、ACK、未决效果</td>
+<td>完整性通过不等于任务有进展</td>
+</tr>
+<tr>
+<td>活性</td>
+<td>ready 等待、parked 年龄、容量拒绝、deadline 处置、队列服务</td>
+<td>Meta 调用增加不等于修复成功</td>
+</tr>
+<tr>
+<td>主动检测</td>
+<td>触发来源、无报告发现、覆盖/遗漏、发现与取证延迟、未检查积压、误报/漏检、调查完成率和成本</td>
+<td>检出与误报需独立真值和分母；无告警不等于已检查，脚本化 Meta 不证明模型检测能力</td>
+</tr>
+<tr>
+<td>修复闭环</td>
+<td>发现/复现/候选/验收/发布数，失败回退，实际使用事件，verified 续跑和剩余阻塞</td>
+<td>测试通过或发布数不能代替问题解决</td>
+</tr>
+<tr>
+<td>Codex 自修改</td>
+<td>fork/commit、patch、构建/工具链/产物 hash，旧新 runtime 绑定，激活/回退、会话恢复、真实续跑和所有费用</td>
+<td>修改 prompt、生成 diff、编译通过或进程存活均不足以证明执行层问题已修复</td>
+</tr>
+<tr>
+<td>复用和重算</td>
+<td>raw 复用、重解析、受影响重算、未受影响复用、误失效和重复执行</td>
+<td>复用必须有协议兼容和来源证明</td>
+</tr>
+<tr>
+<td>科学任务</td>
+<td>当前有效结果、独立达标对象数、冻结阈值与目标状态</td>
+<td>100 次调用/评价不等于 100 个达标 compound</td>
+</tr>
+<tr>
+<td>成本</td>
+<td>Lab、Meta 调查/编码/验收、恢复、计算、工具与可选研究的实际费用</td>
+<td>调用占比不等于墙钟占比，继承分数不等于修复收益</td>
+</tr>
+<tr>
+<td>Scientific Memory 质量</td>
+<td>关键证据/反证召回、条件与否定保真、独立来源重复、支持检查结果、失效/复核延迟及未结工作恢复</td>
+<td>先固定查询/审计样本和分母；不可审计、未知和未完成单列，写入/引用数不代表知识正确</td>
+</tr>
+<tr>
+<td>科研行动与修订</td>
+<td>工作复用、可避免重复、有效前瞻检验、结果解释延迟、判断修订与下一步选择关联</td>
+<td>合理复现不算浪费；事后假设不计事前预测；关联不证明因果收益</td>
+</tr>
+<tr>
+<td>记忆资源</td>
+<td>读取、索引、投影、归纳与复核的模型/token、CPU、时间、存储、待处理积压及 unknown usage</td>
+<td>共同账本只结算一次；额外维护不提供免费调用或科研进度</td>
+</tr>
+</tbody>
+</table>
+<p>每次修复保存 <code>inspection/source signal → issue → investigation → change → checks → release → resume → downstream result</code> 全链引用。无变更的运行不能通过空集合 all() 记为能力已验证。告警只在阈值跨越时产生一次，使用 breach_epoch 去重，不自行增加证据版本或无限重开问题。巡检覆盖缺口、no_action、被反证的假设和不可取得的材料同样报告，不只保留成功修复。</p>
+<p>来源支持率以预登记抽样中的可审计判断为分母，同时报告无法审计项。更正后的过期依据误用率以受影响决定中的关键依据引用为分母，分列误用数、可审计数与不适用；修订延迟区分失效提示和完成复核。前瞻可判别率以合法事前检验为分母，未完成/失败/无法比较单列；命中率仅以可判别项为分母。同分是否命中由冻结规则决定，共享一次结果的多条检验不当作独立重复。原始检索评测不能替代闭环科研收益。</p>
+<h3 id="实现与迁移顺序">16. 实现与迁移顺序</h3>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>阶段</th>
+<th>必须交付</th>
+<th>退出条件</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>P0 三层契约</td>
+<td>rsi_lab/rsi_domains/task 边界、能力接口、任务/协议/冻结要求、领域中立 fixture</td>
+<td>内核无具体领域导入；一个非化合物 fixture 可通过同一入口执行</td>
+</tr>
+<tr>
+<td>P1 控制面</td>
+<td>事件、预算、outbox、unknown、等待、调度、检查点和收尾；科研对象/关系版本及来源身份</td>
+<td>崩溃/重复回调/容量/预算/等待测试通过；已有结果可恢复</td>
+</tr>
+<tr>
+<td>P2 Lab / Meta 工作闭环</td>
+<td>Lab 步骤、独立巡检/覆盖、主动取证与持续调查、上下文/ACK、Issue 与 Work；初诊和必要修复额度；按问题取证、观察引用统一、科研结果回写与记忆复核</td>
+<td>无报告/无告警仍可巡检；静默停滞初诊可达；覆盖不虚增；调查能继续且不饿死 Lab；SM01–SM09、SM12–SM17、SM19 功能通过</td>
+</tr>
+<tr>
+<td>P3 修复发布基础设施</td>
+<td>scoped T3、ChangeEngine、适配器注册、协议影响与 resume；Codex fork/构建器、兼容检查、独立 supervisor 与回退</td>
+<td>五类路径的受控案例及失败回退/冻结要求负例通过；包含 H01–H11、记忆机制变更 SM11、SM18，不依赖配对 runner</td>
+</tr>
+<tr>
+<td><strong>P4 实际运行中修复并继续</strong></td>
+<td>有限真实任务中的实际问题、Meta 调查与修改、真实验收、发布和后续进展；单列 Codex runtime 的真实修改与续跑证据</td>
+<td><strong>系统实际修好了问题，版本真实生效，任务从断点继续；Codex 子项须真实编译、启用候选并完成续跑，不能由应用侧修复代替</strong></td>
+</tr>
+<tr>
+<td>P5 可选研究与扩展</td>
+<td>独立收益比较、消融、异步/多变更并行、Strategist，以及长期自动归纳/受控迁移扩展（SM10），来源删除能力另验 SM20</td>
+<td>各自独立配置、预算和验收；不阻塞 P4，不用 P4 的功能成功代替收益证据</td>
+</tr>
+</tbody>
+</table>
+<p>P4 不要求每个补丁成功，但通用闭环至少有一次真实修复达到 problem_status=resolved、continuation=verified；Codex 自修改子项另外要求实际 fork 修改、构建、切换和同一任务续跑达到这些条件。两项分别报告，完整新版 P4 要求两项都通过，允许同一 Codex 案例同时满足。只有失败回退、合成正例或没有遇到相应修复机会时，该子项仍待验证。P3 受控故障证明五条路径可执行，必须与 P4 自然运行案例区分。</p>
+<p>P4 的有限任务范围在开始前登记；若只验收续跑闭环，应分别报告“P4 通过”和“科学任务仍在进行”。最终科学任务必须满足其全部冻结条件；对于已冻结至少 100 个达标 compound 要求的化合物任务，该数量不变，不能把小样本修复验收替代最终交付。</p>
+<p>迁移优先复用不可变存储、原始调用、身份索引、评价来源、原生记录查询和回执认证；通过桥接适配器接入，旧 runtime 的隐式批次推进不直接嵌入新循环。旧机制与研究结果保留，不追溯改写成新 ChangeOutcome。</p>
+<p>Scientific Memory 的基本功能随 P1/P2 接入，不要求先完成向量检索、长期自动归纳或跨任务共享。P4 保持工程修复与续跑验收；记忆的独立科研收益另按 P5/§12 评价。旧记录不能仅因迁移到新 schema 被升级为 checked 或已验证经验。</p>
+<h3 id="验收与故障注入">17. 验收与故障注入</h3>
+<p>以下是实现的完成条件，本文不声称已经通过这些测试。检查事件、版本、结果 hash、资源和实际外部调用计数，不能只检查最终返回值。</p>
+<h4 id="领域中立-fixture">17.1 领域中立 fixture</h4>
+<p>提供独立测试域 GridFixture：输入整数 x/y，规范表示为排序 JSON，评价为 <code>-((x-3)^2+(y+1)^2)</code>，带原始输出、input hash 和 evaluation_id。同一内核另加载化合物域契约；fixture 的坐标/评分不进入内核。支持幂等查询与“不支持查询”的故障适配器，使用固定种子的 scripted Lab/Meta 仅验证机制。</p>
+<p>另提供无需化学依赖的 MemoryFixture：两个条件下的数值/定性证据、来源更正、相关与不相关命题、理论前提和乱序行动回执。它测试多形态科研对象及版本/关系/交付机制，不把 GridFixture 的标量评分视为所有研究的结果形式；脚本化解释只证明契约执行。</p>
+<h4 id="必需矩阵">17.2 必需矩阵</h4>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>ID</th>
+<th>场景</th>
+<th>必须断言</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>A01</td>
+<td>更换领域包及 task</td>
+<td>内核无需改动；不导入分子库、不硬编码科学阈值</td>
+</tr>
+<tr>
+<td>A02</td>
+<td>缺少冻结阈值/关键输入</td>
+<td>明确 missing_information；不猜值、不启动错误科学任务</td>
+</tr>
+<tr>
+<td>A03</td>
+<td>同一 task 的两个 run，其中一个发布新协议/适配器</td>
+<td>只更新目标 run/branch 活动绑定；启动配置、冻结要求和另一个运行不变</td>
+</tr>
+<tr>
+<td>W01</td>
+<td>1,000 parked + 1,000 queued，8 条缓存满</td>
+<td>有资源 ready Work 可派发，缓存淘汰不删除义务</td>
+</tr>
+<tr>
+<td>W02</td>
+<td>请求等待/容量不足且 Lab 批次卡住</td>
+<td>不占派发槽；必要 Meta 修复可达，不等下一正常 batch</td>
+</tr>
+<tr>
+<td>W03</td>
+<td>可选 credit 为零、Lab 无新进度</td>
+<td>repair_allowance 可驱动必要修复；纯代码恢复始终可调度</td>
+</tr>
+<tr>
+<td>W04</td>
+<td>同 epoch 即时处置后 deadline 到达</td>
+<td>只处置一次；无关事件不重置容量签名</td>
+</tr>
+<tr>
+<td>E01</td>
+<td>TX1 前、prepared 后、dispatching 后分别崩溃</td>
+<td>外部调用为零/同身份派发/unknown 对账，不盲目重调</td>
+</tr>
+<tr>
+<td>E02</td>
+<td>raw 已落盘但结果事务未完成</td>
+<td>幂等摄取已存 raw；无额外模型/科学计算</td>
+</tr>
+<tr>
+<td>E03</td>
+<td>重复回调、冲突结果、旧世代迟到</td>
+<td>同结果 no-op，异结果隔离，费用真实记录，旧命令不覆盖新版本</td>
+</tr>
+<tr>
+<td>E04</td>
+<td>唯一 effect unknown</td>
+<td>保留任务许可，恢复查询可达，禁止重复科学执行</td>
+</tr>
+<tr>
+<td>E05</td>
+<td>Change→Batch→Effect 额度转拨</td>
+<td>不重复占额；未知子预约不释放；预算永不增发</td>
+</tr>
+<tr>
+<td>D01</td>
+<td>必需依赖大于 packet，或原生组超过 48</td>
+<td>先删可选组；仍不适配则阻塞；存根无 ACK</td>
+</tr>
+<tr>
+<td>D02</td>
+<td>原页跨角色交接、重复呈现</td>
+<td>token/content 不变；cursor 只推进一次；引用按实际调用认证</td>
+</tr>
+<tr>
+<td>O01</td>
+<td>Lab 无主动报告、无告警，连续返回成功</td>
+<td>到期仍创建 Inspector Work；实际检查成功产物及冻结要求，报告来源与范围</td>
+</tr>
+<tr>
+<td>O02</td>
+<td>工具成功但解析单位错误或 raw/摘要冲突</td>
+<td>模型能主动请求 raw/契约形成可验证假设；恢复无需重算原科学调用；不能只匹配错误码</td>
+</tr>
+<tr>
+<td>O03</td>
+<td>可选 credit 为零、无新进度、预期里程碑逾期，初诊需要补证据</td>
+<td>repair_allowance 支付同 episode 的取证及后续判别，最多 3 次模型调用；同 epoch 不重开，run 总上限和预算保持</td>
+</tr>
+<tr>
+<td>O04</td>
+<td>相同状态重复 tick、Meta 自身事件、重启</td>
+<td>不新增科学进度/证据；不重复巡检、不重置初诊/失败重试次数</td>
+</tr>
+<tr>
+<td>O05</td>
+<td>多页来源超出 packet 或发现被反压/预算阻塞</td>
+<td>未交付/未审阅部分保留 backlog；消费游标不能冒充完成覆盖；不能输出健康 no_action</td>
+</tr>
+<tr>
+<td>O06</td>
+<td>漏检查项、重复项、未知项，或关键证据不可得</td>
+<td>结构错误拒绝；不可得记录 insufficient_evidence 并保留动作/原因；失败重试有界</td>
+</tr>
+<tr>
+<td>O07</td>
+<td>同事实重复发现，随后 parked Issue 收到新反证</td>
+<td>重复合并不增加证据；新独立材料唤醒原 Meta Worker，调查历史与费用不重置</td>
+</tr>
+<tr>
+<td>O08</td>
+<td>Meta Worker 已 ready，连续有同范围新巡检和正常 Lab</td>
+<td>先继续原调查，巡检合并证据；Meta Worker 和 Lab 均获得有界服务机会，受可用资源条件限制</td>
+</tr>
+<tr>
+<td>O09</td>
+<td>正常但耗时长的工具、合理平台期、已声明等待</td>
+<td>不把未到期正常等待当故障；检查竞争解释，可有依据 no_action/关闭假设，无强制 patch</td>
+</tr>
+<tr>
+<td>O10</td>
+<td>未命中规则但任务计划缺必需能力</td>
+<td>Inspector 可提出新检查/调查，不依赖预先枚举的错误规则；不得降低冻结要求</td>
+</tr>
+<tr>
+<td>O11</td>
+<td>巡检失败或非法响应重试仍失败</td>
+<td>明确 deferred 和未覆盖范围；同输入不无限重发，全部成本保留</td>
+</tr>
+<tr>
+<td>O12</td>
+<td>真实模型评测：隐藏故障标签与正常对照</td>
+<td>输入无预填 issue/根因；独立标注检查检出、误报、取证依据和成本；报告分母与不确定性</td>
+</tr>
+<tr>
+<td>B01</td>
+<td>合法/重复候选混合并修补</td>
+<td>保留合法项，最多两次尝试，一次 batch commit，无额外进度 credit</td>
+</tr>
+<tr>
+<td>B02</td>
+<td>第 k 个评价未知或批内被修复中断</td>
+<td>成功前缀保持，未决身份/费用保留；恢复不重复已完成计算</td>
+</tr>
+<tr>
+<td>C01</td>
+<td>解析器 bug，有保存 raw</td>
+<td>修复后重解析并修订下游；原 raw hash 不变，原计算新增调用为 0</td>
+</tr>
+<tr>
+<td>C02</td>
+<td>缺少分析适配器</td>
+<td>小量已有数据契约通过，适配器版本登记，后续真实步骤调用并产出合法结果</td>
+</tr>
+<tr>
+<td>C03</td>
+<td>上下文超大</td>
+<td>重组后限制通过，必需信息完整，真实后续调用成功；不能删约束凑容量</td>
+</tr>
+<tr>
+<td>C04</td>
+<td>科学输入改变</td>
+<td>新协议、影响闭包、选择性重算；不受影响 raw/结果复用，错误缓存不混用</td>
+</tr>
+<tr>
+<td>C05</td>
+<td>补丁或试用验收失败</td>
+<td>不发布或恢复已知版本；试用/错误派生结果不计入正式科学完成；费用留存</td>
+</tr>
+<tr>
+<td>C06</td>
+<td>试图降低阈值、达标数或改变资格定义</td>
+<td>gate 拒绝，即使新值让分数/成功率更好</td>
+</tr>
+<tr>
+<td>C07</td>
+<td>CAS 失配 / 恢复失败</td>
+<td>不覆盖其他版本；义务已结清可 unchanged，未结清保留 recovery_required</td>
+</tr>
+<tr>
+<td>C08</td>
+<td>必需续跑数据缺失、修复额度耗尽</td>
+<td>incomplete/blocked，不伪造通过；相关依赖暂停，独立工作继续</td>
+</tr>
+<tr>
+<td>C09</td>
+<td>bounded_followup 通过</td>
+<td>原试用版本转 accepted 并继续，无默认基线重跑、无到期无条件回退</td>
+</tr>
+<tr>
+<td>C10</td>
+<td>accepted 修复后重启</td>
+<td>按实际新版本及断点继续，时钟/费用/原始产物不重置</td>
+</tr>
+<tr>
+<td>H01</td>
+<td>Meta 从无预填根因的 Codex 轨迹发现执行层问题</td>
+<td>在已授权范围自动调查并生成 codex_runtime_patch，固定复现/验收，不需用户逐步指令；脚本化调度测试与真实识别证据分开</td>
+</tr>
+<tr>
+<td>H02</td>
+<td>源码越界、构建失败或依赖锁漂移</td>
+<td>拒绝或归档失败候选；旧 binary/config/binding 不变，真实费用保存；只有合法且经过批准契约的依赖变更可继续</td>
+</tr>
+<tr>
+<td>H03</td>
+<td>编译通过但工具/事件协议、必要证据或权限回归</td>
+<td>必需检查阻止发布；不能以退出码 0 或降低检查要求替代兼容验收</td>
+</tr>
+<tr>
+<td>H04</td>
+<td>候选不能启动、握手失败或超过健康检查 deadline</td>
+<td>supervisor 无需 Meta 回复即取消激活/恢复已知版本；记录实际产物、配置、代际和恢复结果</td>
+</tr>
+<tr>
+<td>H05</td>
+<td>激活期间旧 Effect 迟到/unknown，旧进程仍返回命令</td>
+<td>原版本结果幂等摄取，费用/预约不丢；旧代命令被 fencing 拒绝；unknown 不因切换被重发</td>
+</tr>
+<tr>
+<td>H06</td>
+<td>会话格式不兼容或回退时新旧 schema 不同</td>
+<td>在副本上迁移或从外部检查点重建；旧状态保留，新会话重新认证交付，不重复执行副作用；材料不足则 blocked</td>
+</tr>
+<tr>
+<td>H07</td>
+<td>激活意图后、候选启动后、CAS 前/后分别崩溃</td>
+<td>恢复器按 activation 和进程事实对账；最多一个有效派发代际，不重复生产调用，不覆盖并发版本；目标/实际版本可区分</td>
+</tr>
+<tr>
+<td>H08</td>
+<td>新版本续跑回归、回退启动失败或原 bug 仍在</td>
+<td>自动回退或进入 recovery_required；回退使用新 generation，旧命令不复活；错误派生结果隔离，事实/费用不倒退；原 bug 未解不能宣称 resolved</td>
+</tr>
+<tr>
+<td>H09</td>
+<td>同一 task 多 run/role，构建/试用耗尽额度或外层停止</td>
+<td>仅目标绑定切换；Meta 保留已知恢复版本；构建/依赖/验证/续跑均计费，停止新修复仍保留已预约恢复义务</td>
+</tr>
+<tr>
+<td>H10</td>
+<td>授权的 Codex 源码修复完成全流程</td>
+<td>patch、真实编译及检查 hash 齐全；首个真实调用使用新 binary/config/adapter 并解决原问题，同一 task 从断点继续且不重做已完成计算</td>
+</tr>
+<tr>
+<td>H11</td>
+<td>单外部许可下的完整工具回合，包含内部重试和压缩</td>
+<td>父 turn 不包住子请求占槽；每个真实请求事前预约并归属子 Effect，重试/压缩/失败全计费，预算耗尽禁止新请求，流程无自等待死锁</td>
+</tr>
+<tr>
+<td>F01</td>
+<td>冻结下限为 100 的化合物任务只有 99 个独立达标项，或重复/无效项凑数</td>
+<td>科学任务不可 succeeded；阈值/资格规则保持冻结</td>
+</tr>
+<tr>
+<td>F02</td>
+<td>finalization 仍有 provisional/unknown/parked</td>
+<td>结算与未决分别报告；不把 Audit PASS 当全问题已解决</td>
+</tr>
+<tr>
+<td>M01</td>
+<td>同一旧轨迹迁移两次</td>
+<td>第二次 no-op；父 prefix、历史拒绝、回执、费用不变</td>
+</tr>
+<tr>
+<td>SM01</td>
+<td>同源转述、来源身份与观察卡投影</td>
+<td>不增加独立支持；内容/条件/精确引用来自同一来源；未经交付的 record 或全文不可引用</td>
+</tr>
+<tr>
+<td>SM02</td>
+<td>科学对象并发修订、重复提交与分支差异</td>
+<td>CAS 拒绝过期覆盖；重放幂等，旧版本与分歧保留，Question 不改变 TaskSpec</td>
+</tr>
+<tr>
+<td>SM03</td>
+<td>证据更正影响多层 Claim / Method / 计划 / 摘要</td>
+<td>传递失效且读取/执行前复查；部分传播显式 needs_review；旧快照可恢复</td>
+</tr>
+<tr>
+<td>SM04</td>
+<td>新反证尚无依赖边，高扇出匹配与无关新材料</td>
+<td>按问题/对象/条件有界匹配；相关项进入复核，无关项不自动挑战，保存积压水位</td>
+</tr>
+<tr>
+<td>SM05</td>
+<td>条件不匹配、执行失败、未检出、理论前提缺失</td>
+<td>不自动合并排名或判负；unknown 与负结果分开，多指标/定性/推导不强制标量化</td>
+</tr>
+<tr>
+<td>SM06</td>
+<td>判断连同反证超出包预算、字段投影与跨角色交付</td>
+<td>统一字节/token 检查；必需依赖缺失阻塞该判断/行动，可选省略留缺口；存根无 ACK/引用权，不绕过 §9</td>
+</tr>
+<tr>
+<td>SM07</td>
+<td>探索、前瞻检验、已有结果重用与同响应新判断</td>
+<td>仅合法预先冻结者计前瞻；先提交判断再冻结计划；事后解释不回填预测</td>
+</tr>
+<tr>
+<td>SM08</td>
+<td>过滤/乱序/部分完成/unknown 与最后一批未解释</td>
+<td>按稳定身份绑定 Step/Effect/产物，不按位置配对；保留 awaiting_review，来源在调用期间变化则提交复检，不重复费用/执行</td>
+</tr>
+<tr>
+<td>SM09</td>
+<td>等待长期未变、处理队列超限、停止与恢复</td>
+<td>按 typed owner 处置且 deadline 可达；无记忆槽位/前置依赖死锁，积压与原因保留；恢复不重置水位、预算或 Wait epoch</td>
+</tr>
+<tr>
+<td>SM10</td>
+<td>启用归纳/迁移扩展，或来源按政策删除</td>
+<td>摘要有来源/范围/反例；派生事件不自触发循环；独立性未知不虚增；迁移重查适用性，缺失来源显式失效</td>
+</tr>
+<tr>
+<td>SM11</td>
+<td>普通 Claim 修订、可执行 Method 或检索策略变化</td>
+<td>前者走读取/CAS，后者走授权 ChangeEngine；不自签来源支持、不降低冻结要求</td>
+</tr>
+<tr>
+<td>SM12</td>
+<td>没有新判断、额外检查调用及同回执重复处理</td>
+<td>允许空提议；真实来源仍登记，额外处理共享额度，重放无重复费用/进度/信用</td>
+</tr>
+<tr>
+<td>SM13</td>
+<td>预览/物化未派发、错误格式响应、伪造读取清单、新会话及持续会话中的旧材料</td>
+<td>build_packet 不授予读权；实际回执才能认证交付；格式错误不撤销真实交付，新调用不继承旧读权，模型自报清单无权威；持续会话纳入完整有效上下文的预算/来源核验，摘要不授予原文读权，不能核验则重建</td>
+</tr>
+<tr>
+<td>SM14</td>
+<td>TX1 后更正来源/更换绑定/停止，然后崩溃重启；更正在 TX2 后到达</td>
+<td>未派发旧意图在 TX2 被阻止并保留；仅释放确定未花费预约；越过派发边界的调用正常对账，旧结果不能自动成为当前依据</td>
+</tr>
+<tr>
+<td>SM15</td>
+<td>调用期间依赖更正，新 Claim 尚不存在；写水位/入复核队列时崩溃</td>
+<td>提交复检标记 needs_review；旧复核不清除新 dirty_revision；推进游标与后继 Work 原子/幂等，无漏审或重复费用</td>
+</tr>
+<tr>
+<td>SM16</td>
+<td>Meta credit/token 为零，但 Lab 科研复核有预算；持续匹配与可选归纳</td>
+<td>必需复核可进入 Lab 通道，仅阻塞相关动作；本地匹配有界，维护不饿死 Lab、不制造进度或新增额度</td>
+</tr>
+<tr>
+<td>SM17</td>
+<td>Meta 发现纯解释问题，同时有科学 Wait 和机制 Issue</td>
+<td>来源绑定请求转 memory_review，无需代码 Change；Lab 重新读取后修订；科学处置不能 close_issue 或凭最小包自签科学结论</td>
+</tr>
+<tr>
+<td>SM18</td>
+<td>memory policy/schema 发布与回退，期间存在旧调用和新记忆记录</td>
+<td>活动 binding CAS 可恢复，TaskSpec 保留；实际 packet/Effect 固定绑定；回退需兼容新状态，否则 recovery_required，不删除历史</td>
+</tr>
+<tr>
+<td>SM19</td>
+<td>用户停止/预算终止时有 review/consolidate、迟到结果及未决恢复</td>
+<td>禁止新增科研模型/工具 Effect；落档和必要对账/回退仍可执行，unknown 不阻塞独立本地恢复；pending flags 可并存，必需复核未完不能 succeeded</td>
+</tr>
+<tr>
+<td>SM20</td>
+<td>按许可删除来源后重启/历史回放，对比无记录丢失或损坏</td>
+<td>有 tombstone 为 unavailable，无关工作可恢复；必要依赖保持阻塞，旧快照无正文读权；意外丢失/损坏不能伪装成合法删除</td>
+</tr>
+</tbody>
+</table>
+<p>可选研究启用后另测分支隔离、失败 pair 保留、禁止递归研究、预算不增发及停止传播。研究测试不加入默认 P4 的前置依赖。</p>
+<p>SM01–SM09、SM12–SM17、SM19 随核心记忆与编排整合验收；SM11、SM18 随 P3 机制变更与版本恢复验收。SM10 在启用长期归纳/跨任务迁移前验收；来源删除能力启用前另验 SM20。所有场景均为待实现检查，不报告已通过；记忆收益比较仍是独立可选研究。</p>
+<h4 id="p4-真实案例留档">17.3 P4 真实案例留档</h4>
+<p>每个案例保存首次可见线索及巡检触发、是否有 Lab/用户报告、实际检查与取证范围、问题出现时的输入/错误与 checkpoint、Meta 的原因调查、实际 patch/构建 hash、小范围验收记录、冻结要求前后 hash、发布事件、真实续跑点和后续结果、复用/重算清单及全部成本。缺任何关键环节则报告尚未验证，不能用合成成功响应填充。</p>
+<p>P4 按 §16 分别登记通用闭环与 Codex 自修改子项。五类路径的受控覆盖由 P3 验收；P4 明确标注真实任务实际覆盖哪几类，不把一例修复泛化为所有场景的效果证明。无修复机会的 pilot 保留其真实结果，相关子项仍待验证；不为了通过而擅自改目标或增加预算。</p>
+<p>Codex 案例额外留存实际 fork/commit、源码 diff、工具链/依赖/构建日志、候选 binary/config/adapter hash、兼容报告、旧/新会话与 generation、activation 的前后状态、真实首用和后续结果。另用受控失败演练证明独立 supervisor 可回退；故障注入与自然问题分别标注。只运行预制的新二进制或人工手动替换版本，不构成 Meta 自动修改、编译和切换能力的完整证据。</p>
+<p>“主动检测能力已验证”另需至少一个未由 Lab/用户预先报告具体故障、由 Meta 独立发现并完成取证的真实案例，以及 O12 的检测质量报告。外部告知问题后成功修复可以证明修复闭环，不能代替自主检测证据。</p>
+<h3 id="设计完成与实施完成的区别">18. 设计完成与实施完成的区别</h3>
+<p>本次交付是版本 2.1 的系统设计。实施完成必须具备：三层边界可检查；领域中立入口；持久效果和预算正确；任务冻结要求可执行；Meta 独立巡检、主动取证和持续调查可运行；在授权内能实际修改；五类局部验收/恢复路径，包含开源 Codex harness 的自动源码修改、真实编译验收、版本切换、当前任务续跑与失败回退；受影响重算与原始数据复用；明确未决义务报告。Codex 自修改是主闭环实现要求，不后置到可选收益研究。</p>
+<p><strong>核心实施验收是系统实际修好了问题，并成功继续任务。</strong> 配对收益实验不属于这条闭环的必需条件；科学任务的最终完成条件也不会因修复验收通过而放宽。</p>
+<p>本次 Scientific Memory 修订增加通用科研对象、版本关系、按问题检索、观察/引用统一、新证据匹配与来源更正复核、研究行动回写和未结工作恢复。一致性约束还覆盖实际交付认证、Lab/Meta 工作路由、提交/派发期间的来源变化、活动机制绑定、停止与恢复；验收范围及阶段见 §16 和 SM01–SM20。本文中的接口、对象和检查仍是设计规格，不表示已有实现或已证明科研收益。</p>
+<h3 id="附录关键-reason_code">附录：关键 reason_code</h3>
+<pre class="text"><code>invalid_schema, invalid_command, invalid_dependency, dependency_cycle
+missing_information, authorization_required, frozen_requirement_violation
+unsupported_capability, unsupported_change, incompatible_artifact
+stale_version, duplicate_event, result_conflict, stale_model_action
+capacity_blocked, packet_unrepresentable, needs_narrowing
+dependency_pending, external_slot_busy, unknown_effect, change_conflict
+token_budget, compute_budget, tool_budget, wall_time_budget
+repair_allowance_exhausted, recovery_reserve_exhausted, optional_meta_credit
+discovery_backpressure, missing_validation_data, invalid_result_provenance
+inspection_due, inspection_incomplete, inspection_retry_exhausted
+evidence_unavailable, coverage_pending, stall_triage_exhausted
+acceptance_failed, continuation_blocked, continuation_failed
+protocol_incompatible, impact_unknown, recompute_required
+runtime_source_unavailable, runtime_scope_violation, runtime_build_failed
+runtime_contract_incompatible, runtime_session_incompatible, runtime_artifact_mismatch
+runtime_start_failed, runtime_health_timeout, runtime_generation_stale
+runtime_activation_pending, runtime_rollback_failed, runtime_checkpoint_incomplete
+promotion_stale_baseline, rollback_unresolved, storage_exhausted, stalled
+scientific_scope_unknown, evidence_not_delivered, support_check_pending
+memory_revision_conflict, memory_dependency_stale, memory_match_incomplete
+scientific_review_pending, test_commitment_late, investigation_binding_conflict
+memory_maintenance_deferred, memory_import_not_permitted
+memory_binding_incompatible, scientific_review_stale, source_tombstoned
+source_integrity_error, finalizing_no_new_inference</code></pre>
+<p>reason_code、对象 ID 和自然语言原因共同保存；默认报告不把工程可用性、科学达标和可选研究收益合并成一个 PASS。</p>
+</article>
+<footer class="footer"><span>RSI-Lab · 完整系统设计 v2.1 · 2026-11-08</span><span>单文件 HTML · Scientific Memory 已整合 · 设计待实现</span></footer></main>
+<script>
+document.querySelectorAll('article table').forEach(function(table){var wrap=document.createElement('div');wrap.className='table-scroll';wrap.setAttribute('tabindex','0');wrap.setAttribute('aria-label','可横向滚动的表格');table.parentNode.insertBefore(wrap,table);wrap.appendChild(table);});
+document.getElementById('print').addEventListener('click',function(){window.print();});
+document.querySelector('.mobile-nav').addEventListener('click',function(){var open=document.querySelector('.sidebar').classList.toggle('open');this.setAttribute('aria-expanded',String(open));this.textContent=open?'收起目录':'展开目录';});
+var links=Array.from(document.querySelectorAll('nav a'));var headings=links.map(function(a){return document.getElementById(decodeURIComponent(a.hash.slice(1)));}).filter(Boolean);var pending=false;
+function update(){pending=false;var current=headings[0];headings.forEach(function(h){if(h.getBoundingClientRect().top<=100)current=h;});links.forEach(function(a){a.classList.toggle('active',!!current&&decodeURIComponent(a.hash.slice(1))===current.id);});var max=document.documentElement.scrollHeight-window.innerHeight;document.querySelector('.progress').style.width=(Math.max(0,Math.min(1,max?window.scrollY/max:0))*(window.innerWidth-document.querySelector('.page').getBoundingClientRect().left))+'px';}
+window.addEventListener('scroll',function(){if(!pending){pending=true;requestAnimationFrame(update);}},{passive:true});window.addEventListener('resize',update);update();
+</script></body></html>

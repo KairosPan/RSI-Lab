@@ -4,7 +4,7 @@
 .idea/
 .vscode/
 
-# Local credentials and environment files
+# Credentials and local configuration
 .env
 .env.*
 !.env.example
@@ -15,7 +15,7 @@ secrets/
 *.pem
 *.key
 
-# Python environments and caches
+# Python and Node dependencies / caches
 .venv/
 venv/
 __pycache__/
@@ -23,20 +23,32 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-
-# Dependencies, data, model weights and run artifacts
 node_modules/
+.cache/
+.tools/
+
+# User datasets, experiments, model weights and generated reports
 data/
 datasets/
 weights/
 checkpoints/
 runs/
-.cache/
+reports/
+artifacts/
+output/
+.runtime/
 tmp/
 *.log
+*.jsonl
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
 
-# Local historical drafts; keep the current proposal and protocol
-output/pdf/
-output/docx/*
-!output/docx/RSI-Lab_Final_Proposal_Revised_v8.docx
-output/experiments/RSI-Lab_Experiment_Plan_v1_zh.md
+# Imported conversations, builds and browser captures stay local
+frontend/data/
+frontend/dist/
+frontend/docs/*.png
+.playwright-cli/

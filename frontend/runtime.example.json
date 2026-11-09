@@ -1,0 +1,86 @@
+{
+  "source": "demo",
+  "campaignId": "DEMO-SCHEMA",
+  "harness": "Demo Harness",
+  "observedAt": "2026-10-20T12:00:00.000Z",
+  "nodes": [
+    {
+      "id": "controller",
+      "status": "running",
+      "detail": "Schema example only. The live endpoint rejects demo sources. A real producer must supply source: live, actual process state, and current timestamps.",
+      "heartbeatAt": "2026-10-20T12:00:00.000Z",
+      "task": "Schema example only",
+      "metrics": [],
+      "events": [
+        {
+          "time": "2026-10-20T11:59:59.000Z",
+          "message": "Schema example only; no agent was started.",
+          "level": "info"
+        }
+      ]
+    },
+    {
+      "id": "lab",
+      "status": "idle",
+      "detail": "Example: waiting for authorized tool evidence.",
+      "heartbeatAt": "2026-10-20T12:00:00.000Z",
+      "task": "Schema example only",
+      "metrics": [],
+      "events": []
+    },
+    {
+      "id": "executor",
+      "status": "queued",
+      "detail": "Example: waiting for an authorized job.",
+      "heartbeatAt": "2026-10-20T12:00:00.000Z",
+      "task": "Schema example only",
+      "metrics": [],
+      "events": []
+    },
+    {
+      "id": "gnina",
+      "status": "idle",
+      "detail": "Example: no current docking job.",
+      "heartbeatAt": "2026-10-20T12:00:00.000Z",
+      "task": "Schema example only",
+      "metrics": [],
+      "events": []
+    },
+    {
+      "id": "posecheck",
+      "status": "error",
+      "detail": "Example: a pose check failed. This does not establish molecular inactivity.",
+      "heartbeatAt": "2026-10-20T12:00:00.000Z",
+      "task": "Schema example only",
+      "metrics": [],
+      "events": []
+    },
+    {
+      "id": "memory",
+      "status": "idle",
+      "detail": "Example: retain source evidence and open questions.",
+      "heartbeatAt": "2026-10-20T12:00:00.000Z",
+      "task": "Schema example only",
+      "metrics": [],
+      "events": []
+    },
+    {
+      "id": "meta",
+      "status": "queued",
+      "detail": "Example: wait for permitted, completed development traces.",
+      "heartbeatAt": "2026-10-20T12:00:00.000Z",
+      "task": "Schema example only",
+      "metrics": [],
+      "events": []
+    },
+    {
+      "id": "validator",
+      "status": "idle",
+      "detail": "Example: an authorized release affects future campaigns only.",
+      "heartbeatAt": "2026-10-20T12:00:00.000Z",
+      "task": "Schema example only",
+      "metrics": [],
+      "events": []
+    }
+  ]
+}
