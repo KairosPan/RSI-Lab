@@ -1187,7 +1187,10 @@ class Runtime:
                     result = self.execute_adapter(work['inputs']['capability_id'],
                         json.loads(work['inputs']['inputs_json']),trigger_id=work['id'],work_id=work['id'])
                 else:
-                    result = self.run_meta(work['id'], meta_executor, reservations)
+                    # A resumed prepared invocation keeps the reservation it
+                    # was admitted with; the caller's applies to new Work only.
+                    result = self.run_meta(work['id'], meta_executor,
+                                           effect['reservations'] if effect is not None else reservations)
             except (ValueError, KeyError) as exc:
                 # Admission checks happen before external work. Preserve the
                 # concrete reason and go on; elapsed time is not a retry signal.

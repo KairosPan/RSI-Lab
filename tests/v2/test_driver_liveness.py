@@ -233,6 +233,19 @@ class PreparedEffectTests(unittest.TestCase):
         self.assertEqual(store.list('r', 'agent_session', role='meta')[0]['status'], 'idle')
         store.verify_history('r')
 
+    def test_prepared_agent_effect_is_resumed_with_its_recorded_reservation(self):
+        store, controller, rt = open_run(self)
+        work = rt.enqueue_lab('lab-1')
+        effect = rt.prepare_meta(work['id'], RES)
+        self.assertEqual(effect['status'], 'prepared')
+        executor = Scripted({'lab': none})
+        out = Runtime(store, 'r').run_until_wait(executor, {'model_calls': 0, 'tokens': 0, 'wall_seconds': 2})
+        self.assertEqual(out['cancelled_prepared'], [])
+        self.assertEqual(store.get('r', 'effect', effect['id'])['status'], 'succeeded')
+        self.assertEqual(store.get('r', 'work', work['id'])['status'], 'succeeded')
+        self.assertEqual(executor.calls, ['lab'])
+        store.verify_history('r')
+
     def test_prepared_effect_the_driver_cannot_execute_is_reported(self):
         store, controller, rt = open_run(self)
         work = controller.enqueue('r', 'diagnostic', 'host-tool', 'w1')
