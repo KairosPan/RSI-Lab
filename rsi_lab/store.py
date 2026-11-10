@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import tempfile
 import time
 
 KINDS = ('issue', 'work', 'wait', 'request', 'delivery', 'effect', 'trial', 'capability',
@@ -87,24 +88,35 @@ class Store:
         raw = value if isinstance(value, bytes) else encode(value)
         key = digest(raw)
         path = self.blobs / key
-        if path.exists():
-            if path.read_bytes() != raw:
-                raise ValueError('Immutable blob mismatch')
-            return key
         try:
-            with path.open('xb') as stream:
+            if path.read_bytes() == raw:
+                return key
+        except FileNotFoundError:
+            pass
+        # Any other bytes under this name are a torn remnant of an interrupted
+        # write: the name is the hash of the correct content, so republish it.
+        # The temporary name is never 64 hex characters, so it is never a blob.
+        fd, temporary = tempfile.mkstemp(prefix='.tmp-', dir=self.blobs)
+        published = False
+        try:
+            with os.fdopen(fd, 'wb') as stream:
                 stream.write(raw)
                 stream.flush()
                 os.fsync(stream.fileno())
-            path.chmod(0o444)
-            fd = os.open(self.blobs, os.O_RDONLY)
+            os.chmod(temporary, 0o444)
+            os.replace(temporary, path)
+            published = True
+            directory = os.open(self.blobs, os.O_RDONLY)
             try:
-                os.fsync(fd)
+                os.fsync(directory)
             finally:
-                os.close(fd)
-        except FileExistsError:
-            if path.read_bytes() != raw:
-                raise ValueError('Concurrent immutable blob mismatch')
+                os.close(directory)
+        finally:
+            if not published:
+                try:
+                    os.unlink(temporary)
+                except FileNotFoundError:
+                    pass
         return key
 
     def read_blob(self, key):
@@ -133,16 +145,27 @@ class Store:
         rows = [json.loads(row[0]) for row in self.db.execute(query, parameters)]
         return [row for row in rows if all(row.get(k) == v for k, v in filters.items())]
 
-    def mutate(self, run_id, key, event_type, fn, payload=None):
-        """Commit event, all projection changes and outbox intent in one transaction."""
+    def mutate(self, run_id, key, event_type, fn, payload=None, *, run_config=None):
+        """Commit event, all projection changes and outbox intent in one transaction.
+
+        With run_config, the run row is created in the same transaction when it
+        does not exist yet, and must otherwise carry exactly that configuration.
+        """
         if not isinstance(key, str) or not key or not isinstance(event_type, str) or not event_type:
             raise ValueError('An operation key and event type are required')
         # Callbacks must not be able to mutate the input identity after it was
         # fingerprinted, including through a captured nested input object.
         payload = json.loads(encode({} if payload is None else payload))
         fingerprint = digest({'event_type': event_type, 'payload': payload})
+        if run_config is not None:
+            run_config = json.loads(encode(run_config))
         self.db.execute('BEGIN IMMEDIATE')
         try:
+            if run_config is not None:
+                if self.db.execute('SELECT 1 FROM runs WHERE id=?', (run_id,)).fetchone() is None:
+                    self.create_run(run_id, run_config)
+                elif self.run(run_id)['config_hash'] != digest(run_config):
+                    raise ValueError('Run already exists with a different configuration')
             config = self.run(run_id)
             previous = self.db.execute('SELECT * FROM events WHERE run_id=? AND operation_key=?', (run_id, key)).fetchone()
             if previous is not None:
