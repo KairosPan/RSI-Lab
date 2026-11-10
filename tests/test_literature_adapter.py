@@ -129,6 +129,83 @@ class LiteratureAdapterTests(unittest.TestCase):
         self.runtime.recover_adapters()
         self.assertEqual(len(self.store.list(self.run, 'fact')), 1)
 
+    def test_recovered_original_can_back_cache_without_relaxing_receipt_checks(self):
+        real_execute = adapter._execute
+        def lose_outer_receipt(effect, raw):
+            real_execute(effect, raw)
+            raise RuntimeError('Crash after durable original receipt')
+        with patch.object(adapter, '_fetch', return_value=self.response()) as fetch:
+            with patch.object(adapter, '_execute', side_effect=lose_outer_receipt):
+                pending = self.runtime.execute_adapter(adapter.ADAPTER_ID, self.inputs, trigger_id='original-crash')
+            original = pending['effect']
+            self.assertEqual(original['status'], 'unknown')
+            receipt = adapter.recover_receipt(str(self.root), self.run, original['id'])
+            settled = self.runtime.controller.reconcile(self.run, original['id'], receipt, 'recover-original')
+            source = self.runtime.publish_adapter_effect(settled)
+            cached = self.runtime.execute_adapter(adapter.ADAPTER_ID, self.inputs, trigger_id='after-recovery')
+            self.assertEqual(fetch.call_count, 1)
+        self.assertTrue(cached['result']['cache_hit'])
+        self.assertEqual(cached['result']['source_receipt_ref'], settled['result_ref'])
+        self.assertEqual(cached['result']['source_group_id'], source['source_group_id'])
+        self.assertEqual(cached['result']['records'], source['records'])
+        self.assertEqual(self.store.get(self.run, 'budget', 'tool_calls')['spent'], 2)
+
+        # Additive recovery provenance may differ; original cost/result bytes may not.
+        path = self.root / 'literature_calls' / original['id'] / 'receipt.json'
+        saved = path.read_bytes()
+        for field in ('wall_seconds', 'retrieved_at_utc'):
+            with self.subTest(field=field):
+                changed = json.loads(saved)
+                if field == 'wall_seconds':
+                    changed['actual_costs'][field] += 1
+                else:
+                    changed['result'][field] = 'altered retrieval timestamp'
+                path.write_bytes(encode(changed))
+                with self.assertRaisesRegex(ValueError, 'differs from the immutable ledger result'):
+                    adapter.prepare(self.inputs)
+                path.write_bytes(saved)
+
+    def test_cancelled_prepared_request_keeps_its_topic_and_external_quota_available(self):
+        root = self.root / 'cancel-cap-one'
+        store = Store(root)
+        self.addCleanup(store.close)
+        controller = Controller(store)
+        controller.initialize('cancel-cap-one', budgets={key: {'limit': value, 'hard': key.endswith('_calls')}
+            for key, value in {'model_calls': 0, 'tokens': 0, 'tool_calls': 8,
+                               'wall_seconds': 1000, 'cpu_seconds': 100}.items()},
+            config={'research_features': {'literature': True}, 'literature_run_root': str(root), 'literature_max_calls': 1})
+        runtime = Runtime(store, 'cancel-cap-one', adapters=[adapter.make_adapter()])
+        inputs = {**self.inputs, 'run_root': str(root), 'run_id': 'cancel-cap-one'}
+        work = controller.enqueue('cancel-cap-one', 'diagnostic', 'prepare-only', 'prepare-only')
+        packet = adapter.prepare(inputs)
+        effect = controller.prepare_effect('cancel-cap-one', work['id'], adapter.EFFECT_KIND, packet,
+            adapter.RESERVATIONS, 'prepared', metadata={'adapter_id': adapter.ADAPTER_ID, 'adapter_version': adapter.VERSION})
+        cancelled = controller.cancel_prepared('cancel-cap-one', effect['id'], 'Replan before sending', 'cancel')
+        self.assertEqual(cancelled['status'], 'failed_definite')
+        self.assertTrue(json.loads(store.read_blob(cancelled['result_ref']))['never_dispatched'])
+        self.assertEqual(store.get('cancel-cap-one', 'budget', 'tool_calls')['spent'], 0)
+        self.assertEqual(adapter.prepare(inputs)['external_request_ordinal'], 1)
+        with patch.object(adapter, '_fetch', return_value=self.response()) as fetch:
+            first = runtime.execute_adapter(adapter.ADAPTER_ID, inputs, trigger_id='first-actual-request')
+            cached = runtime.execute_adapter(adapter.ADAPTER_ID, inputs, trigger_id='cache')
+            self.assertEqual(fetch.call_count, 1)
+        self.assertFalse(first['result']['cache_hit'])
+        self.assertTrue(cached['result']['cache_hit'])
+        with self.assertRaisesRegex(ValueError, 'external-request cap exhausted'):
+            adapter.prepare({**inputs, 'topic': 'molecular_diversity'})
+
+    def test_never_dispatched_flag_without_bound_controller_receipt_cannot_erase_failure(self):
+        response = self.response()
+        response.update(http_status=429, raw=b'Too many requests')
+        failed, fetch = self.execute(response)
+        self.assertEqual(fetch.call_count, 1)
+        effect = failed['effect']
+        # An unsupported flag is not proof that the failed external attempt did not happen.
+        self.store.mutate(self.run, 'unsupported-no-dispatch-flag', 'fixture',
+            lambda tx: tx.update('effect', effect['id'], {'never_dispatched': True}))
+        with self.assertRaisesRegex(ValueError, 'already has a request that failed'):
+            adapter.prepare(self.inputs)
+
     def test_interrupted_marker_is_not_resent(self):
         def interrupted(effect, raw):
             packet = json.loads(raw)

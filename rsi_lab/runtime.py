@@ -537,11 +537,30 @@ class Runtime:
             wait = self._park(iid, dep, key + ':park', deadline=deadline, expiry='ask_user')
             return {'build_intent_id': intent['id'], 'work_id': work['id'], 'wait_id': wait['id']}
         if action == 'request_diagnostic':
-            dep = c.dependency(run, base, p['capability_id'], {'status': 'pending'}, key + ':dependency')
-            work = c.enqueue(run, 'diagnostic', base, key + ':work',
-                inputs={**p, 'issue_id': iid, 'dependency_id': base,
-                    **({'lab_continuation': True, 'source_proposal_id': proposal['id']}
-                       if command['mode'] == 'lab' else {})})
+            inputs = {**p, 'issue_id': iid, 'dependency_id': base,
+                **({'lab_continuation': True, 'source_proposal_id': proposal['id']}
+                   if command['mode'] == 'lab' else {})}
+            if self.improvements and proposal.get('research_response', {}).get('recommendation_responses'):
+                def create_diagnostic(tx):
+                    previous = tx.find('dependency', id=base)
+                    if previous:
+                        if previous[0]['producer'] != p['capability_id']:
+                            raise ValueError('Diagnostic dependency producer changed')
+                    else:
+                        value = {'status': 'pending'}
+                        tx.insert('dependency', base, {'producer': p['capability_id'], 'value': value,
+                            'content_hash': digest(value), 'revision': 1})
+                    return c._work(tx, None, 'diagnostic', base, inputs=inputs)
+                # A stale recommendation must roll back both the dependency
+                # and the runnable Work, not merely reject the adoption label.
+                self.improvements.apply_responses(proposal, None, create_result=create_diagnostic)
+                # Older successful response transactions returned None. Their
+                # stable Work identity still makes recovery backward compatible.
+                work = self.store.get(run, 'work', identity('work', None, 'diagnostic', base))
+                dep = self.store.get(run, 'dependency', base)
+            else:
+                dep = c.dependency(run, base, p['capability_id'], {'status': 'pending'}, key + ':dependency')
+                work = c.enqueue(run, 'diagnostic', base, key + ':work', inputs=inputs)
             if iid:
                 self._park(iid, dep, key + ':park', deadline=deadline)
             return work

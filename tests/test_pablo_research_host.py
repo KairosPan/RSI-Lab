@@ -1,6 +1,8 @@
 """Research entrypoint accounting, frozen ancestry and domain projection checks."""
 import argparse
 import copy
+import contextlib
+import io
 import json
 from pathlib import Path
 import unittest
@@ -11,6 +13,8 @@ from scripts import run_pablo_research as host
 from rsi_domains.pablo import adapter, oracle
 from rsi_domains.pablo.research import project_measurement, registered_adapters, research_policy
 from rsi_lab.store import Store, digest, encode
+from rsi_lab.controller import Controller
+from tests.v2.test_improvements import FakeModel
 
 
 class ResearchHostTests(unittest.TestCase):
@@ -119,6 +123,89 @@ class ResearchHostTests(unittest.TestCase):
             store.mutate('research-child', 'empty-queue-fixture', 'fixture', empty_queue)
             self.assertEqual(runtime.controller.ready('research-child'), [])
             self.assertIn('open issue', host.finalization_problem(runtime))
+        finally:
+            store.close()
+
+    def test_known_failed_final_interpretation_stops_and_resume_does_not_resend(self):
+        args = self.args()
+        host.prepare(args)
+        store = Store(self.child)
+        try:
+            runtime = host.make_runtime(store, args.run_id)
+            inputs = {'run_root': str(self.child), 'run_id': args.run_id,
+                      'candidates': ['mol-301', 'mol-302']}
+            model = FakeModel('request_diagnostic', {'capability_id': adapter.ADAPTER_ID,
+                'capability_version': adapter.VERSION, 'inputs_json': json.dumps(inputs)})
+            def lab_decision(effect, raw):
+                receipt = model(effect, raw)
+                receipt.pop('synthetic')
+                receipt['native_writer_quiesced'] = True
+                return receipt
+            lab = next(w for w in runtime.controller.ready(args.run_id) if w['kind'] == 'lab')
+            proposed = runtime.run_lab(lab['id'], lab_decision, runtime.config['model_reservation'])
+            diagnostic = json.loads(store.read_blob(proposed['proposal']['result_ref']))
+            with patch.object(oracle, 'score', return_value=0.25):
+                scored = runtime.execute_adapter(adapter.ADAPTER_ID, inputs, trigger_id='quota',
+                                                  work_id=diagnostic['id'])
+            self.assertEqual(scored['effect']['status'], 'succeeded')
+            self.assertEqual(adapter.read_progress(store, args.run_id)['remaining_evaluations'], 0)
+            self.assertEqual(runtime.scientific_memory.review_report()['pending_count'], 1)
+        finally:
+            store.close()
+
+        calls, failures, final_work_ids, final_enqueues = [], [], set(), []
+        ordinary = FakeModel('no_action', {'reason': 'The recorded result still needs a later interpretation'})
+        original_enqueue = Controller.enqueue
+        def observe_enqueue(controller, *a, **kw):
+            work = original_enqueue(controller, *a, **kw)
+            if len(a) > 3 and a[3].startswith('final-memory:'):
+                final_enqueues.append(work['id'])
+                final_work_ids.add(work['id'])
+                # Fail promptly on the old busy loop instead of hanging the suite.
+                if len(final_enqueues) > 1:
+                    raise AssertionError('Repeated final-memory enqueue after a known failed call')
+            return work
+        def executor(effect, raw):
+            calls.append(effect['id'])
+            if effect['work_id'] not in final_work_ids:
+                receipt = ordinary(effect, raw)
+                receipt.pop('synthetic')
+                receipt['native_writer_quiesced'] = True
+                return receipt
+            failures.append(effect['id'])
+            return {'status': 'failed_definite', 'terminal_received': True, 'protocol_valid': True,
+                'native_writer_quiesced': True, 'actual_costs': {'model_calls': 1, 'tokens': 25, 'wall_seconds': 0.01},
+                'sent_packet_sha256': digest(raw), 'sent_prompt_sha256': digest(json.loads(raw)['prompt'].encode()),
+                'response': None, 'error': 'Synthetic known provider failure'}
+        with patch.object(host, 'CodexExecutor', return_value=executor), \
+                patch.object(Controller, 'enqueue', observe_enqueue), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(host.drive(args), 2)
+        self.assertEqual(len(failures), 1)
+        self.assertEqual(len(final_enqueues), 1)
+        attention = json.loads((self.child / 'attention.json').read_text())
+        self.assertIn('Final review failed; explicit disposition', attention['reason'])
+        self.assertEqual(attention['status'], 'needs_attention')
+        self.assertFalse((self.child / 'result.json').exists())
+        store = Store(self.child)
+        try:
+            runtime = host.make_runtime(store, args.run_id)
+            progress = host.final_review_progress(runtime)
+            self.assertEqual(progress['model_calls'], len(calls), 'Failed calls also consume the final allowance')
+            self.assertEqual(progress['failed_work_id'], final_enqueues[0])
+            self.assertEqual(runtime.scientific_memory.review_report()['pending_count'], 1)
+            history = store.verify_history(args.run_id)
+            budget = store.get(args.run_id, 'budget', 'model_calls')
+        finally:
+            store.close()
+        with patch.object(host, 'CodexExecutor', side_effect=lambda *a, **kw:
+                lambda *call: self.fail('Resume must not resend a failed interpretation')), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(host.drive(args), 2)
+        store = Store(self.child)
+        try:
+            self.assertEqual(store.verify_history(args.run_id), history)
+            self.assertEqual(store.get(args.run_id, 'budget', 'model_calls'), budget)
         finally:
             store.close()
 

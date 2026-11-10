@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from rsi_lab.controller import Controller
 from rsi_lab.packets import PacketBuilder, make_evidence
@@ -321,6 +322,107 @@ class ScientificMemoryTests(unittest.TestCase):
         self.assertEqual(report['interpreted_count'], 0)
         self.assertEqual(report['deferred_count'], 1)
         self.assertEqual(report['deferred'][0]['status'], 'deferred')
+
+    def test_interpretation_uses_current_decision_revision_across_replay_and_import(self):
+        e, pub = self.publication()
+        self.memory.observe_publication(e, pub)
+        inv = self.memory.read_history(kind='investigation')[0]
+        refs = [{'id': inv['id'], 'revision': 1, 'relation': 'derived_from'}]
+        target_store, target = self.target()
+        contents = [
+            {'decision': 'Record the result interpretation', 'scope': {},
+             'result_interpretation': 'B did not improve the measured baseline'},
+            {'decision': 'Withdraw the prior interpretation until controls are available', 'scope': {}},
+            {'decision': 'Defer the interpretation', 'scope': {},
+             'result_interpretation': 'Matched controls are still missing', 'result_disposition': 'deferred'},
+            {'decision': 'Record a revised interpretation', 'scope': {},
+             'result_interpretation': 'The result only describes the delivered experimental scope'}]
+        expected_states = ['interpreted', 'awaiting_interpretation', 'deferred', 'interpreted']
+        for previous_revision, (content, expected) in enumerate(zip(contents, expected_states)):
+            with self.subTest(revision=previous_revision + 1):
+                update = self.update('review-current', kind='decision', revision=previous_revision,
+                    sources=['result-1'], refs=refs, content=content)
+                effect, packet, response = self.model_call([update], evidence_ids=['result-1'])
+                result = self.memory.apply_updates(effect, packet, response)
+                self.assertEqual(result['status'], 'applied')
+                self.assertEqual(result, self.memory.apply_updates(effect, packet, response))
+                bundle = self.memory.export_bundle()
+                imported = target.import_bundle(bundle)
+                self.assertEqual(imported, target.import_bundle(bundle))
+                for memory in (self.memory, target):
+                    state = memory._interpretation(memory.get(inv['id']))
+                    self.assertEqual(state['status'], expected)
+                    self.assertEqual(state['decision_refs'], [] if expected == 'awaiting_interpretation' else
+                                     [{'id': 'review-current', 'revision': previous_revision + 1}])
+                    report = memory.review_report(include_historical=True)
+                    self.assertEqual(report['pending_count'], int(expected == 'awaiting_interpretation'))
+                    self.assertEqual(report['deferred_count'], int(expected == 'deferred'))
+                    self.assertEqual(report['interpreted_count'], int(expected == 'interpreted'))
+                    context = memory.prepare_context('lab', [], query={'object_ids': [inv['id']]}, budget=100000)
+                    card = next(r for r in context['objects'] if r['id'] == inv['id'])
+                    self.assertEqual(card['interpretation']['status'], expected)
+        # Superseded index rows remain available for audit, including the
+        # original interpretation and the later deferral.
+        for memory in (self.memory, target):
+            rows = memory._rows('scientific_memory_interpretation')
+            self.assertEqual(len(rows), 3)
+            self.assertEqual({r['decision_ref']['revision'] for r in rows}, {1, 3, 4})
+        self.store.verify_history('r')
+        target_store.verify_history('next')
+
+    def test_interpretation_reopens_when_its_additional_source_needs_review(self):
+        e, pub = self.publication()
+        self.memory.observe_publication(e, pub)
+        inv = self.memory.read_history(kind='investigation')[0]
+        decision = self.update('review-with-control', kind='decision', sources=['result-1', 'f1'],
+            refs=[{'id': inv['id'], 'revision': 1, 'relation': 'derived_from'}],
+            content={'decision': 'Interpret against the supplied control', 'scope': {},
+                     'result_interpretation': 'The control supports this bounded comparison'})
+        self.assertEqual(self.apply(decision, evidence_ids=['result-1', 'f1'])['status'], 'applied')
+        self.assertEqual(self.memory.review_report()['interpreted_count'], 1)
+        self.memory.mark_source_changed('f1', reason='The additional control requires correction')
+        # The investigation's own result is unchanged; the decision dependency
+        # must still reopen its review instead of permanently closing it.
+        self.assertEqual(self.memory._freshness(inv), 'current')
+        self.assertEqual(self.memory._freshness(self.memory.get('review-with-control')), 'needs_review')
+        report = self.memory.review_report()
+        self.assertEqual(report['interpreted_count'], 0)
+        self.assertEqual(report['pending_count'], 1)
+        self.assertEqual(report['pending'][0]['id'], inv['id'])
+        self.assertEqual(len(self.memory._rows('scientific_memory_interpretation')), 1)
+
+    def test_interpretation_requires_current_and_available_dependency_closure(self):
+        self.assertEqual(self.apply(self.update('control-claim'))['status'], 'applied')
+        e, pub = self.publication()
+        self.memory.observe_publication(e, pub)
+        inv = self.memory.read_history(kind='investigation')[0]
+        # Incorporate the newly observed result so this claim is initially
+        # current, then use it as a decision's separate dependency.
+        claim = self.update('control-claim', revision=1, sources=['f1', 'result-1'])
+        self.assertEqual(self.apply(claim, evidence_ids=['f1', 'result-1'])['status'], 'applied')
+        decision = self.update('review-with-claim', kind='decision', sources=['result-1'],
+            refs=[{'id': inv['id'], 'revision': 1, 'relation': 'derived_from'},
+                  {'id': 'control-claim', 'revision': 2, 'relation': 'context'}],
+            content={'decision': 'Interpret using the supplied claim', 'scope': {},
+                     'result_interpretation': 'This decision depends on the recorded comparison'})
+        self.assertEqual(self.apply(decision, evidence_ids=['result-1', 'f1'])['status'], 'applied')
+        self.assertEqual(self.memory.review_report()['interpreted_count'], 1)
+        missing = self.store.get('r', 'fact', 'f1')['content_ref']
+        read_blob = self.store.read_blob
+        def unavailable(key):
+            if key == missing:
+                raise FileNotFoundError('Synthetic unavailable dependency source')
+            return read_blob(key)
+        with patch.object(self.store, 'read_blob', side_effect=unavailable):
+            self.assertEqual(self.memory.review_report()['interpreted_count'], 0)
+            self.assertEqual(self.memory.review_report()['pending_count'], 1)
+        self.assertEqual(self.memory.review_report()['interpreted_count'], 1)
+        revised = self.update('control-claim', revision=2, sources=['f1', 'result-1'],
+            content={'statement': 'The prior comparison needs a different scope', 'scope': {}, 'judgment': 'tentative'})
+        self.assertEqual(self.apply(revised, evidence_ids=['result-1', 'f1'])['status'], 'applied')
+        self.assertEqual(self.memory._freshness(inv), 'current')
+        self.assertEqual(self.memory.review_report()['interpreted_count'], 0)
+        self.assertEqual(self.memory.review_report()['pending_count'], 1)
 
 
 if __name__ == '__main__':

@@ -120,20 +120,30 @@ class ImprovementLoop:
                 'source_evidence_ids':command['evidence_ids'], 'recommendation_fact_id':fid,
                 'defer_count':0, 'response_fact_ids':[], 'fingerprint':digest({
                     'payload':command['payload'],'evidence_ids':sorted(command['evidence_ids'])})})
-            if not any(w['status'] in {'ready','leased'} for w in tx.find('work',kind='lab')):
-                self.runtime.controller._work(tx,None,'lab','recommendation:'+rid,
-                    inputs={'evidence_ids':command['evidence_ids'], 'required_evidence_ids':command['evidence_ids']})
+            # Existing Lab packets may already be frozen, even while their
+            # Work is still ready immediately before the preparation CAS.
+            # A dedicated idempotent notification guarantees a later consumer.
+            self.runtime.controller._work(tx,None,'lab','recommendation:'+rid,
+                inputs={'evidence_ids':command['evidence_ids'],
+                        'required_evidence_ids':command['evidence_ids'], 'recommendation_id':rid})
             return row
         return self.runtime._mutate('route:'+proposal['id']+':recommendation','recommendation_proposed',apply,
                                     {'proposal_id':proposal['id']})
 
-    def apply_responses(self, proposal, result):
+    def apply_responses(self, proposal, result, *, create_result=None):
+        """Commit response CAS and any diagnostic outbox creation together.
+
+        ``create_result`` is a trusted controller callback, never model input.
+        The same operation key also lets the normal post-route hook replay an
+        already committed atomic route without reapplying the memory transition.
+        """
         extension = proposal.get('research_response', {})
         responses = extension.get('recommendation_responses', [])
         reviews = extension.get('improvement_reviews', [])
         if not responses and not reviews:
             return
         def apply(tx):
+            routed_result = create_result(tx) if create_result is not None else result
             for item in responses:
                 row = tx.get('registration',item['recommendation_id'])
                 if row['version'] != item['expected_version']:
@@ -146,8 +156,16 @@ class ImprovementLoop:
                 change = {'status':{'adopt':'adopted','decline':'declined','defer':'deferred'}[decision],
                           'lab_proposal_id':proposal['id'], 'lab_effect_id':proposal['effect_id'],
                           'response_fact_ids':row['response_fact_ids']+[fid]}
+                # A normal Lab Work can consume this advice before its dedicated
+                # notification starts. Retire only untouched notifications for
+                # this recommendation; a leased packet remains immutable.
+                for pending in tx.find('work', kind='lab', status='ready'):
+                    if pending['inputs'].get('recommendation_id') == row['id']:
+                        tx.update('work',pending['id'],{'status':'cancelled',
+                            'outcome_ref':tx.blob({'recommendation_id':row['id'],
+                                'response_proposal_id':proposal['id']})})
                 if decision == 'adopt':
-                    work = tx.get('work',result['id'])
+                    work = tx.get('work',routed_result['id'])
                     if work['kind'] != 'diagnostic' or work['inputs'].get('source_proposal_id') != proposal['id']:
                         raise ValueError('Adoption has no exact same-call diagnostic work')
                     change['tool_work_id'] = work['id']
@@ -156,9 +174,9 @@ class ImprovementLoop:
                     final = tx.get('effect',proposal['effect_id'])['metadata'].get('final_review_only')
                     if change['defer_count'] >= 2 or final:
                         change['status'] = 'deferred_closed'
-                    elif proposal['command']['action'] != 'request_diagnostic' and not any(w['status'] == 'ready' for w in tx.find('work',kind='lab')):
+                    elif proposal['command']['action'] != 'request_diagnostic':
                         self.runtime.controller._work(tx,None,'lab','recommendation-reconsider:'+row['id'],
-                            inputs={'evidence_ids':row['source_evidence_ids']})
+                            inputs={'evidence_ids':row['source_evidence_ids'], 'recommendation_id':row['id']})
                 tx.update('registration',row['id'],change)
             for item in reviews:
                 row = tx.get('registration',item['recommendation_id'])
@@ -170,8 +188,9 @@ class ImprovementLoop:
                                   'scientific_status':'unverified','causal_benefit':'not_established'}})
                 tx.update('registration',row['id'],{'status':'reviewed','review_proposal_id':proposal['id'],
                     'review_fact_id':fid,'review':item,'causal_benefit':'not_established'})
-        self.runtime._mutate('route:'+proposal['id']+':research-responses','research_responses_applied',apply,
-                             {'proposal_id':proposal['id']})
+            return routed_result
+        return self.runtime._mutate('route:'+proposal['id']+':research-responses','research_responses_applied',apply,
+                                    {'proposal_id':proposal['id']})
 
     def publication(self, effect, publication):
         rows = [r for r in self.rows() if r.get('tool_work_id') == effect['work_id']]

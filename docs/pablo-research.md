@@ -35,6 +35,8 @@ PABLO 的建议类别与限制由 `rsi_domains/pablo/research.py` 中的 `resear
 
 最终复核开关由 PABLO 宿主负责：`mark_final_reviews()` 先从已成功结算的真实评分回执重建进度，只有本段新增额度归零才设置 `final_review_only`。核心只执行通用的复核动作限制，领域解释来自配置中的 `final_review_guidance`。尚未达到评分额度时，宿主拒绝提前进入最终复核，且不修改现有 Work。
 
+最终复核额度按实际模型调用计数，已明确失败的调用也计入。最新复核失败时，宿主保存 `needs_attention` 并退出，保留待解释结果及费用；再次启动不会重复发送该调用或反复排入同一个失败 Work。后续复核需要宿主显式安排新工作。撤回解释或其依赖失效后，Scientific Memory 会重新报告待复核；旧解释保留在历史中。
+
 ## 科学记忆
 
 `rsi_lab/scientific_memory.py` 使用同一事件账本存储六类有类型的对象：question、evidence、claim、investigation、method_experience、decision。修订追加、旧版本保留；当前 head 通过预期 revision 检查更新。它们与角色私有工作记忆分开。

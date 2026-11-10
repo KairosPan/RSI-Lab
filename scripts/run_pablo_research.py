@@ -278,6 +278,29 @@ def finalization_problem(runtime):
     return None
 
 
+def final_review_progress(runtime):
+    """Count actual final-review calls and expose the latest known failure.
+
+    A failed interpretation needs explicit disposition, not another enqueue of
+    the same idempotent Work. A later host-authorized review can supersede that
+    failure, while every consumed call remains in the allowance.
+    """
+    store, run = runtime.store, runtime.run_id
+    calls, latest = 0, {}
+    for work in sorted(store.list(run, 'work'), key=lambda w: w['created_seq']):
+        if not work['inputs'].get('final_review_only') or not work.get('effect_id'):
+            continue
+        effect = store.get(run, 'effect', work['effect_id'])
+        if effect['kind'] not in {'lab', 'meta'}:
+            continue
+        calls += effect.get('actual_costs', {}).get('model_calls',
+            int(effect['status'] in {'dispatching', 'unknown'}))
+        role = 'lab' if work['kind'] == 'lab' else 'meta'
+        latest[(role, work.get('issue_id'))] = work
+    failure = next((w for w in latest.values() if w['status'] == 'failed'), None)
+    return {'model_calls': calls, 'failed_work_id': failure['id'] if failure else None}
+
+
 def drive(args):
     root = args.root.resolve(strict=True)
     lock = (root / 'host.lock').open('a+')
@@ -303,8 +326,11 @@ def drive(args):
                 mark_final_reviews(runtime)
                 ready_models = [w for w in runtime.controller.ready(args.run_id)
                                 if w['kind'] in {'lab', 'meta_discovery', 'meta_disposition', 'disposition'}]
-                final_calls = sum(bool(w['inputs'].get('final_review_only')) and w['status'] == 'succeeded'
-                                  for w in store.list(args.run_id, 'work'))
+                review_progress = final_review_progress(runtime)
+                if review_progress['failed_work_id']:
+                    raise RuntimeError('Final review failed; explicit disposition is required for Work '
+                                       + review_progress['failed_work_id'])
+                final_calls = review_progress['model_calls']
                 if ready_models and final_calls >= runtime.config['final_review_max_calls']:
                     raise RuntimeError('Final review allowance exhausted; outstanding work remains explicit')
                 if not ready_models:

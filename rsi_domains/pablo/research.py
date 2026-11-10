@@ -64,6 +64,20 @@ def project_measurement(effect, publication):
     return metrics
 
 
+def _cancelled_before_scoring(store, effect):
+    """Recognize a bound controller cancellation, never an attempted failure."""
+    if (effect['status'] != 'failed_definite' or effect.get('never_dispatched') is not True
+            or effect.get('accounting_unknown') is not False
+            or any(effect.get('held_reservations', {}).values())
+            or effect.get('actual_costs') != {name: 0 for name in effect['reservations']}):
+        return False
+    receipt = json.loads(store.read_blob(effect['result_ref']))
+    return (receipt.get('status') == 'failed_definite' and receipt.get('never_dispatched') is True
+            and receipt.get('effect_id') == effect['id'] and receipt.get('packet_hash') == effect['packet_hash']
+            and receipt.get('provenance') == 'controller_prepared_state_transaction'
+            and receipt.get('actual_costs') == effect['actual_costs'])
+
+
 def project_publication(store, run_id, effect, publication):
     if effect is None or effect.get('metadata', {}).get('adapter_id') != adapter.ADAPTER_ID:
         return {'identities': []}
@@ -78,6 +92,8 @@ def project_publication(store, run_id, effect, publication):
     for previous in adapter._effects(store, run_id):
         if previous['created_seq'] >= effect['created_seq']:
             break
+        if _cancelled_before_scoring(store, previous):
+            continue
         if previous['status'] != 'succeeded' or previous.get('accounting_unknown'):
             raise ValueError('Scientific memory cannot interpret scores across an unsettled predecessor')
         result = json.loads(store.read_blob(previous['result_ref']))['result']

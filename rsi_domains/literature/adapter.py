@@ -68,16 +68,41 @@ def _cache_source(store, effect, source_packet):
     receipt = json.loads(store.read_blob(effect['result_ref']))
     folder = store.root / 'literature_calls' / effect['id']
     local = _validate_saved(folder, effect, source_packet)
-    if local != receipt:
+    # Reconciliation adds provenance to the immutable execution receipt; it
+    # does not change the response or its measured costs. Accept only that
+    # exact, effect-bound enrichment, not arbitrary differences in either copy.
+    if (local != {key: value for key, value in receipt.items() if key != 'reconciliation'}
+            or ('reconciliation' in receipt
+                and receipt['reconciliation'] != _reconciliation(effect['id'], local))):
         raise ValueError('Cached literature receipt differs from the immutable ledger result')
     return receipt
+
+
+def _reconciliation(effect_id, receipt):
+    return {'effect_id': effect_id, 'provenance': {
+        'kind': 'complete_local_literature_receipt', 'receipt_sha256': digest(receipt),
+        'response_sha256': receipt['result']['response_sha256'], 'network_resent': False}}
+
+
+def _cancelled_before_dispatch(store, effect):
+    """Only the controller's bound zero-cost cancellation releases query quota."""
+    if (effect['status'] != 'failed_definite' or effect.get('never_dispatched') is not True
+            or effect.get('accounting_unknown') is not False
+            or any(effect.get('held_reservations', {}).values())
+            or effect.get('actual_costs') != {name: 0 for name in effect['reservations']}):
+        return False
+    receipt = json.loads(store.read_blob(effect['result_ref']))
+    return (receipt.get('status') == 'failed_definite' and receipt.get('never_dispatched') is True
+            and receipt.get('effect_id') == effect['id'] and receipt.get('packet_hash') == effect['packet_hash']
+            and receipt.get('provenance') == 'controller_prepared_state_transaction'
+            and receipt.get('actual_costs') == effect['actual_costs'])
 
 
 def _packet(store, inputs, exclude_effect=None):
     config = _configuration(store, inputs['run_id'])
     prior = sorted((e for e in store.list(inputs['run_id'], 'effect')
              if e.get('metadata', {}).get('adapter_id') == ADAPTER_ID
-             and e['id'] != exclude_effect and e['status'] != 'cancelled'), key=lambda e: e['created_seq'])
+             and e['id'] != exclude_effect and not _cancelled_before_dispatch(store, e)), key=lambda e: e['created_seq'])
     if any(e['status'] in {'prepared', 'dispatching', 'unknown'} or e.get('accounting_unknown') for e in prior):
         raise ValueError('An earlier literature request is unresolved; reconcile before another request')
     packets = {e['id']: json.loads(store.read_blob(e['packet_ref'])) for e in prior}
@@ -410,9 +435,7 @@ def recover_receipt(run_root, run_id, effect_id):
         receipt = _validate_saved(folder, effect, packet)
         if receipt['status'] == 'unknown':
             return None
-        return {**receipt, 'reconciliation': {'effect_id': effect_id, 'provenance': {
-            'kind': 'complete_local_literature_receipt', 'receipt_sha256': digest(receipt),
-            'response_sha256': receipt['result']['response_sha256'], 'network_resent': False}}}
+        return {**receipt, 'reconciliation': _reconciliation(effect_id, receipt)}
     finally:
         store.close()
 

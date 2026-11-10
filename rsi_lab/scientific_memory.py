@@ -325,10 +325,34 @@ class ScientificMemory:
     def _historical(self, record):
         return record['origin_run_id'] != self.run_id or bool(record['content'].get('origin', {}).get('historical'))
 
-    def _interpretation(self, record, rows=None):
+    def _interpretation(self, record, rows=None, *, changes=None, pending_reviews=None):
         rows = self._rows('scientific_memory_interpretation') if rows is None else rows
-        matches = [r for r in rows if r['investigation_id'] == record['id']
-                   and r['investigation_revision'] == record['revision']]
+        matches = []
+        for row in rows:
+            if row['investigation_id'] != record['id'] or row['investigation_revision'] != record['revision']:
+                continue
+            # Interpretation rows are an immutable audit index, not permanent
+            # completion authority. A later decision may withdraw/defer its
+            # interpretation, or its evidence/dependencies may need review.
+            ref = row['decision_ref']
+            try:
+                head = self._head(ref['id'])
+                if head is None or head['revision'] != ref['revision']:
+                    continue
+                decision = self.get(ref['id'], ref['revision'])
+                content = decision['content']
+                if (decision['kind'] != 'decision'
+                        or not isinstance(content.get('result_interpretation'), str)
+                        or not content['result_interpretation'].strip()
+                        or content.get('result_disposition', 'interpreted') != row['disposition']
+                        or not any(r['id'] == record['id'] and r['revision'] == record['revision']
+                                   for r in decision['object_refs'])
+                        or self._freshness(decision, changes=changes, pending_reviews=pending_reviews) != 'current'):
+                    continue
+            except (KeyError, ValueError, OSError):
+                # Missing or invalid supporting revisions cannot close review.
+                continue
+            matches.append(row)
         completed = [r for r in matches if r['disposition'] == 'interpreted']
         return {'status': 'interpreted' if completed else 'deferred' if matches else 'awaiting_interpretation',
                 'decision_refs': [r['decision_ref'] for r in matches],
@@ -342,12 +366,14 @@ class ScientificMemory:
         as having been reviewed by the new segment.
         """
         rows = self._rows('scientific_memory_interpretation')
+        changes = {digest(r['source_ref']) for r in self._rows('scientific_memory_source_change')}
+        pending_reviews = self._rows('scientific_memory_review_pending')
         pending, historical_pending, deferred, interpreted = [], [], [], 0
         for record in self.read_history(kind='investigation'):
             if self._head(record['id'])['revision'] != record['revision']:
                 continue
-            state = self._interpretation(record, rows)
-            freshness = self._freshness(record)
+            state = self._interpretation(record, rows, changes=changes, pending_reviews=pending_reviews)
+            freshness = self._freshness(record, changes=changes, pending_reviews=pending_reviews)
             try:
                 sources = self._sources_for(record)
             except (KeyError, ValueError, FileNotFoundError):
@@ -402,7 +428,8 @@ class ScientificMemory:
                 continue
             freshness = self._freshness(record, changes=changes, pending_reviews=pending_reviews)
             related = bool(words.intersection(re.findall(r'\w+', encode(record['content']).decode().lower())))
-            interpretation = self._interpretation(record, interpretation_rows) if record['kind'] == 'investigation' else None
+            interpretation = self._interpretation(record, interpretation_rows, changes=changes,
+                pending_reviews=pending_reviews) if record['kind'] == 'investigation' else None
             pending = interpretation is not None and interpretation['status'] == 'awaiting_interpretation'
             try:
                 direct_sources = {self._local_source(ref) for ref in record['source_refs']}

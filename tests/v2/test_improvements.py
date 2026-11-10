@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from rsi_lab import input_view
 from rsi_lab.adapters import Adapter
-from rsi_lab.controller import Controller
+from rsi_lab.controller import Controller, identity
 from rsi_lab.runtime import Runtime
 from rsi_lab.store import Store, digest, encode
 from rsi_lab.roles import response_schema
@@ -251,6 +251,135 @@ class ImprovementsTests(unittest.TestCase):
         reviews=[w for w in self.store.list('r','work') if w['inputs'].get('improvement_review_ids')]
         self.assertEqual(len(reviews),1)
         self.assertEqual(len(self.store.list('r','effect',kind='candidate_test')),1)
+
+    def test_recommendation_gets_successor_when_lab_packet_is_already_leased(self):
+        store=Store(Path(self.tmp.name)/'parallel');self.addCleanup(store.close)
+        controller=Controller(store)
+        controller.initialize('parallel',max_external=2,
+            budgets=self.rt.config['budgets'],config={'execution_mode':'replay',
+                'research_features':{'meta_lab':True},'max_input_bytes':500000})
+        runtime=Runtime(store,'parallel',adapters=list(self.rt.adapters.by_id.values()))
+        controller.add_fact('parallel','original','raw_fact',{'score':.5},
+                            {'source':'original measurement'},'original')
+        old_work=runtime.enqueue_lab('already-prepared',['original'])
+        prepared=runtime.prepare_meta(old_work['id'],self.res)
+        review=runtime.observe('parallel-review','new_evidence',0,['original'])
+        recommended=runtime.run_meta(review['work_id'],FakeModel('recommend_change',self.advice),self.res)
+        self.assertEqual(recommended['proposal']['status'],'applied')
+        row=runtime.improvements.rows()[0]
+        notified=[w for w in controller.ready('parallel') if w['inputs'].get('recommendation_id')==row['id']]
+        self.assertEqual(len(notified),1)
+        # The already leased packet has no recommendation response obligation.
+        controller.dispatch_effect('parallel',prepared['id'],
+            FakeModel('no_action',{'reason':'The old packet had no pending advice'}))
+        self.assertEqual(runtime.apply_meta(prepared['id'])['status'],'applied')
+        runtime.recover();runtime.recover()
+        successor=next(w for w in controller.ready('parallel') if w['kind']=='lab')
+        model=FakeModel('no_action',{'reason':'Explicitly declined after source review'},decision='decline')
+        outcome=runtime.run_lab(successor['id'],model,self.res)
+        self.assertEqual(outcome['proposal']['status'],'applied')
+        self.assertEqual(model.inputs[0]['task']['constraints']['research_loop']['recommendations'][0]['id'],row['id'])
+        self.assertEqual(runtime.pending_improvements(),[])
+        store.verify_history('parallel')
+
+    def test_existing_ready_lab_can_consume_and_cancel_redundant_notification(self):
+        existing=self.rt.enqueue_lab('already-ready',['original'])
+        row,_=self.recommend()
+        notifications=[w for w in self.c.ready('r') if w['inputs'].get('recommendation_id')==row['id']]
+        self.assertEqual(len(notifications),1)
+        out=self.rt.run_lab(existing['id'],FakeModel('no_action',{'reason':'Decline this advice'},decision='decline'),self.res)
+        self.assertEqual(out['proposal']['status'],'applied')
+        self.assertEqual(self.store.get('r','work',notifications[0]['id'])['status'],'cancelled')
+        self.assertFalse([w for w in self.c.ready('r') if w['kind']=='lab'])
+
+    def test_concurrent_response_cas_rolls_back_diagnostic_and_dependency(self):
+        self.recommend()
+        original_route=self.rt._route
+        interleaved=False
+        def route(proposal):
+            nonlocal interleaved
+            if proposal['command']['mode']=='lab' and not interleaved:
+                interleaved=True
+                session=self.store.list('r','agent_session',role='lab')[0]
+                self.assertEqual(session['status'],'idle')
+                self.assertIsNone(session['active_turn_id'])
+                second=self.rt.enqueue_lab('second-coordinator',['original'])
+                result=self.rt.run_lab(second['id'],FakeModel('no_action',
+                    {'reason':'Decline after reconsideration'},decision='decline'),self.res)
+                self.assertEqual(result['proposal']['status'],'applied')
+            return original_route(proposal)
+        dependencies=self.store.list('r','dependency')
+        with patch.object(self.rt,'_route',side_effect=route):
+            outcome,_=self.lab('adopt')
+        self.assertEqual(outcome['proposal']['status'],'blocked_action')
+        self.assertIn('stale',outcome['proposal']['error'])
+        self.assertEqual(self.rt.improvements.rows()[0]['status'],'declined')
+        self.assertEqual(self.store.list('r','work',kind='diagnostic'),[])
+        self.assertEqual(self.store.list('r','effect',kind='candidate_test'),[])
+        self.assertEqual({d['id'] for d in self.store.list('r','dependency')},{d['id'] for d in dependencies})
+        self.assertNotIn('measurement',self.rt.improvements.rows()[0])
+        self.store.verify_history('r')
+
+    def test_atomic_adoption_crash_replays_without_repeating_tool_or_reverting_dependency(self):
+        self.recommend()
+        original=self.rt.improvements.apply_responses
+        def crash(proposal,result,**kwargs):
+            result=original(proposal,result,**kwargs)
+            if kwargs.get('create_result') is not None:
+                raise KeyboardInterrupt('after atomic adoption and outbox commit')
+            return result
+        with patch.object(self.rt.improvements,'apply_responses',side_effect=crash),self.assertRaises(KeyboardInterrupt):
+            self.lab('adopt')
+        row=self.rt.improvements.rows()[0]
+        self.assertEqual(row['status'],'adopted')
+        work=self.store.get('r','work',row['tool_work_id'])
+        proposal=self.store.get('r','proposal',row['lab_proposal_id'])
+        self.assertEqual(proposal['status'],'admitted')
+        # Another coordinator can execute the committed outbox before the
+        # crashed proposal coordinator comes back to mark its route applied.
+        executed=self.rt.execute_adapter('candidate_test',{'candidates':['new']},
+            trigger_id=work['id'],work_id=work['id'])
+        self.assertEqual(executed['effect']['status'],'succeeded')
+        self.rt.recover();self.rt.recover()
+        self.assertEqual(self.store.get('r','proposal',proposal['id'])['status'],'applied')
+        self.assertEqual(self.store.get('r','dependency',work['inputs']['dependency_id'])['value']['status'],'completed')
+        self.assertEqual(len(self.store.list('r','work',kind='diagnostic')),1)
+        self.assertEqual(len(self.store.list('r','effect',kind='candidate_test')),1)
+        self.assertEqual(len([w for w in self.store.list('r','work') if w['inputs'].get('improvement_review_ids')]),1)
+        self.assertEqual(self.store.get('r','budget','tool_calls')['spent'],1)
+        self.store.verify_history('r')
+
+    def test_recover_legacy_response_transaction_with_none_result(self):
+        self.recommend()
+        original_mutate=self.rt._mutate
+        original_route=self.rt._route
+        def legacy_mutate(key,event,fn,payload):
+            if event=='meta_proposal_applied':
+                raise KeyboardInterrupt('after legacy response commit')
+            if event=='research_responses_applied':
+                def discard_result(tx):
+                    fn(tx)
+                    return None
+                return original_mutate(key,event,discard_result,payload)
+            return original_mutate(key,event,fn,payload)
+        def legacy_route(proposal):
+            if proposal['command']['action']!='request_diagnostic':
+                return original_route(proposal)
+            base=identity('object',proposal['id']);key='route:'+proposal['id']
+            payload=proposal['command']['payload']
+            self.c.dependency('r',base,payload['capability_id'],{'status':'pending'},key+':dependency')
+            return self.c.enqueue('r','diagnostic',base,key+':work',inputs={**payload,
+                'issue_id':None,'dependency_id':base,'lab_continuation':True,'source_proposal_id':proposal['id']})
+        with patch.object(self.rt,'_route',side_effect=legacy_route),patch.object(self.rt,'_mutate',side_effect=legacy_mutate),self.assertRaises(KeyboardInterrupt):
+            self.lab('adopt')
+        row=self.rt.improvements.rows()[0]
+        self.assertEqual(row['status'],'adopted')
+        self.rt.recover();self.rt.recover()
+        proposal=self.store.get('r','proposal',row['lab_proposal_id'])
+        self.assertEqual(proposal['status'],'applied')
+        self.assertEqual(json.loads(self.store.read_blob(proposal['result_ref']))['id'],row['tool_work_id'])
+        self.assertEqual(len(self.store.list('r','work',kind='diagnostic')),1)
+        self.store.verify_history('r')
 
 
 if __name__=='__main__':unittest.main()
