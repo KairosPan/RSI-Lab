@@ -32,6 +32,17 @@
 
 `run-until-wait` 是有步数上限的合作式驱动器：推进当时可运行的 Lab、Meta 和已注册 diagnostic，遇到依赖、资源限制、未知调用或无工作时返回。宿主在新输入、真实结果或 deadline 到达后再次调用；它不是隐藏的后台 daemon，也不会因为等待或 `no_action` 就自动宣布科学任务成功。单个 Work 在派发前被拒绝（例如预算不足）时，驱动器把它记入结果的 `skipped` 并继续处理其他 Work，本次调用不再选它；每次跳过、取消和恢复都计入步数上限。选择新 Work 之前，驱动器先处理所有 `prepared` Effect：Lab/Meta 调用照常派发，本 Runtime 能解析适配器的工具调用按已持久保存的输入派发（不再调用 `prepare`），派发被拒且仍处于 `prepared` 的 Effect 以拒绝原因取消并记入 `cancelled_prepared`，没有可用适配器的记入 `prepared_blocking` 并保持原状；`dispatching` 或 `unknown` 的 Effect 永不重新派发。开头的恢复中单项失败不会中断其余恢复，失败项记入 `recovery_errors`。无事可做时，状态依次取 `finalizing`、`blocked_external`、`blocked_prepared`（存在 `prepared_blocking`）、`blocked_admission`（存在 `skipped`，`reason` 为第一条跳过原因）、`blocked_adapter`、`blocked_recovery`（存在 `recovery_errors`），否则为 `awaiting_producer_or_deadline` 或 `quiescent`。Lab 提案在接纳时被拒绝或路由时被阻止，会在同一事务中得到一次修复 Lab Work，其输入带 `routing_error` 和 `repair_of`；修复 Work 自身不再获得修复。工具输入在执行时才被适配器拒绝的 diagnostic 会失败并通知其依赖，Lab 发起的请求同样回到 Lab 并带上拒绝原因。
 
+`run-until-wait` 的结果还带有只读取账本得出的 `report`：
+
+- `settlement_status`：存在 `dispatching`、`unknown` 或用量未结算的 Effect 时为 `blocked_external`；否则本次有 Work 因预算不足被跳过时为 `resource_exhausted`；否则为 `settled`。
+- `work_status`：存在 `prepared`、`dispatching` 或 `unknown` 的 Effect 时为 `unresolved_effects`；否则有就绪 Work 时为 `pending_queued`；否则有未结束的等待时为 `parked_dependencies`；否则为 `empty`。
+- `attention.stalled_issues`：仍为 `open`、却没有就绪或已领取的 Work、没有未结束的等待、也没有未结算 Effect 的问题，并给出最近一个相关 Work 的身份和状态。常见原因是处置调用失败后没有后继。可开启 `model_failure_retries`，或由宿主为该问题加入新的 `meta_disposition` Work；问题因用量未结算而无法关闭时，先用 `reconcile` 结算。
+- `attention.stopped_lab`：没有就绪或已领取的 Lab Work，且最近一个 Lab Work 失败、被阻塞、其已准备的调用被取消，或成功但提议缺失、被拒绝或被阻止。字段给出 Work 身份、状态、提议状态和原因。查看原因后用 `lab-start` 开始新的 Lab Work。
+- `attention.sessions_requiring_recovery`：owner 的当前会话处于 `recovery_required`。存在 `unknown` 调用时先用 `reconcile` 对账，再用 `agent-rebuild` 更换会话。
+- `attention.capacity_blocked_work`：因会话上下文或 packet 超出容量（`blocked_capacity` 或 `packet_unrepresentable`）而阻塞的 Work。用 `agent-rebuild` 换成新会话，Lab 工作再用 `lab-start` 重新开始。
+
+原本会报告 `quiescent` 时，只要上述 `attention` 中有任何一项非空，状态改为 `stalled`，`reason` 为第一项非空条目的名称（按 `stalled_issues`、`stopped_lab`、`sessions_requiring_recovery`、`capacity_blocked_work` 的顺序）。`quiescent` 因此只表示干净结束：没有待执行的工作，也没有无人负责的义务。其他状态不变。
+
 Lab 和 Meta 的工具权限由本轮命令模式与已注册能力决定，不来自会话里曾出现的文字。当前 Lab 命令为 `request_diagnostic`、`propose_issue` 和 `no_action`。Meta 的 discovery/disposition 模式仍使用明确命令集合。
 
 ## 运行入口
@@ -66,6 +77,13 @@ Lab 和 Meta 的工具权限由本轮命令模式与已注册能力决定，不�
 ```
 
 可选的 `model_timeout_seconds` 与 `model_reservation` 并列，设定 `meta-step`、`lab-step` 和 `run-until-wait` 中每次模型调用的超时秒数，取值为 1 到 3600 的数字，省略时为 300。超时被终止的调用结算为 `unknown`，处理方法见[未知模型调用的对账](#未知模型调用的对账)。`model_calls` 和 `tool_calls` 是控制器可执行的调用次数限制；token/时间是显式软预约与实际用量结算，不构成 provider 内部的硬停止保证。模型选择、总预算与既有运行配置不可通过恢复偷偷改变；新任务用新的运行目录。
+
+两个可选的失败策略键也写在运行配置顶层，省略时保持原有行为：
+
+- `unknown_usage_policy`：取 `hold`（默认）或 `charge_reservation`。模型调用已得到 `succeeded` 或 `failed_definite` 结果、但回执缺少部分用量（例如没有 token 计数）时，`hold` 保留这些资源的预约和对账义务：该调用的提议不会被应用，所属问题也不能关闭。`charge_reservation` 让 Runtime 按仍持有的完整预约结算这些资源，结算回执的 `estimated_resources` 列出这些资源名，`reconciliation.provenance` 为 `run config unknown_usage_policy=charge_reservation`。这些金额是上限估计，不是实测值。`dispatching` 或 `unknown` 的调用不受影响，仍需按[未知模型调用的对账](#未知模型调用的对账)处理。
+- `model_failure_retries`：0 到 5 的整数，默认 0。Lab、Meta discovery 或 Meta disposition 调用收到 provider 的明确失败（`failed_definite`，回执确认收到终态且调用确实已派发）时，为同一问题和优先级加入一个新的同类 Work，输入带 `retry_of`（这条链第一个 Work 的身份）和 `retry_attempt`；每条链最多重试该次数。失败的 Effect 本身永不重新派发；问题已关闭时不重试；等待到期后的 `disposition` 仍然每个等待周期只尝试一次，不重试。重复执行 `recover` 不会重复加入重试 Work。
+
+其他取值会使 Runtime 拒绝启动该运行。
 
 ```sh
 python3 -m rsi_lab --root runs/my-task --run main \

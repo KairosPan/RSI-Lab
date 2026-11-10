@@ -22,6 +22,7 @@ from .transport import _json as transport_json
 from .call_recovery import recover_codex_receipt, RecoveryBlocked
 from .improvements import ImprovementLoop, enabled
 from .research_policy import normalize_research_policy
+from .driver_report import build_report
 
 
 def recovery_error(stage, item_id, exc):
@@ -41,6 +42,11 @@ class Runtime:
         from .adapters import AdapterRegistry
         self.adapters = AdapterRegistry(adapters)
         self.config = store.run(run_id)['config']
+        if self.config.get('unknown_usage_policy', 'hold') not in {'hold', 'charge_reservation'}:
+            raise ValueError('unknown_usage_policy must be hold or charge_reservation')
+        retries = self.config.get('model_failure_retries', 0)
+        if type(retries) is not int or not 0 <= retries <= 5:
+            raise ValueError('model_failure_retries must be an integer from 0 to 5')
         self.research_policy = normalize_research_policy(self.config.get('research_policy'))
         self.agents = AgentState(store, run_id)
         self.improvements = ImprovementLoop(self) if enabled(self.config,'meta_lab') else None
@@ -289,6 +295,7 @@ class Runtime:
         if effect.get('status') == 'blocked':
             return {'work': effect, 'proposal': None}
         effect = self.controller.dispatch_effect(self.run_id, effect['id'], executor)
+        effect = self._apply_usage_policy(effect)
         if effect['status'] in {'succeeded', 'failed_definite'}:
             receipt = json.loads(self.store.read_blob(effect['result_ref']))
             if receipt.get('terminal_received') or self.config.get('execution_mode') not in {'live', 'role_recall'}:
@@ -299,8 +306,51 @@ class Runtime:
                     raise
             elif effect['status'] == 'failed_definite':
                 self._block_agent_turn(effect, receipt.get('error') or 'Known failure has no native turn terminal')
+        self._schedule_retry(effect)
         proposal = self.apply_meta(effect['id']) if effect['status'] == 'succeeded' and not effect.get('accounting_unknown') else None
         return {'effect': effect, 'proposal': proposal}
+
+    def _apply_usage_policy(self, effect):
+        """Charge a finished call's unmeasured resources at their held amount when the run opts in.
+
+        Returns the Effect as stored afterwards. Dispatching and unknown calls
+        keep their holds: only a known outcome can be settled this way.
+        """
+        if (self.config.get('unknown_usage_policy', 'hold') != 'charge_reservation'
+                or effect['kind'] not in {'lab', 'meta'} or effect['status'] not in {'succeeded', 'failed_definite'}
+                or not effect.get('accounting_unknown')):
+            return effect
+        missing = sorted(r for r in effect['reservations'] if r not in effect.get('actual_costs', {}))
+        receipt = {'status': effect['status'],
+                   'actual_costs': {r: effect['held_reservations'][r] for r in missing},
+                   'estimated_resources': missing,
+                   'reconciliation': {'effect_id': effect['id'],
+                                      'provenance': 'run config unknown_usage_policy=charge_reservation'}}
+        self.controller.reconcile(self.run_id, effect['id'], receipt, 'usage-policy:' + effect['id'])
+        return self.store.get(self.run_id, 'effect', effect['id'])
+
+    def _schedule_retry(self, effect):
+        """Enqueue one successor for a definite provider failure while the run's retry allowance lasts.
+
+        The failed Effect is never dispatched again. The successor's identity
+        is fixed by the chain root and attempt, so repeating this is a no-op.
+        """
+        if effect['kind'] not in {'lab', 'meta'} or effect['status'] != 'failed_definite':
+            return None
+        work = self.store.get(self.run_id, 'work', effect['work_id'])
+        attempt = work['inputs'].get('retry_attempt', 0) + 1
+        if (work['kind'] not in {'lab', 'meta_discovery', 'meta_disposition'}
+                or attempt > self.config.get('model_failure_retries', 0)):
+            return None
+        receipt = json.loads(self.store.read_blob(effect['result_ref']))
+        if receipt.get('terminal_received') is not True or receipt.get('never_dispatched'):
+            return None
+        if work['issue_id'] and self.store.get(self.run_id, 'issue', work['issue_id'])['status'] != 'open':
+            return None
+        root_id = work['inputs'].get('retry_of', work['id'])
+        key = 'retry:%d:%s' % (attempt, root_id)
+        return self.controller.enqueue(self.run_id, work['kind'], key, key, issue_id=work['issue_id'],
+            inputs={**work['inputs'], 'retry_of': root_id, 'retry_attempt': attempt}, priority=work['priority'])
 
     def enqueue_lab(self, trigger_id, evidence_ids=()):
         """Explicitly start a bounded Lab step; no implicit completed-goal claim."""
@@ -744,6 +794,14 @@ class Runtime:
                 except (RecoveryBlocked, ValueError, OSError) as exc:
                     self._block_agent_turn(effect, str(exc))
                     agent_recovery.append({'effect_id': effect['id'], 'status': 'blocked', 'reason': str(exc)})
+            except Exception as exc:
+                failed('agent_effect', effect['id'], exc)
+        # Opt-in failure policies also cover calls settled before a restart.
+        for effect in self.store.list(self.run_id, 'effect'):
+            if effect['kind'] not in {'lab', 'meta'} or effect['status'] not in {'succeeded', 'failed_definite'}:
+                continue
+            try:
+                self._schedule_retry(self._apply_usage_policy(effect))
             except Exception as exc:
                 failed('agent_effect', effect['id'], exc)
         proposals = []
@@ -1209,9 +1267,17 @@ class Runtime:
         if outcome == 'step_limit_reached' and skipped:
             # The allowance ran out; keep the concrete reason of the first skip.
             reason = skipped[0]['reason']
+        report = build_report(self, skipped=skipped, recovery_errors=recovery_errors, prepared_blocking=blocking)
+        if outcome == 'quiescent':
+            # Nothing runs, yet an obligation is left without a scheduled owner.
+            attention = report['attention']
+            reason = next((name for name in ('stalled_issues', 'stopped_lab', 'sessions_requiring_recovery',
+                                             'capacity_blocked_work') if attention[name]), None)
+            if reason:
+                outcome = 'stalled'
         result = {'status': outcome, 'reason': reason, 'steps': actions, 'state': self.status(),
                   'recovery_errors': recovery_errors, 'skipped': skipped,
-                  'cancelled_prepared': cancelled, 'prepared_blocking': blocking}
+                  'cancelled_prepared': cancelled, 'prepared_blocking': blocking, 'report': report}
         # Include observation sequence in the key: equivalent polls can be
         # recorded without altering a wait's evidence or scheduling version.
         token = identity('driver', self.store.verify_history(self.run_id)['events'], result)
