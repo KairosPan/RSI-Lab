@@ -30,7 +30,7 @@
 6. 子 Effect 结算后，由父 turn 的幂等提交推进 session head、接纳合法工作记忆增量并释放会话写入权。空增量保持原 head；非法增量保留旧状态和拒绝原因。
 7. Lab 可以请求已注册的诊断/科学适配器。控制器执行工具、登记来源事实，再创建 Lab continuation。新来源也可触发 Meta 观察工作。
 
-`run-until-wait` 是有步数上限的合作式驱动器：推进当时可运行的 Lab、Meta 和已注册 diagnostic，遇到依赖、资源限制、未知调用或无工作时返回。宿主在新输入、真实结果或 deadline 到达后再次调用；它不是隐藏的后台 daemon，也不会因为等待或 `no_action` 就自动宣布科学任务成功。
+`run-until-wait` 是有步数上限的合作式驱动器：推进当时可运行的 Lab、Meta 和已注册 diagnostic，遇到依赖、资源限制、未知调用或无工作时返回。宿主在新输入、真实结果或 deadline 到达后再次调用；它不是隐藏的后台 daemon，也不会因为等待或 `no_action` 就自动宣布科学任务成功。单个 Work 在派发前被拒绝（例如预算不足）时，驱动器把它记入结果的 `skipped` 并继续处理其他 Work，本次调用不再选它；每次跳过、取消和恢复都计入步数上限。选择新 Work 之前，驱动器先处理所有 `prepared` Effect：Lab/Meta 调用照常派发，本 Runtime 能解析适配器的工具调用按已持久保存的输入派发（不再调用 `prepare`），派发被拒且仍处于 `prepared` 的 Effect 以拒绝原因取消并记入 `cancelled_prepared`，没有可用适配器的记入 `prepared_blocking` 并保持原状；`dispatching` 或 `unknown` 的 Effect 永不重新派发。开头的恢复中单项失败不会中断其余恢复，失败项记入 `recovery_errors`。无事可做时，状态依次取 `finalizing`、`blocked_external`、`blocked_prepared`（存在 `prepared_blocking`）、`blocked_admission`（存在 `skipped`，`reason` 为第一条跳过原因）、`blocked_adapter`、`blocked_recovery`（存在 `recovery_errors`），否则为 `awaiting_producer_or_deadline` 或 `quiescent`。Lab 提案在接纳时被拒绝或路由时被阻止，会在同一事务中得到一次修复 Lab Work，其输入带 `routing_error` 和 `repair_of`；修复 Work 自身不再获得修复。工具输入在执行时才被适配器拒绝的 diagnostic 会失败并通知其依赖，Lab 发起的请求同样回到 Lab 并带上拒绝原因。
 
 Lab 和 Meta 的工具权限由本轮命令模式与已注册能力决定，不来自会话里曾出现的文字。当前 Lab 命令为 `request_diagnostic`、`propose_issue` 和 `no_action`。Meta 的 discovery/disposition 模式仍使用明确命令集合。
 

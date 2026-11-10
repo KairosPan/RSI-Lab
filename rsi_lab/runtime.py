@@ -24,6 +24,17 @@ from .improvements import ImprovementLoop, enabled
 from .research_policy import normalize_research_policy
 
 
+def recovery_error(stage, item_id, exc):
+    """A reportable recovery failure that holds no reference into the failing code.
+
+    str(exc) is often the very string constant of the raising function, and
+    Adapter.descriptor() hashes marshal output, which changes while extra
+    references to a code constant exist. The reason is therefore a copy.
+    """
+    return {'stage': stage, 'id': item_id, 'error_type': type(exc).__name__,
+            'reason': str(exc).encode('utf-8', 'surrogatepass').decode('utf-8', 'surrogatepass')}
+
+
 class Runtime:
     controller_factory = Controller
     trial_engine_factory = TrialEngine
@@ -417,6 +428,8 @@ class Runtime:
                     current_versions=self.versions(effect['issue_id']),
                     authorized_sources=self.config.get('authorized_sources', []),
                     capabilities=self.capability_catalog(), request=request)
+                if validated['action'] == 'request_diagnostic':
+                    self._admit_tool_inputs(validated['payload'])
                 research_response = self.improvements.validate(response,packet) if self.improvements else {}
                 work = self.store.get(self.run_id, 'work', effect['work_id'])
                 allowed = work['inputs'].get('allowed_action')
@@ -437,7 +450,7 @@ class Runtime:
                     'initial_review_ref': tx.blob(initial_review_receipt(packet, response, effect_id=effect_id,
                         response_ref=effect['receipt_ref'])) if not error and effect['metadata']['mode'] == 'discovery' and not effect['metadata'].get('agent_session_id') else None})
                 if error:
-                    self._repair(tx, effect['issue_id'], pid, error)
+                    self._repair(tx, effect['issue_id'], pid, error, effect_id)
                 return result
             proposal = self._mutate('admit:' + pid, 'meta_proposal_admitted', admit,
                                    {'effect_id': effect_id, 'receipt_ref': effect['receipt_ref']})
@@ -464,7 +477,9 @@ class Runtime:
             result = self._route(proposal)
             if self.improvements:
                 self.improvements.apply_responses(proposal,result)
-        except (ValueError, KeyError) as exc:
+        except (ValueError, KeyError, TypeError) as exc:
+            # Data-shaped routing errors end the proposal; storage failures
+            # (sqlite3.Error, unrelated OSError) propagate and leave it admitted.
             return self._blocked_proposal(proposal, 'blocked_action', str(exc))
         return self._mutate('applied:' + pid, 'meta_proposal_applied',
             lambda tx: tx.update('proposal', pid, {'status': 'applied', 'result_ref': tx.blob(result)}),
@@ -473,17 +488,35 @@ class Runtime:
     def _blocked_proposal(self, proposal, status, reason):
         def apply(tx):
             result = tx.update('proposal', proposal['id'], {'status': status, 'error': reason})
-            self._repair(tx, proposal['issue_id'], proposal['id'], reason)
+            self._repair(tx, proposal['issue_id'], proposal['id'], reason, proposal['effect_id'])
             return result
         return self._mutate('blocked:' + proposal['id'], 'proposal_blocked', apply,
                             {'proposal_id': proposal['id'], 'status': status, 'reason': reason})
 
-    def _repair(self, tx, iid, pid, reason):
+    def _admit_tool_inputs(self, payload):
+        # Dry-run the loaded adapter's side-effect-free prepare so that inputs
+        # it can never accept are refused here instead of poisoning the queue.
+        adapter = self.adapters.by_id.get(payload['capability_id'])
+        if adapter is None:
+            return
+        try:
+            adapter.prepare(json.loads(payload['inputs_json']))
+        except (ValueError, KeyError, TypeError) as exc:
+            raise ValueError('Tool inputs rejected by ' + payload['capability_id'] + ': ' + str(exc)) from exc
+
+    def _repair(self, tx, iid, pid, reason, effect_id):
         # One repair opportunity per issue, independent of scientific evidence.
         if iid and tx.get('issue', iid)['status'] == 'open' and not tx.find('registration', id='repair:' + iid):
             tx.insert('registration', 'repair:' + iid, {'proposal_id': pid, 'reason': reason})
             self.controller._work(tx, iid, 'meta_disposition', 'repair:' + pid,
                                   inputs={'routing_error': reason}, priority=0)
+        if iid is None:
+            # A Lab proposal has no issue; it gets one repair turn, and a
+            # repair turn (inputs carry repair_of) never gets another.
+            source = tx.get('work', tx.get('effect', effect_id)['work_id'])
+            if source['kind'] == 'lab' and 'repair_of' not in source['inputs']:
+                self.controller._work(tx, None, 'lab', 'repair:' + pid,
+                                      inputs={**source['inputs'], 'routing_error': reason, 'repair_of': pid})
 
     def _park(self, iid, dep, key, *, deadline=None, expiry='replan'):
         # Deadline is derived from the persisted proposal event time, not retry time.
@@ -565,7 +598,14 @@ class Runtime:
                 self._park(iid, dep, key + ':park', deadline=deadline)
             return work
         if action == 'propose_trial':
-            spec = json.loads(self.store.read_blob(p['plan_ref']))
+            # plan_ref is model-supplied: a reference to nothing, or to
+            # something other than a JSON object, is a proposal error.
+            try:
+                spec = json.loads(self.store.read_blob(p['plan_ref']))
+            except (FileNotFoundError, json.JSONDecodeError):
+                spec = None
+            if not isinstance(spec, dict):
+                raise ValueError('Trial plan_ref does not name a stored trial specification')
             kinds = {'orchestration_policy': 'policy', 'tool_capability': 'capability', 'scientific_protocol': 'scientific_protocol'}
             version_keys = {'policy': 'policy', 'capability': 'capability', 'scientific_protocol': 'scientific_protocol'}
             kind = kinds[p['trial_kind']]
@@ -685,59 +725,81 @@ class Runtime:
 
     def recover(self):
         effects = self.controller.recover(self.run_id)
-        agent_recovery = []
+        agent_recovery, errors = [], []
+        # One failing item must not abort the whole recovery. Its stored state
+        # is left untouched and the failure is reported for the operator.
+        def failed(stage, item_id, exc):
+            errors.append(recovery_error(stage, item_id, exc))
         # The outer receipt may be absent even though the CLI already completed.
         # Recover only this attempt's owned durable journal; never resend input.
         for effect in self.store.list(self.run_id, 'effect'):
             if effect['kind'] not in {'lab', 'meta'} or not effect.get('metadata', {}).get('agent_session_id'):
                 continue
-            prior = json.loads(self.store.read_blob(effect['result_ref'])) if effect.get('result_ref') else {}
-            if (effect['status'] not in {'dispatching', 'unknown'}
-                    and not (effect['status'] in {'succeeded', 'failed_definite'}
-                        and prior.get('recovered_from_journal')
-                        and (effect.get('accounting_unknown') or prior.get('recovery_requires_fencing')))):
-                continue
             try:
-                receipt = recover_codex_receipt(effect, self.store.read_blob(effect['packet_ref']), self.store.root / 'calls')
-                if receipt is not None:
-                    effects.append(self.controller.reconcile(self.run_id, effect['id'], receipt,
-                        'journal-reconcile:' + effect['id'] + ':' + digest(receipt)))
-            except (RecoveryBlocked, ValueError, OSError) as exc:
-                self._block_agent_turn(effect, str(exc))
-                agent_recovery.append({'effect_id': effect['id'], 'status': 'blocked', 'reason': str(exc)})
+                prior = json.loads(self.store.read_blob(effect['result_ref'])) if effect.get('result_ref') else {}
+                if (effect['status'] not in {'dispatching', 'unknown'}
+                        and not (effect['status'] in {'succeeded', 'failed_definite'}
+                            and prior.get('recovered_from_journal')
+                            and (effect.get('accounting_unknown') or prior.get('recovery_requires_fencing')))):
+                    continue
+                try:
+                    receipt = recover_codex_receipt(effect, self.store.read_blob(effect['packet_ref']), self.store.root / 'calls')
+                    if receipt is not None:
+                        effects.append(self.controller.reconcile(self.run_id, effect['id'], receipt,
+                            'journal-reconcile:' + effect['id'] + ':' + digest(receipt)))
+                except (RecoveryBlocked, ValueError, OSError) as exc:
+                    self._block_agent_turn(effect, str(exc))
+                    agent_recovery.append({'effect_id': effect['id'], 'status': 'blocked', 'reason': str(exc)})
+            except Exception as exc:
+                failed('agent_effect', effect['id'], exc)
         proposals = []
         for delivery in self.store.list(self.run_id, 'delivery', status='materialized'):
             # Packet presentation records are separate from source Deliveries.
             if not delivery.get('request_id'):
                 continue
-            self.ingest_delivery(delivery['request_id'], json.loads(self.store.read_blob(delivery['content_ref'])),
-                delivery['provenance'], kind=delivery['kind'], page=delivery['page'], source_version=delivery['source_version'])
+            try:
+                self.ingest_delivery(delivery['request_id'], json.loads(self.store.read_blob(delivery['content_ref'])),
+                    delivery['provenance'], kind=delivery['kind'], page=delivery['page'], source_version=delivery['source_version'])
+            except Exception as exc:
+                failed('delivery', delivery['id'], exc)
         for effect in self.store.list(self.run_id, 'effect', kind='capability_acceptance', status='succeeded'):
             if not effect.get('accounting_unknown'):
-                self.resume_capability(effect['id'])
-        adapter_results = self.recover_adapters()
+                try:
+                    self.resume_capability(effect['id'])
+                except Exception as exc:
+                    failed('capability', effect['id'], exc)
+        adapter_results = self.recover_adapters(errors=errors)
         if self.improvements:
             for effect in self.store.list(self.run_id,'effect',status='failed_definite'):
-                self.improvements.failed_execution(effect)
+                try:
+                    self.improvements.failed_execution(effect)
+                except Exception as exc:
+                    failed('improvement_failure', effect['id'], exc)
         for trial in self.store.list(self.run_id,'trial',status='settled'):
             if trial.get('issue_id'):
-                self.publish_trial_outcome(trial['id'])
+                try:
+                    self.publish_trial_outcome(trial['id'])
+                except Exception as exc:
+                    failed('trial', trial['id'], exc)
         for effect in [e for e in self.store.list(self.run_id, 'effect')
                        if e['kind'] in {'meta', 'lab'} and e['status'] in {'succeeded', 'failed_definite'}]:
-            receipt = json.loads(self.store.read_blob(effect['result_ref']))
             try:
-                if receipt.get('terminal_received') or self.config.get('execution_mode') not in {'live', 'role_recall'}:
-                    self._commit_agent_turn(effect, receipt)
-                elif effect['status'] == 'failed_definite':
-                    self._block_agent_turn(effect, receipt.get('error') or 'Known failure has no native turn terminal')
-                if effect['status'] == 'succeeded' and not effect.get('accounting_unknown'):
-                    proposals.append(self.apply_meta(effect['id']))
-            except ValueError as exc:
-                self._block_agent_turn(effect, str(exc))
-                agent_recovery.append({'effect_id': effect['id'], 'status': 'blocked', 'reason': str(exc)})
+                receipt = json.loads(self.store.read_blob(effect['result_ref']))
+                try:
+                    if receipt.get('terminal_received') or self.config.get('execution_mode') not in {'live', 'role_recall'}:
+                        self._commit_agent_turn(effect, receipt)
+                    elif effect['status'] == 'failed_definite':
+                        self._block_agent_turn(effect, receipt.get('error') or 'Known failure has no native turn terminal')
+                    if effect['status'] == 'succeeded' and not effect.get('accounting_unknown'):
+                        proposals.append(self.apply_meta(effect['id']))
+                except ValueError as exc:
+                    self._block_agent_turn(effect, str(exc))
+                    agent_recovery.append({'effect_id': effect['id'], 'status': 'blocked', 'reason': str(exc)})
+            except Exception as exc:
+                failed('agent_effect', effect['id'], exc)
         self.controller.tick(self.run_id)
         return {'effects': effects, 'proposals': proposals, 'adapter_results': adapter_results,
-                'agent_recovery': agent_recovery}
+                'agent_recovery': agent_recovery, 'errors': errors}
 
     def execute_adapter(self, adapter_id, inputs, *, trigger_id, work_id=None):
         adapter = self.adapters.get(adapter_id)
@@ -748,17 +810,22 @@ class Runtime:
         for path,expected_hash in descriptor['implementation_sources'].items():
             if self.store.put_blob(Path(path).read_bytes()) != expected_hash:
                 raise ValueError('Adapter source changed while freezing the executable artifact')
-        packet = adapter.prepare(inputs)
-        reservations = adapter.reservations(packet)
-        if work_id is None:
-            work = self.controller.enqueue(self.run_id, 'diagnostic', 'adapter:' + adapter_id + ':' + trigger_id,
-                'adapter-work:' + adapter_id + ':' + trigger_id, inputs={'adapter_id': adapter_id, 'input': inputs})
-        else:
+        if work_id is not None:
             work = self.store.get(self.run_id, 'work', work_id)
             if (work['kind'] != 'diagnostic' or work['inputs'].get('capability_id') != adapter_id
                     or work['inputs'].get('capability_version') != adapter.version
                     or json.loads(work['inputs']['inputs_json']) != inputs):
                 raise ValueError('Diagnostic invocation differs from its admitted Work')
+        try:
+            packet = adapter.prepare(inputs)
+            reservations = adapter.reservations(packet)
+        except (ValueError, KeyError, TypeError) as exc:
+            if work_id is None:
+                raise
+            return self._reject_diagnostic(work, str(exc))
+        if work_id is None:
+            work = self.controller.enqueue(self.run_id, 'diagnostic', 'adapter:' + adapter_id + ':' + trigger_id,
+                'adapter-work:' + adapter_id + ':' + trigger_id, inputs={'adapter_id': adapter_id, 'input': inputs})
         metadata = {'adapter_id': adapter_id, 'adapter_version': adapter.version,
             'adapter_descriptor_sha256': digest(descriptor), 'adapter_descriptor_ref': self.store.put_blob(descriptor),
             'issue_id': work['inputs'].get('issue_id'), 'dependency_id': work['inputs'].get('dependency_id'),
@@ -774,11 +841,56 @@ class Runtime:
         self.adapters.resolve(current)
         if current['status'] == 'prepared':
             current = self.controller.dispatch_effect(self.run_id, current['id'], adapter.execute)
+        return self._settled_adapter_effect(current)
+
+    def resume_adapter_effect(self, effect):
+        """Dispatch a persisted prepared adapter Effect; prepare is never called again."""
+        adapter = self.adapters.resolve(effect)
+        current = self.controller.dispatch_effect(self.run_id, effect['id'], adapter.execute)
+        return self._settled_adapter_effect(current)
+
+    def _settled_adapter_effect(self, current):
         if current['status'] != 'succeeded' or current.get('accounting_unknown'):
             if self.improvements:
                 self.improvements.failed_execution(current)
             return {'effect': current, 'result': None}
         return {'effect': current, 'result': self.publish_adapter_effect(current)}
+
+    def _reject_diagnostic(self, work, reason):
+        """Fail an admitted diagnostic whose inputs the loaded adapter refuses.
+
+        No Effect is created and nothing is reserved. The dependency records
+        the failure so a parked issue wakes; a Lab request returns to the Lab.
+        """
+        work_id, inputs = work['id'], work['inputs']
+        if inputs.get('dependency_id'):
+            self.controller.dependency(self.run_id, inputs['dependency_id'], inputs['capability_id'],
+                {'status': 'failed', 'reason': reason, 'work_id': work_id},
+                'diagnostic-rejected-dependency:' + work_id)
+        lab_inputs = None
+        if inputs.get('lab_continuation'):
+            lab_inputs = {'evidence_ids': [], 'required_evidence_ids': []}
+            proposal = (self.store.list(self.run_id, 'proposal', id=inputs['source_proposal_id'])
+                        if inputs.get('source_proposal_id') else [])
+            if proposal:
+                effect = self.store.list(self.run_id, 'effect', id=proposal[0]['effect_id'])
+                source = self.store.list(self.run_id, 'work', id=effect[0]['work_id']) if effect else []
+                if source:
+                    lab_inputs = dict(source[0]['inputs'])
+            lab_inputs.update(routing_error=reason, repair_of=work_id)
+        def apply(tx):
+            current = tx.get('work', work_id)
+            if current['status'] != 'ready':
+                raise ValueError('Rejected diagnostic Work is no longer ready')
+            failed = tx.update('work', work_id, {'status': 'failed',
+                'outcome_ref': tx.blob({'reason': reason, 'stage': 'adapter_prepare'})})
+            if lab_inputs is not None:
+                self.controller._work(tx, None, 'lab', 'tool-rejected:' + work_id, inputs=lab_inputs)
+            return failed
+        failed = self._mutate('diagnostic-rejected:' + work_id, 'diagnostic_rejected', apply,
+                              {'work_id': work_id, 'reason': reason})
+        self.controller.tick(self.run_id)
+        return {'effect': None, 'result': None, 'work': failed, 'rejected': reason}
 
     def publish_adapter_effect(self, effect):
         self.store.verify_history(self.run_id)
@@ -870,7 +982,13 @@ class Runtime:
         """Public host query for bounded final result-review drain; no mutations."""
         return self.improvements.pending() if self.improvements else []
 
-    def recover_adapters(self):
+    def recover_adapters(self, errors=None):
+        """Publish settled adapter Effects; ``errors`` collects other failures per Effect.
+
+        Without an ``errors`` list, an exception other than ValueError/KeyError
+        propagates as before; with one, a recovery error row (stage ``adapter``)
+        is appended and the remaining Effects are still recovered.
+        """
         results = []
         for effect in self.store.list(self.run_id, 'effect', status='succeeded'):
             if not (effect.get('metadata',{}).get('adapter_id') or effect['kind'] in self.adapters.legacy):
@@ -882,6 +1000,10 @@ class Runtime:
                 results.append({'effect_id':effect['id'],'status':'published'})
             except (ValueError,KeyError) as exc:
                 results.append({'effect_id':effect['id'],'status':'blocked_adapter','reason':str(exc)})
+            except Exception as exc:
+                if errors is None:
+                    raise
+                errors.append(recovery_error('adapter', effect['id'], exc))
         return results
 
     def settle_trial(self, trial_id, *, key):
@@ -979,6 +1101,34 @@ class Runtime:
                             'status':'blocked_adapter','reason':reason})
         return pending
 
+    def _cancel_refused(self, effect, refusal, cancelled, blocking, blocking_ids):
+        # A refused prepared Effect provably never ran; release its lease and
+        # reservation. If even cancellation is refused, report it instead.
+        try:
+            self.controller.cancel_prepared(self.run_id, effect['id'], refusal, 'driver-cancel:' + effect['id'])
+        except ValueError as exc:
+            blocking_ids.add(effect['id'])
+            blocking.append({'effect_id': effect['id'], 'kind': effect['kind'], 'reason': str(exc)})
+            return
+        cancelled.append({'effect_id': effect['id'], 'reason': refusal})
+
+    def _driver_wait_status(self, unresolved, blocking, skipped, recovery_errors):
+        """The first matching reason why nothing more can run in this call."""
+        if unresolved:
+            return 'blocked_external', 'Existing unknown execution retains capacity and reconciliation responsibility'
+        if blocking:
+            return 'blocked_prepared', blocking[0]['reason']
+        if skipped:
+            return 'blocked_admission', skipped[0]['reason']
+        status = self.status()
+        if status['adapter_publications_pending']:
+            return 'blocked_adapter', None
+        if recovery_errors:
+            return 'blocked_recovery', recovery_errors[0]['reason']
+        if status['ready'] or any(w['status'] in {'waiting','disposition_due','disposed'} for w in status['waits']):
+            return 'awaiting_producer_or_deadline', None
+        return 'quiescent', None
+
     def run_until_wait(self, meta_executor, reservations, *, max_steps=20):
         """Drain eligible Lab/Meta and registered tools without occupying wait slots.
 
@@ -989,43 +1139,75 @@ class Runtime:
         """
         if type(max_steps) is not int or not 1 <= max_steps <= 1000:
             raise ValueError('The cooperative driver requires a bounded positive step allowance')
-        self.recover()
-        actions, outcome, reason = [], 'step_limit_reached', None
-        for _ in range(max_steps):
+        recovery_errors = self.recover()['errors']
+        actions, skipped, cancelled, blocking = [], [], [], []
+        selected, blocking_ids = set(), set()
+        outcome, reason, steps = 'step_limit_reached', None, 0
+        while steps < max_steps:
             self.controller.tick(self.run_id)
             if self.store.list(self.run_id, 'registration', id='run_lifecycle', status='finalizing'):
                 outcome, reason = 'finalizing', 'New agent turns are stopped; durable recovery remains available'
                 break
             unresolved = [e for e in self.store.list(self.run_id, 'effect') if e['status'] in {'dispatching','unknown'}]
-            pending = [e for e in self.store.list(self.run_id, 'effect', status='prepared') if e['kind'] in {'lab', 'meta'}]
-            if len(unresolved) >= self.config.get('max_external', 1) and not pending:
-                outcome, reason = 'blocked_external', 'Existing unknown execution retains capacity and reconciliation responsibility'
+            # A prepared Effect holds a lease and was never dispatched: resume
+            # it before new Work. One no adapter here can run is reported.
+            prepared = self.store.list(self.run_id, 'effect', status='prepared')
+            effect = None
+            for candidate in prepared:
+                if candidate['id'] in blocking_ids:
+                    continue
+                if candidate['kind'] not in {'lab', 'meta'}:
+                    try:
+                        self.adapters.resolve(candidate)
+                    except ValueError as exc:
+                        blocking_ids.add(candidate['id'])
+                        blocking.append({'effect_id': candidate['id'], 'kind': candidate['kind'], 'reason': str(exc)})
+                        continue
+                effect = candidate
                 break
-            work = self.store.get(self.run_id, 'work', pending[0]['work_id']) if pending else None
-            if work is None:
-                work = next((w for w in self.controller.ready(self.run_id)
-                             if (w['kind'] in {'lab','meta_discovery','meta_disposition','disposition'} and self._agent_available(w))
-                             or (w['kind']=='diagnostic' and w['inputs'].get('capability_id') in self.adapters.by_id)),None)
-            if work is None:
-                status = self.status()
-                outcome = 'blocked_adapter' if status['adapter_publications_pending'] else 'blocked_external' if unresolved else 'awaiting_producer_or_deadline' if status['ready'] or any(
-                    w['status'] in {'waiting','disposition_due','disposed'} for w in status['waits']) else 'quiescent'
+            held = len(unresolved) + sum(e['id'] in blocking_ids for e in prepared)
+            if effect is None and held >= self.config.get('max_external', 1):
+                outcome, reason = self._driver_wait_status(unresolved, blocking, skipped, recovery_errors)
                 break
+            if effect is not None:
+                work = self.store.get(self.run_id, 'work', effect['work_id'])
+            else:
+                work = next((w for w in self.controller.ready(self.run_id) if w['id'] not in selected and (
+                             (w['kind'] in {'lab','meta_discovery','meta_disposition','disposition'} and self._agent_available(w))
+                             or (w['kind']=='diagnostic' and w['inputs'].get('capability_id') in self.adapters.by_id))),None)
+            if work is None:
+                outcome, reason = self._driver_wait_status(unresolved, blocking, skipped, recovery_errors)
+                break
+            selected.add(work['id'])
+            steps += 1
             try:
-                if work['kind']=='diagnostic':
+                if effect is not None and effect['kind'] not in {'lab', 'meta'}:
+                    result = self.resume_adapter_effect(effect)
+                elif work['kind']=='diagnostic':
                     result = self.execute_adapter(work['inputs']['capability_id'],
                         json.loads(work['inputs']['inputs_json']),trigger_id=work['id'],work_id=work['id'])
                 else:
                     result = self.run_meta(work['id'], meta_executor, reservations)
             except (ValueError, KeyError) as exc:
                 # Admission checks happen before external work. Preserve the
-                # concrete blocked reason; elapsed time is not a retry signal.
-                outcome, reason = 'blocked_admission', str(exc)
-                break
-            actions.append({'work_id': work['id'], 'effect_id': result.get('effect',{}).get('id'),
+                # concrete reason and go on; elapsed time is not a retry signal.
+                current = self.store.get(self.run_id, 'work', work['id'])
+                owned = effect['id'] if effect is not None else current.get('effect_id')
+                owned = self.store.get(self.run_id, 'effect', owned) if owned else None
+                if owned is not None and owned['status'] == 'prepared':
+                    self._cancel_refused(owned, str(exc), cancelled, blocking, blocking_ids)
+                else:
+                    skipped.append({'work_id': work['id'], 'reason': str(exc)})
+                continue
+            actions.append({'work_id': work['id'], 'effect_id': (result.get('effect') or {}).get('id'),
                 'proposal_status': (result.get('proposal') or {}).get('status'),
-                'work_status': result.get('work',{}).get('status')})
-        result = {'status': outcome, 'reason': reason, 'steps': actions, 'state': self.status()}
+                'work_status': (result.get('work') or {}).get('status')})
+        if outcome == 'step_limit_reached' and skipped:
+            # The allowance ran out; keep the concrete reason of the first skip.
+            reason = skipped[0]['reason']
+        result = {'status': outcome, 'reason': reason, 'steps': actions, 'state': self.status(),
+                  'recovery_errors': recovery_errors, 'skipped': skipped,
+                  'cancelled_prepared': cancelled, 'prepared_blocking': blocking}
         # Include observation sequence in the key: equivalent polls can be
         # recorded without altering a wait's evidence or scheduling version.
         token = identity('driver', self.store.verify_history(self.run_id)['events'], result)

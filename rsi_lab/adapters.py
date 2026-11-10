@@ -11,6 +11,13 @@ from .store import digest, encode
 
 @dataclass(frozen=True)
 class Adapter:
+    """A host-registered capability.
+
+    ``prepare`` validates inputs and builds the execution packet. It must be
+    free of side effects: the runtime also calls it as a dry run when it
+    admits a tool request, and raises ValueError/KeyError/TypeError from it
+    reject the request before any Work is queued.
+    """
     adapter_id: str
     version: str
     effect_kind: str
