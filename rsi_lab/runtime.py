@@ -20,6 +20,8 @@ from .agent_state import AgentState
 from .session_context import read_native_snapshot, build_effective_context
 from .transport import _json as transport_json
 from .call_recovery import recover_codex_receipt, RecoveryBlocked
+from .improvements import ImprovementLoop, enabled
+from .research_policy import normalize_research_policy
 
 
 class Runtime:
@@ -28,13 +30,19 @@ class Runtime:
     packet_builder_factory = PacketBuilder
     meta_agent_factory = MetaAgent
 
-    def __init__(self, store, run_id, *, adapters=()):
+    def __init__(self, store, run_id, *, adapters=(), scientific_identity_provider=None):
         self.store, self.run_id = store, run_id
         self.controller = self.controller_factory(store)
         from .adapters import AdapterRegistry
         self.adapters = AdapterRegistry(adapters)
         self.config = store.run(run_id)['config']
+        self.research_policy = normalize_research_policy(self.config.get('research_policy'))
         self.agents = AgentState(store, run_id)
+        self.improvements = ImprovementLoop(self) if enabled(self.config,'meta_lab') else None
+        self.scientific_memory = None
+        if enabled(self.config,'scientific_memory'):
+            from .scientific_memory import ScientificMemory
+            self.scientific_memory = ScientificMemory(store, run_id, identity_provider=scientific_identity_provider)
 
     def _mutate(self, key, event, fn, payload):
         return self.store.mutate(self.run_id, key, event, fn, payload=payload)
@@ -127,6 +135,18 @@ class Runtime:
                 'previous_routing_error': work['inputs'].get('routing_error'),
                 'authorized_source_contracts': self.config.get('authorized_source_contracts', {}),
                 'waiting': self.store.list(self.run_id, 'wait', issue_id=issue_id) if issue_id else []}}
+        required = list(work['inputs'].get('required_evidence_ids', []))
+        if self.config.get('research_features'):
+            task['constraints']['research_features'] = self.config['research_features']
+        if self.research_policy:
+            task['constraints']['research_policy'] = self.research_policy
+        if self.improvements:
+            loop_context, loop_required = self.improvements.context(work,mode)
+            task['constraints']['research_loop'] = loop_context
+            required.extend(loop_required)
+        if work['inputs'].get('final_review_only'):
+            task['constraints']['final_review_only'] = True
+            task['capability_catalog'] = {}
         if self.config.get('task_plan_id'):
             from .plans import load_task_plan
             try:
@@ -145,6 +165,34 @@ class Runtime:
             runtime_binding={'model': self.config.get('model', 'gpt-6-astra'),
                              'effort': self.config.get('effort', 'medium'), 'transport': 'codex_exec_text_v1'})
         memory = self.agents.read_working_memory(session['id'], actor_session_id=session['id'])
+        if self.scientific_memory:
+            # Only trusted host Work can specify a query. This owner's private
+            # plan provides retrieval hints, never shared facts or authority.
+            # Do not inspect the other role's memory or put hint text in the
+            # shared context, evidence catalog, or publication records.
+            supplied = work['inputs'].get('scientific_query', {})
+            if isinstance(supplied,str):
+                query = {'text':supplied}
+            elif isinstance(supplied,dict):
+                query = json.loads(encode(supplied))
+            else:
+                raise ValueError('Scientific retrieval query must be host-supplied text or an object')
+            hints = [query.get('text','')]
+            for field in ('plan_items','tentative_hypotheses','rationale_summaries','next_step'):
+                value = memory['content'].get(field)
+                if isinstance(value,str):
+                    hints.append(value)
+                elif isinstance(value,list):
+                    hints.extend(item for item in value if isinstance(item,str))
+            query['text'] = '\n'.join(hint for hint in hints if isinstance(hint,str) and hint.strip())[:8192]
+            if mode == 'discovery':
+                query['exclude_interpretations'] = True
+            if work['inputs'].get('final_review_only'):
+                query.update(final_review_only=True, include_historical=False)
+            context = self.scientific_memory.prepare_context(role, list(dict.fromkeys(list(evidence_ids)+required)),
+                query=query, budget=self.config.get('scientific_memory_context_bytes',16384))
+            task['scientific_memory'] = context
+            required.extend(context['required_evidence_ids'])
         task['agent_state'] = {'session_id': session['id'], 'agent_instance_id': session['agent_instance_id'],
             'role': role, 'memory_revision': memory['revision'], 'working_memory': memory['content'],
             'memory_authority': 'private_unverified_working_state',
@@ -155,7 +203,7 @@ class Runtime:
         agent = self.meta_agent_factory(self.packet_builder_factory(catalog, max_input_bytes=self.config.get('max_input_bytes', 131072)),
                           model=self.config.get('model', 'gpt-6-astra'), effort=self.config.get('effort', 'medium'))
         options = {'evidence_ids': evidence_ids,
-                   'required_evidence_ids': work['inputs'].get('required_evidence_ids', [])}
+                   'required_evidence_ids': list(dict.fromkeys(required))}
         return agent, mode, task, options
 
     def prepare_meta(self, work_id, reservations):
@@ -167,6 +215,11 @@ class Runtime:
         if work['kind'] not in {'lab', 'meta_discovery', 'meta_disposition', 'disposition'} or work['status'] != 'ready':
             raise ValueError('An eligible Lab or Meta Work is required')
         agent, mode, task, options = self._context(work)
+        if task.get('scientific_memory',{}).get('status') == 'blocked':
+            return self._mutate('scientific-context-block:'+work_id,'packet_unrepresentable',
+                lambda tx:tx.update('work',work_id,{'status':'blocked',
+                    'outcome_ref':tx.blob(task['scientific_memory'])}),
+                {'work_id':work_id,'scientific_memory':task['scientific_memory']})
         planned = agent.prepare(mode, task, **options)
         if planned['status'] != 'ready':
             return self._mutate('context-block:' + work_id, 'packet_unrepresentable',
@@ -212,6 +265,9 @@ class Runtime:
                 'agent_session_id': session['id'], 'agent_session': session,
                 'expected_session_head': session['committed_turn'],
                 'expected_memory_revision': task['agent_state']['memory_revision'],
+                **({'research_features': self.config['research_features']} if self.config.get('research_features') else {}),
+                **({'research_policy': self.research_policy} if self.research_policy else {}),
+                **({'final_review_only':True} if task['constraints'].get('final_review_only') else {}),
                 'context_ref': self.store.put_blob(context), 'effective_context_hash': context['effective_context_hash'],
                 'max_effective_context_bytes': context['max_input_bytes']})
 
@@ -346,6 +402,8 @@ class Runtime:
             sent_packet_sha256=receipt.get('sent_packet_sha256'), sent_prompt_sha256=receipt.get('sent_prompt_sha256'),
             receipt_ref=effect['receipt_ref'])
         self._commit_agent_turn(effect, receipt)
+        if self.scientific_memory:
+            self.scientific_memory.apply_updates(effect,packet,receipt.get('response'))
         if not existing:
             response = receipt.get('response')
             request = None
@@ -359,6 +417,7 @@ class Runtime:
                     current_versions=self.versions(effect['issue_id']),
                     authorized_sources=self.config.get('authorized_sources', []),
                     capabilities=self.capability_catalog(), request=request)
+                research_response = self.improvements.validate(response,packet) if self.improvements else {}
                 work = self.store.get(self.run_id, 'work', effect['work_id'])
                 allowed = work['inputs'].get('allowed_action')
                 action_map = {'replan': 'replan_request', 'ask_user': 'ask_user', 'close_unresolved': 'close_issue',
@@ -369,10 +428,11 @@ class Runtime:
                     raise ValueError('Expiry cannot silently turn an unresolved issue into a verified conclusion')
                 error = None
             except (ValueError, TypeError, KeyError) as exc:
-                validated, error = None, str(exc)
+                validated, error, research_response = None, str(exc), {}
             def admit(tx):
                 result = tx.insert('proposal', pid, {'effect_id': effect_id, 'issue_id': effect['issue_id'],
                     'status': 'rejected' if error else 'admitted', 'command': validated, 'error': error,
+                    **({'research_response':research_response} if self.improvements else {}),
                     'delivery_ref': tx.blob(pages), 'result_ref': None,
                     'initial_review_ref': tx.blob(initial_review_receipt(packet, response, effect_id=effect_id,
                         response_ref=effect['receipt_ref'])) if not error and effect['metadata']['mode'] == 'discovery' and not effect['metadata'].get('agent_session_id') else None})
@@ -402,6 +462,8 @@ class Runtime:
         # admitted and can be resumed without either reissuing a call or guessing.
         try:
             result = self._route(proposal)
+            if self.improvements:
+                self.improvements.apply_responses(proposal,result)
         except (ValueError, KeyError) as exc:
             return self._blocked_proposal(proposal, 'blocked_action', str(exc))
         return self._mutate('applied:' + pid, 'meta_proposal_applied',
@@ -436,6 +498,8 @@ class Runtime:
             (self.run_id, proposal['created_seq'])).fetchone()[0]
         deadline = event_time + self.config.get('wait_timeout_seconds', 3600)
         c, run = self.controller, self.run_id
+        if action == 'recommend_change' and self.improvements:
+            return self.improvements.recommend(proposal)
         if action == 'no_action':
             return {'outcome': 'no_action', 'reason': p['reason']}
         if action == 'propose_issue':
@@ -633,6 +697,9 @@ class Runtime:
             if not effect.get('accounting_unknown'):
                 self.resume_capability(effect['id'])
         adapter_results = self.recover_adapters()
+        if self.improvements:
+            for effect in self.store.list(self.run_id,'effect',status='failed_definite'):
+                self.improvements.failed_execution(effect)
         for trial in self.store.list(self.run_id,'trial',status='settled'):
             if trial.get('issue_id'):
                 self.publish_trial_outcome(trial['id'])
@@ -689,6 +756,8 @@ class Runtime:
         if current['status'] == 'prepared':
             current = self.controller.dispatch_effect(self.run_id, current['id'], adapter.execute)
         if current['status'] != 'succeeded' or current.get('accounting_unknown'):
+            if self.improvements:
+                self.improvements.failed_execution(current)
             return {'effect': current, 'result': None}
         return {'effect': current, 'result': self.publish_adapter_effect(current)}
 
@@ -708,6 +777,10 @@ class Runtime:
             if effect['metadata'].get('adapter_id',adapter_id) != adapter_id:
                 raise ValueError('Published evidence belongs to a different adapter')
             if existing[0]['status']=='complete':
+                if self.scientific_memory:
+                    self.scientific_memory.observe_publication(effect,publication)
+                if self.improvements:
+                    self.improvements.publication(effect,publication)
                 return publication['data']
         else:
             adapter = self.adapters.resolve(effect)
@@ -753,6 +826,10 @@ class Runtime:
             self._mutate('adapter-publication:' + effect['id'], 'adapter_evidence_published', publish,
                          {'effect_id':effect['id'],'publication_sha256':digest(publication)})
         dep_id = effect.get('metadata',{}).get('dependency_id')
+        if self.scientific_memory:
+            self.scientific_memory.observe_publication(effect,publication)
+        if self.improvements:
+            self.improvements.publication(effect,publication)
         if dep_id:
             self.controller.dependency(self.run_id, dep_id, adapter_id,
                 {'status':'completed','effect_id':effect['id']}, 'adapter-dependency:' + effect['id'])
@@ -769,6 +846,10 @@ class Runtime:
         self._mutate('adapter-publication-complete:'+effect['id'],'adapter_notifications_completed',
             lambda tx:tx.update('registration',publication_id,{'status':'complete'}),{'effect_id':effect['id']})
         return publication['data']
+
+    def pending_improvements(self):
+        """Public host query for bounded final result-review drain; no mutations."""
+        return self.improvements.pending() if self.improvements else []
 
     def recover_adapters(self):
         results = []

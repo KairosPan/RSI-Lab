@@ -122,7 +122,15 @@ class Store:
         return json.loads(row[0])
 
     def list(self, run_id, entity_kind, **filters):
-        rows = [json.loads(row[0]) for row in self.db.execute(f'SELECT document FROM {table(entity_kind)} WHERE run_id=? ORDER BY id', (run_id,))]
+        # Scientific-memory revisions/indexes make repeated exact-id lookups common.
+        # Use the existing primary key instead of decoding the entire projection table.
+        if isinstance(filters.get('id'), str):
+            query = f'SELECT document FROM {table(entity_kind)} WHERE run_id=? AND id=? ORDER BY id'
+            parameters = (run_id, filters['id'])
+        else:
+            query = f'SELECT document FROM {table(entity_kind)} WHERE run_id=? ORDER BY id'
+            parameters = (run_id,)
+        rows = [json.loads(row[0]) for row in self.db.execute(query, parameters)]
         return [row for row in rows if all(row.get(k) == v for k, v in filters.items())]
 
     def mutate(self, run_id, key, event_type, fn, payload=None):

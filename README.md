@@ -11,6 +11,8 @@ RSI-Lab 是用于研究 Lab 执行、Meta 调查与受控机制修改的代码�
 | `rsi_lab/` | SQLite 账本、Lab/Meta 调度、各自持久会话与工作记忆、逐事件日志、上下文交付、能力验收和恢复 |
 | `rsi_domains/tabular/` | 使用合成 CSV 的可替换领域能力与离线演示 |
 | `rsi_domains/docking/` | Docking 输入契约、领域检查、能力适配和结果核验 |
+| `rsi_domains/pablo/` | 分子黑箱评分、精确身份查询、领域测量与研究策略 |
+| `rsi_domains/literature/` | 有界的公开方法文献检索、原始回执与来源复用 |
 | `docking_rsi/` | Docking 控制面的兼容 CLI 与离线演示 |
 | `lab_harness/`、`harness/` | 独立的 Lab 执行循环、提示模板与有界 Meta 版本流程 |
 | `scripts/` | 接受显式输入的数据准备、计算执行与结果核验工具 |
@@ -25,7 +27,9 @@ RSI-Lab 是用于研究 Lab 执行、Meta 调查与受控机制修改的代码�
 
 通用运行器现在可调度 Lab、Meta 和已注册工具。Lab 与 Meta 各自拥有持久 Codex 会话及版本化工作记忆；新调用通过精确 thread 身份续接，原始事件逐条落盘。模型只提出受控命令，工具由 Controller 执行；工具结果登记后可安排 Lab 的下一步。运行器以明确的工作、预算和等待条件推进，不把 `no_action` 或队列暂时为空视为科学任务达标。入口、恢复和存储边界见[持久 Agent 使用说明](docs/persistent-agents.md)。
 
-[系统设计 v2.1](docs/system-design.html) 仍是完整目标规格。六类 Scientific Memory 对象、全自动工程修复发布，以及可逐请求拦截 Codex 内部工具/压缩/重试的 runtime 尚未全部实现。当前 CLI 后端禁用原生工具，容量检查覆盖可观察的会话历史与本轮输入；它不声称已证明完整 provider 输入或取得模型的全部内部推理。旧 `lab_harness/` 保留为兼容执行器，不与新核心的会话或工作记忆混用。
+研究模式还提供有来源绑定的 Meta→Lab 建议、实际工具执行和结果复核闭环，以及六类版本化 Scientific Memory 对象。领域适配器提供推荐类型、指标解释和优化方向；内核不假定分子搜索或分数最大化。PABLO 宿主将这些接口与真实文献检索接在一起，见 [PABLO 研究入口](docs/pablo-research.md)。记忆对象合法或工具成功不代表科研判断已获验证。
+
+[系统设计 v2.1](docs/system-design.html) 仍是完整目标规格。科学记忆的语义支持验证、全自动工程修复发布，以及可逐请求拦截 Codex 内部工具/压缩/重试的 runtime 尚未全部实现。当前 CLI 后端禁用原生工具，容量检查覆盖可观察的会话历史与本轮输入；它不声称已证明完整 provider 输入或取得模型的全部内部推理。旧 `lab_harness/` 保留为兼容执行器，不与新核心的会话或工作记忆混用。
 
 ## 离线运行
 
@@ -82,6 +86,7 @@ npm run build
 
 - [持久会话、工作记忆与逐事件日志](docs/persistent-agents.md)
 - [通用核心与领域接口](docs/rsi-lab-core.md)
+- [PABLO 研究闭环、科学记忆与文献检索](docs/pablo-research.md)
 - [Docking 控制面](docs/docking-rsi-v2.md)
 - [独立 Lab harness](docs/lab-harness-v1.md)
 - [任务运行器](docs/live-agentic-study.md)

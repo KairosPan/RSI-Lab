@@ -25,7 +25,8 @@ COMPACTION_KINDS = {'compacted', 'compaction', 'context_compaction', 'compaction
                     'context_compacted', 'thread_rolled_back', 'thread_rollback'}
 # The first implementation supports the text-only no-native-tools transport.
 RESPONSE_KINDS = {'message', 'reasoning'}
-OUTER_KINDS = {'session_meta', 'turn_context', 'response_item', 'event_msg'}
+OUTER_KINDS = {'session_meta', 'turn_context', 'response_item', 'event_msg',
+               'world_state', 'token_usage_record'}
 
 
 class ContextUnavailable(ValueError):
@@ -53,6 +54,37 @@ def _identity(thread_id):
         raise ValueError('A safe exact provider thread identity is required')
 
 
+def _native_metadata(kind, payload, expected_thread_id):
+    """Validate known CLI metadata without granting evidence or cost authority.
+
+    world_state may include instruction/environment text, so its complete bytes
+    remain in history accounting. Usage records are retained for audit only;
+    execution receipts, not these cumulative counters, settle the budget.
+    """
+    if kind == 'world_state':
+        if (set(payload) != {'full', 'state'} or type(payload['full']) is not bool
+                or not isinstance(payload['state'], dict)):
+            raise ContextUnavailable('context_unverifiable', 'invalid world_state metadata')
+        return
+    required = {'thread_id', 'session_id', 'usage', 'turn_token_usage', 'thread_token_usage'}
+    optional = {'turn_id', 'root_turn_id', 'response_id'}
+    if not required <= set(payload) or set(payload) - required - optional:
+        raise ContextUnavailable('context_unverifiable', 'invalid token_usage_record metadata')
+    if any(payload[name] != expected_thread_id for name in ('thread_id', 'session_id')):
+        raise ContextUnavailable('session_owner_mismatch', 'usage metadata belongs to another thread')
+    if any(not isinstance(payload[name], str) or not payload[name]
+           for name in optional & set(payload)):
+        raise ContextUnavailable('context_unverifiable', 'invalid usage record identity')
+    counter_names = {'input_tokens', 'cached_input_tokens', 'cache_write_input_tokens',
+                     'output_tokens', 'reasoning_output_tokens', 'reasoning_tokens', 'total_tokens'}
+    for name in ('usage', 'turn_token_usage', 'thread_token_usage'):
+        counters = payload[name]
+        if (not isinstance(counters, dict) or not {'input_tokens', 'output_tokens'} <= set(counters)
+                or set(counters) - counter_names
+                or any(type(value) is not int or value < 0 for value in counters.values())):
+            raise ContextUnavailable('context_unverifiable', 'invalid native usage counters')
+
+
 def snapshot_from_bytes(raw, *, expected_thread_id, expected_cwd, expected_prefix=None):
     """Parse a complete local rollout, preserving every byte in its identity.
 
@@ -71,7 +103,7 @@ def snapshot_from_bytes(raw, *, expected_thread_id, expected_cwd, expected_prefi
             raise ContextUnavailable('session_prefix_mismatch', 'native history changed or shrank')
         if expected_prefix.get('provider_thread_id') != expected_thread_id:
             raise ContextUnavailable('session_owner_mismatch', 'prefix belongs to another thread')
-    records, messages, contexts, metadata, unsupported = [], [], [], [], []
+    records, messages, contexts, metadata, unsupported, runtime_metadata = [], [], [], [], [], []
     for number, line in enumerate(raw.splitlines(), 1):
         if not line.strip():
             raise ContextUnavailable('stream_incomplete', f'empty rollout record {number}')
@@ -91,6 +123,9 @@ def snapshot_from_bytes(raw, *, expected_thread_id, expected_cwd, expected_prefi
             metadata.append(payload)
         elif kind == 'turn_context':
             contexts.append(payload)
+        elif kind in {'world_state', 'token_usage_record'}:
+            _native_metadata(kind, payload, expected_thread_id)
+            runtime_metadata.append({'kind': kind, 'payload': payload})
         elif kind == 'response_item':
             item_kind = payload.get('type')
             if item_kind not in RESPONSE_KINDS:
@@ -121,6 +156,7 @@ def snapshot_from_bytes(raw, *, expected_thread_id, expected_cwd, expected_prefi
             'prefix_bytes': len(raw), 'prefix_sha256': digest(raw), 'record_count': len(records),
             'messages': messages, 'messages_sha256': digest(messages),
             'context_records_sha256': digest(contexts), 'context_record_count': len(contexts),
+            'runtime_metadata_sha256': digest(runtime_metadata), 'runtime_metadata_count': len(runtime_metadata),
             'observable_history_bytes': len(raw), 'provider_context_verified': False,
             'read_authority': 'none; current-request delivery must be certified separately',
             'compaction_supported': False,
