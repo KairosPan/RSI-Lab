@@ -4,8 +4,8 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from docking_rsi.controller import Controller
-from docking_rsi.store import Store
+from rsi_lab.controller import Controller
+from rsi_lab.store import Store
 
 
 class ControlAuditTests(unittest.TestCase):

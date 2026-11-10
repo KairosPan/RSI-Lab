@@ -154,6 +154,64 @@ class TransportTests(unittest.TestCase):
         self.assertIn('JSONDecodeError', result['parse_error'])
         self.assertEqual((self.folder / 'raw_response.txt').read_text(), 'not valid JSON')
 
+    def test_duplicate_keys_nonfinite_values_and_nonobjects_reject_response(self):
+        for index, text in enumerate(('{"ok":true,"ok":false}', '{"value":NaN}', '[]')):
+            with self.subTest(text=text):
+                self.folder = self.root / f'invalid-response-{index}'
+                result = self.invoke(frames(text))
+                self.assertEqual(result['execution_status'], 'succeeded')
+                self.assertTrue(result['terminal_received'])
+                self.assertTrue(result['usage_complete'])
+                self.assertIsNone(result['response'])
+                self.assertIsNotNone(result['parse_error'])
+                self.assertEqual((self.folder / 'raw_response.txt').read_text(), text)
+
+    def test_missing_usage_remains_unknown_after_completed_turn(self):
+        events = frames()
+        events[-1].pop('usage')
+        result = self.invoke(events)
+        self.assertTrue(result['terminal_received'])
+        self.assertIsNone(result['usage'])
+        self.assertFalse(result['usage_complete'])
+
+    def test_nonzero_exit_preserves_observed_usage_without_claiming_completion(self):
+        wire = ''.join(json.dumps(event) + '\n' for event in frames())
+        code = ('import sys;sys.stdin.read();sys.stdout.write(' + repr(wire) + ');'
+                'sys.stdout.flush();sys.stderr.write("transport failed");sys.exit(1)')
+        result = self.invoke(code=code)
+        self.assertIsNone(result['response'])
+        self.assertEqual(result['usage'], {'input_tokens': 20, 'output_tokens': 5})
+        self.assertFalse(result['usage_complete'])
+        self.assertEqual(result['execution_status'], 'unknown')
+        self.assertEqual((self.folder / 'stderr.log').read_text(), 'transport failed')
+        self.assertEqual(len(self.commands), 1)
+
+    def test_missing_cli_records_definite_undispatched_failure(self):
+        with patch.object(transport.subprocess, 'Popen', side_effect=FileNotFoundError('provider unavailable')) as spawn:
+            result = transport.invoke('Inspect this task', {'type': 'object'}, self.folder,
+                                      'test-model', 'medium')
+        spawn.assert_called_once()
+        self.assertEqual(result['execution_status'], 'failed_definite')
+        self.assertFalse(result['dispatched'])
+        self.assertIsNone(result['returncode'])
+        self.assertIsNone(result['usage'])
+        self.assertFalse(result['usage_complete'])
+        self.assertIn('FileNotFoundError', result['error'])
+        self.assertFalse(json.loads((self.folder / 'invocation.json').read_text())['dispatched'])
+        self.assertTrue((self.folder / 'events.jsonl').is_file())
+        self.assertTrue((self.folder / 'journal.jsonl').is_file())
+
+    def test_invalid_parameters_do_not_spawn_or_create_attempt(self):
+        with patch.object(transport.subprocess, 'Popen') as spawn:
+            for timeout in (True, 0, float('nan'), float('inf')):
+                with self.subTest(timeout=timeout), self.assertRaises(ValueError):
+                    transport.invoke('Inspect this task', {}, self.folder,
+                                     'test-model', 'medium', timeout=timeout)
+            with self.assertRaises(ValueError):
+                transport.invoke('Inspect this task', {}, self.folder, 'test-model', 'invalid-effort')
+        spawn.assert_not_called()
+        self.assertFalse(self.folder.exists())
+
     def test_certified_failed_turn_is_known_and_protocol_valid(self):
         events = [{'type': 'thread.started', 'thread_id': THREAD},
                   {'type': 'turn.started'},

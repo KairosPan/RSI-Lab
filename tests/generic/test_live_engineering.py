@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from rsi_domains.docking.live_engineering import build
+from rsi_lab.producers.engineering import build
 from rsi_lab import transport
 from rsi_lab.controller import Controller
 from rsi_lab.runtime import Runtime

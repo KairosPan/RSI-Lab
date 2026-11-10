@@ -1,6 +1,6 @@
-"""Cross-domain execution tests: lower loss, shared sources, and optional literature.
+"""Cross-domain execution tests: lower loss and shared untrusted sources.
 
-Model decisions and HTTP responses are fixtures. The controller, packets, adapter
+Model decisions and external source text are fixtures. The controller, packets, adapter
 computation, publication, memory, recommendation transitions and recovery are real.
 No model provider or external service is called by these tests.
 """
@@ -14,8 +14,7 @@ from rsi_lab import input_view
 from rsi_lab.adapters import Adapter
 from rsi_lab.controller import Controller
 from rsi_lab.runtime import Runtime
-from rsi_lab.store import Store, digest, encode
-from rsi_domains.literature import adapter as literature
+from rsi_lab.store import Store, digest
 
 
 CAPABILITY = 'regression.evaluate'
@@ -109,6 +108,38 @@ def loss_adapter(measure=measure_loss):
                    prepare_loss, reserve_loss, execute_loss, publish_loss, measure=measure)
 
 
+SOURCE_CAPABILITY = 'source.reference_fixture'
+
+
+def prepare_source(inputs):
+    if inputs != {'topic': 'least_squares'}:
+        raise ValueError('Only the fixed source topic is available')
+    return dict(inputs)
+
+
+def execute_source(effect, packet):
+    query = json.loads(packet)
+    return {'status': 'succeeded', 'actual_costs': {'tool_calls': 1}, 'result': {
+        'source_group_id': 'reference:' + digest(query),
+        'title': 'Least squares on fixed observations',
+        'abstract': 'A numerical method was described; applicability to this task remains unverified.',
+        'full_text_retrieved': False}}
+
+
+def publish_source(effect, receipt):
+    data = receipt['result']
+    return {'facts': [{'id': 'source_' + effect['id'], 'kind': 'source_statement', 'content': data,
+        'provenance': {'effect_id': effect['id'], 'source_group_id': data['source_group_id'],
+                       'source': 'Fixed external-source fixture', 'independent_evidence': False,
+                       'current_task_validation': False}}], 'conclusions': [], 'data': data}
+
+
+def source_adapter():
+    return Adapter(SOURCE_CAPABILITY, '1.0', 'source_reference_fixture',
+                   {'scope': 'Fixed untrusted source text; no network or task validation'},
+                   prepare_source, reserve_loss, execute_source, publish_source)
+
+
 class Decision:
     def __init__(self, action, payload, *, adoption='decline', update=None):
         self.action, self.payload, self.adoption, self.update = action, payload, adoption, update
@@ -156,15 +187,14 @@ class ResearchDomainBoundaryTests(unittest.TestCase):
         store = Store(self.base / name)
         self.addCleanup(store.close)
         config = {'execution_mode': 'replay', 'goal': 'Fit y = 2x by minimizing measured mean squared error.',
-            'research_features': {'meta_lab': True, 'scientific_memory': True, 'literature': external},
-            'max_input_bytes': 500000, 'scientific_memory_context_bytes': 64000,
-            'literature_run_root': str(store.root), 'literature_max_calls': 1}
+            'research_features': {'meta_lab': True, 'scientific_memory': True},
+            'max_input_bytes': 500000, 'scientific_memory_context_bytes': 64000}
         if policy is not None:
             config['research_policy'] = policy
         Controller(store).initialize(name, budgets={k: {'limit': v, 'hard': k.endswith('_calls')}
             for k, v in {'model_calls': 20, 'tokens': 1000, 'tool_calls': 10, 'wall_seconds': 200, 'cpu_seconds': 100}.items()},
             config=config)
-        rt = Runtime(store, name, adapters=[loss_adapter(measure)] + ([literature.make_adapter()] if external else []),
+        rt = Runtime(store, name, adapters=[loss_adapter(measure)] + ([source_adapter()] if external else []),
                      scientific_identity_provider=project_loss)
         rt.controller.add_fact(name, 'baseline', 'raw_fact', {'slope': 0, 'mean_squared_error': 8, 'direction': 'minimize'},
                                {'source': 'Fixed-data baseline calculation'}, 'baseline')
@@ -299,7 +329,7 @@ class ResearchDomainBoundaryTests(unittest.TestCase):
     def test_policy_rejects_unsupported_category_before_lab_or_tool_work(self):
         rt = self.runtime()
         trigger = rt.observe('policy-test', 'new_evidence', 0, ['baseline'])
-        model = Decision('recommend_change', {'change_kind': 'novelty_screening',
+        model = Decision('recommend_change', {'change_kind': 'unsupported_strategy',
             'instruction': 'This domain policy does not authorize this category.', 'capability_id': CAPABILITY,
             'capability_version': '1.0', 'expected_outcome': 'A test', 'measurement': 'Loss', 'falsifier': 'No change'})
         out = rt.run_meta(trigger['work_id'], model, self.reservation)
@@ -314,28 +344,18 @@ class ResearchDomainBoundaryTests(unittest.TestCase):
         self.assertEqual(rec['measurement']['domain_metrics']['direction'], 'minimize')
 
     def test_external_adapter_fixture_delivers_grouped_untrusted_sources_to_next_lab(self):
-        # This explicitly exercises the literature adapter's molecular-method profile;
-        # it does not assert that a method found by that profile helps regression.
         rt = self.runtime(external=True)
-        query = {'run_root': str(rt.store.root), 'run_id': rt.run_id, 'topic': 'sample_efficient_search', 'max_results': 1}
-        meta_work = rt.observe('literature-review', 'new_evidence', 0, ['baseline'])
-        lab_work = rt.enqueue_lab('literature-owner', ['baseline'])
-        payload = {'capability_id': literature.ADAPTER_ID, 'capability_version': literature.VERSION, 'inputs_json': json.dumps(query)}
+        query = {'topic': 'least_squares'}
+        meta_work = rt.observe('source-review', 'new_evidence', 0, ['baseline'])
+        lab_work = rt.enqueue_lab('source-owner', ['baseline'])
+        payload = {'capability_id': SOURCE_CAPABILITY, 'capability_version': '1.0', 'inputs_json': json.dumps(query)}
         proposals = [rt.run_meta(meta_work['work_id'], Decision('request_diagnostic', payload), self.reservation),
                      rt.run_lab(lab_work['id'], Decision('request_diagnostic', payload), self.reservation)]
+        outputs = []
         for out in proposals:
             self.assertEqual(out['proposal']['status'], 'applied')
-        raw = encode({'hitCount': 1, 'resultList': {'result': [{'id': '12345', 'source': 'MED',
-            'title': 'Sample-efficient molecular design', 'abstractText': 'A model-based search method was studied; transfer is unverified.'}]}})
-        response = {'raw': raw, 'http_status': 200, 'headers': {'content-type': 'application/json'},
-            'response_complete': True, 'error': None, 'finished_at_utc': '2026-11-09T00:00:00+00:00'}
-        outputs = []
-        with patch.object(literature, '_fetch', return_value=response) as transport:
-            for out in proposals:
-                work = json.loads(rt.store.read_blob(out['proposal']['result_ref']))
-                outputs.append(rt.execute_adapter(literature.ADAPTER_ID, query, trigger_id=work['id'], work_id=work['id']))
-            self.assertEqual(transport.call_count, 1)
-        self.assertEqual(outputs[1]['result']['external_requests'], 0)
+            work = json.loads(rt.store.read_blob(out['proposal']['result_ref']))
+            outputs.append(rt.execute_adapter(SOURCE_CAPABILITY, query, trigger_id=work['id'], work_id=work['id']))
         self.assertEqual(outputs[0]['result']['source_group_id'], outputs[1]['result']['source_group_id'])
         source_work = next(w for w in rt.controller.ready(rt.run_id) if w['kind'] == 'lab'
                            and w['inputs'].get('source_effect_id') == outputs[1]['effect']['id'])

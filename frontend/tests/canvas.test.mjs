@@ -4,7 +4,7 @@ import { escapeTrace, traceCallsForAgent } from "../src/agent-canvas.js";
 
 // Synthetic records exercise rendering/filtering only; never live model evidence.
 const records = [
-  { id: "meta-first", agentId: "meta", category: "model", kind: "meta", title: "Inspect receptor evidence", summary: "A bounded investigation", status: "succeeded" },
+  { id: "meta-first", agentId: "meta", category: "model", kind: "meta", title: "Inspect benchmark evidence", summary: "A bounded investigation", status: "succeeded" },
   { id: "engineer-first", agentId: "engineer", category: "model", kind: "engineering_model", title: "Implement adapter", summary: "Source delivery", status: "succeeded" },
   { id: "unknown-engineer", agentId: "engineer", category: "model", kind: "engineering_model", title: "Unresolved build", status: "unknown", usage: { tokens: null }, heldReservations: { tokens: 25 } },
   { id: "meta-tool", agentId: "tools", requestedBy: "meta", category: "tool", kind: "source_retrieval", title: "Read source", summary: "Pinned source", status: "succeeded" },
@@ -27,7 +27,7 @@ test("agent tools require explicit requester attribution", () => {
 });
 
 test("query matching is case-insensitive and cannot bypass agent scope", () => {
-  assert.deepEqual(ids(traceCallsForAgent(records, "meta", "conversation", "RECEPTOR")), ["meta-first"]);
+  assert.deepEqual(ids(traceCallsForAgent(records, "meta", "conversation", "BENCHMARK")), ["meta-first"]);
   assert.deepEqual(traceCallsForAgent(records, "meta", "conversation", "adapter"), []);
   assert.deepEqual(ids(traceCallsForAgent(records, "engineer", "tools", "INPUTS")), ["engineer-tool"]);
 });

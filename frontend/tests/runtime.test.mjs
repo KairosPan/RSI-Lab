@@ -191,17 +191,17 @@ test("all producer-controlled text is bounded and unrecognized properties are dr
   assert.equal("html" in entry, false);
 });
 
-test("demo uses the actual tool topology but remains explicitly simulated", () => {
+test("demo uses a generic tool topology but remains explicitly simulated", () => {
   const demo = normalizeRuntime(demoRuntime(1));
   assert.equal(demo.source, "demo");
   assert.equal(demo.harness, "Demo Harness");
   assert.equal(
-    demo.nodes.find((item) => item.id === "posecheck").status,
+    demo.nodes.find((item) => item.id === "resultcheck").status,
     "error",
   );
   assert.match(
-    demo.nodes.find((item) => item.id === "posecheck").detail,
-    /does not establish molecular inactivity/,
+    demo.nodes.find((item) => item.id === "resultcheck").detail,
+    /does not resolve the task hypothesis/,
   );
   assert.equal(
     demo.nodes.every((item) => item.metrics[0].label.includes("Demo")),
@@ -213,8 +213,8 @@ test("demo uses the actual tool topology but remains explicitly simulated", () =
       "controller",
       "lab",
       "executor",
-      "gnina",
-      "posecheck",
+      "analysis",
+      "resultcheck",
       "memory",
       "meta",
       "validator",

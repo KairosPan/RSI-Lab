@@ -137,7 +137,7 @@ def deliver_pending(runtime, sources):
                 inputs={'request_id': req['id'], 'issue_id': req['issue_id'], 'request_version': req['version']})
             effect = controller.prepare_effect(run, work['id'], EFFECT_KIND, encode(packet),
                 {'tool_calls': 1, 'cpu_seconds': 1, 'wall_seconds': 1}, token + ':prepare',
-                metadata={'lookup_token': token, 'request_id': req['id'], 'request_version': req['version'],
+                metadata={'tool_role': 'source', 'lookup_token': token, 'request_id': req['id'], 'request_version': req['version'],
                           'issue_id': req['issue_id'], 'producer_sha256': digest(Path(__file__).read_bytes())})
         if effect['status'] == 'prepared':
             def execute(admitted, raw):

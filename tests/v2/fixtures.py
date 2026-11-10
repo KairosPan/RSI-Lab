@@ -1,9 +1,7 @@
-"""Offline orchestration acceptance with synthetic role decisions.
+"""Neutral synthetic fixtures for orchestration, acceptance, and recovery tests.
 
-The identity metadata adapter really runs in subprocesses. No chemistry,
-docking, live model judgment, blind gap detection or screening benefit is
-established by this demo. The fixed role responses exercise the controller's
-discovery -> investigation -> executable acceptance -> resumption path.
+The identity metadata adapter runs in subprocesses. Fixed role responses exercise
+discovery, investigation, executable acceptance, and resumption without a model.
 """
 from __future__ import annotations
 
@@ -11,14 +9,15 @@ import json
 from pathlib import Path
 import time
 
-from lab_harness import input_view
-from .capabilities import digest, encoded
-from .controller import Controller
-from .runtime import Runtime
-from .store import Store
+from rsi_lab import input_view
+from rsi_lab.adapters import Adapter
+from rsi_lab.capabilities import digest, encoded
+from rsi_lab.controller import Controller
+from rsi_lab.runtime import Runtime
+from rsi_lab.store import Store
 
 
-IDENTITY_ADAPTER = '''"""Synthetic metadata fixture, not a chemical identity validator."""
+IDENTITY_ADAPTER = '''"""Exact-string identity checks for synthetic record metadata."""
 import hashlib
 import json
 import sys
@@ -26,13 +25,13 @@ import sys
 packet = json.load(sys.stdin)
 value = packet["input"]
 source_hash = hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
-valid = (isinstance(value.get("compound_id"), str) and bool(value["compound_id"])
-         and value.get("prepared_parent_id") == value["compound_id"])
+valid = (isinstance(value.get("record_id"), str) and bool(value["record_id"])
+         and value.get("prepared_parent_id") == value["record_id"])
 result = {"schema_version": "capability_response_v2", "ok": valid,
-          "output": {"consistent": True, "compound_id": value["compound_id"]} if valid else None,
-          "identity": value["compound_id"] if valid else None,
+          "output": {"consistent": True, "record_id": value["record_id"]} if valid else None,
+          "identity": value["record_id"] if valid else None,
           "source_receipts": [{"kind": "input", "sha256": source_hash}],
-          "error": None if valid else {"code": "parent_identity_mismatch", "message": "Parent metadata does not match the compound identity"}}
+          "error": None if valid else {"code": "parent_identity_mismatch", "message": "Parent metadata does not match the record identity"}}
 json.dump(result, sys.stdout)
 '''
 
@@ -42,8 +41,8 @@ def capability_fixture():
     return {'schema_version': 'capability_request_v2', 'capability_id': 'synthetic_parent_metadata_audit',
         'purpose': 'Check exact parent identifier metadata on synthetic prepared records',
         'scope': {'domain': 'synthetic_identity_metadata', 'identity_rule': 'exact_string_equality'},
-        'input_contract': {'compound_id': 'nonempty_string', 'prepared_parent_id': 'string'},
-        'output_contract': {'consistent': 'true_on_success', 'compound_id': 'unchanged_input_identity'},
+        'input_contract': {'record_id': 'nonempty_string', 'prepared_parent_id': 'string'},
+        'output_contract': {'consistent': 'true_on_success', 'record_id': 'unchanged_input_identity'},
         'scientific_impact': False, 'baseline_scientific_protocol': 'synthetic-protocol-v1',
         'candidate_scientific_protocol': 'synthetic-protocol-v1', 'new_study_id': None,
         'execution_profile': 'reviewed_local_python_json_v1',
@@ -51,11 +50,11 @@ def capability_fixture():
         'limits': {'wall_seconds_per_case': 3, 'cpu_seconds_per_case': 1, 'output_bytes_per_case': 8192},
         'cases': [
             {'case_id': 'matching-parent', 'kind': 'normal',
-             'input': {'compound_id': 'demo-compound-001', 'prepared_parent_id': 'demo-compound-001'},
-             'expected_output': {'consistent': True, 'compound_id': 'demo-compound-001'},
-             'expected_identity': 'demo-compound-001', 'expected_error_code': None},
+             'input': {'record_id': 'demo-record-001', 'prepared_parent_id': 'demo-record-001'},
+             'expected_output': {'consistent': True, 'record_id': 'demo-record-001'},
+             'expected_identity': 'demo-record-001', 'expected_error_code': None},
             {'case_id': 'mismatched-parent', 'kind': 'failure',
-             'input': {'compound_id': 'demo-compound-001', 'prepared_parent_id': 'another-compound'},
+             'input': {'record_id': 'demo-record-001', 'prepared_parent_id': 'another-record'},
              'expected_output': None, 'expected_identity': None, 'expected_error_code': 'parent_identity_mismatch'}]}
 
 
@@ -71,8 +70,8 @@ def fixture_delivery(directory):
         'capability_version': 'synthetic-fixture-v1', 'artifact_sha256': artifact,
         'scope': spec['scope'], 'input_contract': spec['input_contract'], 'output_contract': spec['output_contract'],
         'packages': {}, 'engineering_provenance': {'kind': 'bundled_reviewed_synthetic_fixture',
-            'source_module': 'docking_rsi.demo.IDENTITY_ADAPTER', 'reviewed_source_sha256': artifact,
-            'limitation': 'Exact metadata string comparison; no molecular or chemical-state validation'}}
+            'source_module': 'tests.v2.fixtures.IDENTITY_ADAPTER', 'reviewed_source_sha256': artifact,
+            'limitation': 'Exact metadata string comparison on synthetic records'}}
     return spec, adapter, manifest, artifact
 
 
@@ -104,6 +103,33 @@ class SyntheticMetaExecutor:
             'limitation': 'No model executed; decision quality and blind discovery are not evaluated'}
 
 
+def prepare_inspection(inputs):
+    return inputs
+
+
+def inspection_reservations(packet):
+    return {'tool_calls': 1}
+
+
+def execute_inspection(effect, packet_bytes):
+    return {'status': 'succeeded', 'actual_costs': {'tool_calls': 1},
+            'result': json.loads(packet_bytes)}
+
+
+def publish_inspection(effect, receipt):
+    return {'facts': receipt['result']['facts'], 'conclusions': [],
+            'data': receipt['result']}
+
+
+def inspection_adapter():
+    return Adapter(adapter_id='synthetic_inspection', version='1',
+        effect_kind='synthetic_inspection',
+        manifest={'scope': 'Synthetic record evidence', 'input_contract': 'facts',
+                  'output_contract': 'unchanged facts with provenance'},
+        prepare=prepare_inspection, reservations=inspection_reservations,
+        execute=execute_inspection, publication=publish_inspection)
+
+
 def run_demo(directory, run_id='offline-demo'):
     """Run the complete offline mechanism check, preserving all real receipts.
 
@@ -128,7 +154,7 @@ def run_demo(directory, run_id='offline-demo'):
         controller = Controller(store)
         controller.initialize(run_id, max_external=1, config={
             'execution_mode': 'replay', 'synthetic_decisions': True,
-            'goal': 'Audit a synthetic docking handoff metadata fixture and resume its local workflow',
+            'goal': 'Audit a synthetic record handoff metadata fixture and resume its local workflow',
             'authorized_sources': ['fixture_source'], 'open_review_interval_batches': 1, 'max_open_reviews': 1,
             'max_input_bytes': 131072, 'wait_timeout_seconds': 600}, budgets={
                 'model_calls': {'limit': 10, 'hard': True, 'settlement_reserve': 1},
@@ -138,9 +164,9 @@ def run_demo(directory, run_id='offline-demo'):
                 'wall_seconds': {'limit': 60, 'hard': False, 'settlement_reserve': 2}})
         runtime = Runtime(store, run_id)
         fact = controller.add_fact(run_id, 'synthetic_handoff', 'raw_fact',
-            {'fixture': True, 'compound_id': 'demo-compound-001',
-             'prepared_parent_id': 'demo-compound-001', 'identity_audit_receipt': None},
-            {'source': 'bundled_synthetic_handoff', 'chemical_validation': False}, 'demo-initial-fact')
+            {'fixture': True, 'record_id': 'demo-record-001',
+             'prepared_parent_id': 'demo-record-001', 'identity_audit_receipt': None},
+            {'source': 'bundled_synthetic_handoff', 'domain_validation': False}, 'demo-initial-fact')
         discovery = runtime.observe('synthetic-batch-boundary', 'batch_boundary', 1, [fact['id']])
         decisions = []
 
@@ -170,22 +196,22 @@ def run_demo(directory, run_id='offline-demo'):
             'falsifying_observation': 'A matching verified audit receipt already exists'})
         iid = issue['id']
         requested = decision(ready('meta_disposition', iid)['id'], 'request_evidence', {
-            'source_id': 'fixture_source', 'source_version': 1, 'object_ids': ['demo-compound-001'],
+            'source_id': 'fixture_source', 'source_version': 1, 'object_ids': ['demo-record-001'],
             'fields': ['parent_identity_metadata', 'audit_capability'],
             'query': 'Retrieve the exact bundled fixture metadata and audit capability receipt',
             'max_pages': 1, 'max_bytes': 4096})
         waiting_before_delivery = store.get(run_id, 'wait', requested['wait_id'])['status']
         runtime.ingest_delivery(requested['request_id'],
-            {'fixture': True, 'compound_id': 'demo-compound-001', 'prepared_parent_id': 'demo-compound-001',
+            {'fixture': True, 'record_id': 'demo-record-001', 'prepared_parent_id': 'demo-record-001',
              'audit_capability': None, 'existing_audit_receipt': None},
             {'source_id': 'fixture_source', 'source_version': 1, 'fixture': True})
         waiting_after_delivery = store.get(run_id, 'wait', requested['wait_id'])['status']
         build = decision(ready('meta_disposition', iid)['id'], 'request_capability', {
             'capability_id': 'synthetic_parent_metadata_audit',
             'purpose': 'Produce executable exact-string identity metadata evidence for the synthetic fixture',
-            'input_contract': 'compound_id and prepared_parent_id strings',
-            'output_contract': 'unchanged compound identity, consistency result, and input source hash',
-            'applicability': 'Bundled synthetic identifier metadata; no chemical identity interpretation',
+            'input_contract': 'record_id and prepared_parent_id strings',
+            'output_contract': 'unchanged record identity, consistency result, and input source hash',
+            'applicability': 'Bundled synthetic identifier metadata; exact string identity only',
             'acceptance_checks': ['matching parent succeeds', 'mismatched parent fails explicitly',
                                   'identity preserved', 'source receipt verified', 'observed resource usage'],
             'affects_scientific_results': False})
@@ -196,10 +222,10 @@ def run_demo(directory, run_id='offline-demo'):
             raise ValueError('The real synthetic adapter did not pass its frozen acceptance cases')
         receipt = json.loads(store.read_blob(acceptance['effect']['result_ref']))
         decision(ready('meta_disposition', iid)['id'], 'close_issue', {
-            'resolution': 'resolved', 'reason': 'The exact bundled metadata fixture has actual executable normal/failure, identity, provenance and cost receipts; no chemistry conclusion follows'})
+            'resolution': 'resolved', 'reason': 'The exact bundled metadata fixture has actual executable normal/failure, identity, provenance and cost receipts; the receipt only establishes the tested software behavior'})
         # A genuine subsequent local action demonstrates resumed execution. It
         # checks the preserved acceptance artifact and records a handoff marker;
-        # it does not manufacture a Vina result or formal compound list.
+        # the resulting receipt records only this local software action.
         work = controller.enqueue(run_id, 'lab', 'after-verified-fixture', 'demo-resume-lab',
                                   inputs={'capability_registration': capability['id'], 'synthetic': True})
         effect = controller.prepare_effect(run_id, work['id'], 'synthetic_local_handoff',
@@ -212,18 +238,18 @@ def run_demo(directory, run_id='offline-demo'):
             if digest(actual) != pinned['artifact_sha256']:
                 raise ValueError('Verified executable artifact changed before resumed handoff')
             marker = {'schema_version': 'synthetic_resumption_v2', 'capability_registration': capability['id'],
-                      'artifact_sha256': digest(actual), 'fixture_only': True, 'docking_executed': False}
+                      'artifact_sha256': digest(actual), 'fixture_only': True, 'live_model_executed': False}
             marker_path = root / 'synthetic_resumed.json'
             marker_path.write_bytes(encoded(marker))
             return {'status': 'succeeded', 'actual_costs': {'tool_calls': 1, 'wall_seconds': time.monotonic() - started},
                     'resumption': marker, 'artifact_sha256': digest(marker_path.read_bytes())}
         resumed = controller.dispatch_effect(run_id, effect['id'], resume)
         status = runtime.status()
-        report = {'schema_version': 'docking_rsi_offline_demo_v2', 'run_id': run_id,
+        report = {'schema_version': 'rsi_offline_fixture_v2', 'run_id': run_id,
             'status': 'completed' if resumed['status'] == 'succeeded' else 'incomplete',
             'scope': 'Offline orchestration integration with scripted synthetic Meta decisions and actual local adapter processes',
-            'not_evaluated': ['live model judgment quality', 'blind discovery of chemical prerequisites',
-                              'docking or scientific validity', 'screening quality or cost improvement'],
+            'not_evaluated': ['live model judgment quality', 'blind discovery of workflow prerequisites',
+                              'scientific validity', 'task quality or cost improvement'],
             'decisions': decisions, 'issue_id': iid, 'issue_status': store.get(run_id, 'issue', iid)['status'],
             'request_wait': {'before_delivery': waiting_before_delivery, 'after_delivery': waiting_after_delivery},
             'capability_wait': store.get(run_id, 'wait', build['wait_id'])['status'],
@@ -233,7 +259,7 @@ def run_demo(directory, run_id='offline-demo'):
                            'checks': case['checks'], 'input_sha256': case['input_sha256'],
                            'output_sha256': case['output_sha256']} for case in receipt['capability_acceptance']['cases']],
                 'costs': receipt['actual_costs'], 'isolation': receipt['capability_acceptance']['isolation']},
-            'resumed_effect_id': resumed['id'], 'docking_executed': False,
+            'resumed_effect_id': resumed['id'], 'live_model_executed': False,
             'unreconciled_effect_count': len(status['effects_requiring_reconciliation']),
             'costs': {row['id']: {'spent': row['spent'], 'reserved': row['reserved'], 'hard': row['hard'],
                                 'overrun': row['overrun']} for row in status['budgets']},

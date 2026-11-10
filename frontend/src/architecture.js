@@ -1,7 +1,7 @@
 // Architecture is a view over recorded work, not a census of autonomous agents.
 // This projection targets agent_trace_v1 from read-agent-trace.py. In that
 // contract, requestedBy is set only after an exact recorded request/build link.
-// Never infer ownership, literature retrieval or execution from prompt text.
+// Never infer ownership, source retrieval or execution from prompt text.
 export const architectureComponents = {
   lab: {
     id: "lab", name: "Lab Harness", subtitle: "Task planning & execution", icon: "flask",
@@ -21,17 +21,17 @@ export const architectureComponents = {
     sections: [{ id: "facts", label: "Evidence index", type: "records" }, { id: "issues", label: "Open questions", type: "records" }, { id: "cost", label: "Cost & source", type: "cost" }],
     scopeNote: "Partial view: fact rows contain references, not the original evidence; issue hypotheses are not verified conclusions. Full working-memory history and storage overhead are not separately exposed or metered in this trace.",
   },
-  literature: {
-    id: "literature", name: "Literature Tool Calling", subtitle: "Research sources & retrieval", icon: "search",
-    description: "The architecture includes literature retrieval. The current trace adapter supports frozen local-file delivery, not connected literature search or citation following.",
-    sections: [{ id: "overview", label: "Connection & scope", type: "overview" }, { id: "frozen_sources", label: "Frozen source reads", type: "calls" }, { id: "cost", label: "Cost & source", type: "cost" }],
-    scopeNote: "Not connected in this implementation: literature search and citation following. Frozen source reads are preserved separately and do not count as literature searches. Costs here measure only those source reads, not a literature service.",
+  sources: {
+    id: "sources", name: "Source Tools", subtitle: "Inputs, documents & retrieval", icon: "search",
+    description: "Source providers deliver task inputs and supporting records. Only tools explicitly recorded with the source role are shown here.",
+    sections: [{ id: "overview", label: "Connection & scope", type: "overview" }, { id: "reads", label: "Source reads", type: "calls" }, { id: "cost", label: "Cost & source", type: "cost" }],
+    scopeNote: "A recorded source read does not prove a provider is currently connected or that its content is valid. Source ownership requires explicit tool-role metadata; names and prompt text are not evidence.",
   },
   tools: {
     id: "tools", name: "Computational Tools", subtitle: "Preparation, diagnostics & evaluation", icon: "cpu",
-    description: "Actual computational, validation and host-tool executions with their original arguments, outputs and receipts. Frozen source reads are shown separately.",
+    description: "Actual computational, validation and host-tool executions with their original arguments, outputs and receipts. Source reads are shown separately.",
     sections: [{ id: "executions", label: "Executions", type: "calls" }, { id: "cost", label: "Cost & source", type: "cost" }],
-    scopeNote: "A successful process does not prove scientific acceptance. Vina is implemented; absence of a recorded Vina call means it did not run in this trace. Tool records and heterogeneous billing units are different quantities. Attributed calls may also appear under their requesting harness.",
+    scopeNote: "A successful process does not prove scientific acceptance. Tool records and heterogeneous billing units are different quantities. Attributed calls may also appear under their requesting harness.",
   },
   controller: {
     id: "controller", name: "Infrastructure", subtitle: "Controller, budget & recovery", icon: "grid", infrastructure: true,
@@ -42,13 +42,12 @@ export const architectureComponents = {
 };
 
 const apModelKinds = new Set(["meta", "engineering_model", "lab", "lab_model", "model"]);
-const apFrozenKind = "frozen_local_source_retrieval";
 const apCategory = (call) => call.category || (apModelKinds.has(call.kind) || ["meta", "engineer", "lab"].includes(call.agentId) ? "model" : call.kind === "event" ? "event" : "tool");
 const apEngineering = (call) => call.kind === "engineering_model" || (apCategory(call) === "model" && call.agentId === "engineer");
 const apMeta = (call) => apCategory(call) === "model" && !apEngineering(call) && (call.kind === "meta" || call.agentId === "meta");
 const apLab = (call) => apCategory(call) === "model" && !apEngineering(call) && (call.agentId === "lab" || ["lab", "lab_model"].includes(call.kind));
 const apTool = (call) => apCategory(call) === "tool";
-const apFrozen = (call) => apTool(call) && call.kind === apFrozenKind;
+const apSource = (call) => apTool(call) && call.tool?.role === "source";
 const apMetaTool = (call) => apTool(call) && ["meta", "engineer"].includes(call.requestedBy);
 const apLabTool = (call) => apTool(call) && (call.requestedBy === "lab" || call.agentId === "lab");
 const apUnique = (rows) => {
@@ -71,8 +70,8 @@ export function architectureRows(index, id, section) {
   let predicate;
   if (id === "lab") predicate = section === "conversation" ? apLab : section === "tools" ? apLabTool : (c) => apLab(c) || apLabTool(c);
   if (id === "meta") predicate = section === "conversation" ? apMeta : section === "engineering" ? apEngineering : section === "tools" ? apMetaTool : (c) => apMeta(c) || apEngineering(c) || apMetaTool(c);
-  if (id === "literature") predicate = section === "overview" ? () => false : apFrozen;
-  if (id === "tools") predicate = (c) => apTool(c) && !apFrozen(c);
+  if (id === "sources") predicate = section === "overview" ? () => false : apSource;
+  if (id === "tools") predicate = (c) => apTool(c) && !apSource(c);
   return predicate ? apUnique(calls.filter(predicate)) : [];
 }
 
@@ -82,7 +81,7 @@ export function architectureCallHome(call) {
   if (apEngineering(call)) return { id: "meta", section: "engineering" };
   if (apMeta(call)) return { id: "meta", section: "conversation" };
   if (apLab(call)) return { id: "lab", section: "conversation" };
-  if (apFrozen(call)) return { id: "literature", section: "frozen_sources" };
+  if (apSource(call)) return { id: "sources", section: "reads" };
   if (apTool(call)) return { id: "tools", section: "executions" };
   if (apCategory(call) === "event") return { id: "controller", section: "events" };
   return null; // An unfamiliar model role has no proven architecture ownership.
@@ -104,9 +103,9 @@ export function architectureState(index, id) {
   }
   const rows = architectureRows(index, id, "cost");
   const unknown = rows.some((c) => ["unknown", "dispatching", "blocked_external"].includes(c.status) || c.usage?.accountingUnknown);
-  if (id === "literature") {
-    const count = architectureRows(index, id, "frozen_sources").length;
-    return { status: "not_connected", label: "Not connected", note: `${component.scopeNote}${unknown ? " At least one frozen source call also has an unresolved result." : ""}`, countLabel: `${count} frozen source reads` };
+  if (id === "sources") {
+    const count = architectureRows(index, id, "reads").length;
+    return { status: unknown ? "unknown" : count ? "recorded" : "not_started", label: unknown ? "Unresolved call" : count ? "Recorded reads" : "No recorded reads", note: component.scopeNote, countLabel: `${count} source reads` };
   }
   if (id === "memory") return { status: "partial", label: "Partial view", note: component.scopeNote, countLabel: `${index.facts.length} evidence entries · ${index.issues.length} issues` };
   if (id === "controller") return { status: index.events.length ? "recorded" : "not_started", label: index.events.length ? "Recorded events" : "No recorded events", note: component.scopeNote, countLabel: `${index.events.length} events` };
@@ -114,8 +113,7 @@ export function architectureState(index, id) {
   if (id === "meta") countLabel = `${architectureRows(index, id, "conversation").length} Meta · ${architectureRows(index, id, "engineering").length} engineering calls`;
   if (id === "tools") {
     countLabel = `${rows.length} executions`;
-    const vina = rows.filter((c) => c.kind === "docking_vina_batch").length;
-    note = `${vina ? `${vina} Vina call${vina === 1 ? "" : "s"} recorded.` : "No Vina calls in this run."} ${note}`;
+    note = `${rows.length} tool Effect${rows.length === 1 ? "" : "s"} recorded. ${note}`;
   }
   return { status: unknown ? "unknown" : rows.length ? "recorded" : "not_started", label: unknown ? "Unresolved call" : rows.length ? "Recorded work" : "No calls in this run", note, countLabel };
 }

@@ -1,4 +1,4 @@
-"""Actual non-docking task execution through the unmodified shared kernel."""
+"""Actual tabular task execution through the unmodified shared kernel."""
 import json
 import copy
 from pathlib import Path
@@ -9,18 +9,18 @@ from rsi_lab import runtime as core_runtime
 from rsi_lab.controller import Controller
 from rsi_lab.plans import load_task_plan
 from rsi_lab.store import Store, digest
-from rsi_domains.docking.plugin import make_adapter as docking_adapter
+from tests.generic.test_adapter_boundary import fixture_adapter
 from rsi_domains.tabular.demo import CSV_TEXT, UNITS, run_demo, task_plan
 from rsi_domains.tabular.plugin import ADAPTER_ID, make_adapter, prepare, source_bytes
 
 
 class PortabilityTests(unittest.TestCase):
-    def test_non_docking_workflow_reuses_core_with_both_domain_packages_loaded(self):
+    def test_tabular_workflow_reuses_core_with_multiple_adapters_loaded(self):
         before={p.name:digest(p.read_bytes()) for p in Path(core_runtime.__file__).parent.glob('*.py')}
         with tempfile.TemporaryDirectory() as directory:
-            report=run_demo(directory,additional_adapters=[docking_adapter()])
+            report=run_demo(directory,additional_adapters=[fixture_adapter()])
             self.assertEqual(report['status'],'completed')
-            self.assertEqual(set(report['loaded_adapters']),{'docking.prerequisites',ADAPTER_ID})
+            self.assertEqual(set(report['loaded_adapters']),{'numeric.fixture',ADAPTER_ID})
             self.assertEqual(report['issue_status'],'resolved')
             self.assertEqual(report['request_wait'],'fired')
             self.assertTrue(report['wait_restart_exercised'])
@@ -49,7 +49,7 @@ class PortabilityTests(unittest.TestCase):
                 effect=store.list('tabular-portability','effect',kind='tabular_aggregation')[0]
                 self.assertEqual(effect['metadata']['task_plan_sha256'],digest(plan))
                 self.assertEqual(effect['metadata']['adapter_id'],ADAPTER_ID)
-                self.assertEqual(len(store.list('tabular-portability','effect',kind='docking_prerequisite_inspection')),0)
+                self.assertEqual(len(store.list('tabular-portability','effect',kind='numeric_fixture')),0)
                 registration=store.get('tabular-portability','capability',report['capability_registration'])
                 acceptance_effect=store.get('tabular-portability','effect',registration['effect_id'])
                 receipt=json.loads(store.read_blob(acceptance_effect['result_ref']))
@@ -58,22 +58,21 @@ class PortabilityTests(unittest.TestCase):
                 self.assertTrue(all(case['passed'] for case in receipt['capability_acceptance']['cases']))
                 store.verify_history('tabular-portability')
             finally: store.close()
-            again=run_demo(directory,additional_adapters=[docking_adapter()])
+            again=run_demo(directory,additional_adapters=[fixture_adapter()])
             self.assertEqual(again,report)
         after={p.name:digest(p.read_bytes()) for p in Path(core_runtime.__file__).parent.glob('*.py')}
         self.assertEqual(before,after)
-        self.assertFalse(hasattr(core_runtime.Runtime,'inspect_docking'))
 
     def test_domain_capabilities_do_not_leak_between_registries(self):
         from rsi_lab.adapters import AdapterRegistry
-        first=AdapterRegistry([docking_adapter()])
+        first=AdapterRegistry([fixture_adapter()])
         second=AdapterRegistry([make_adapter()])
-        mixed=AdapterRegistry([docking_adapter(),make_adapter()])
-        self.assertEqual(first.get('docking.prerequisites').adapter_id,'docking.prerequisites')
+        mixed=AdapterRegistry([fixture_adapter(),make_adapter()])
+        self.assertEqual(first.get('numeric.fixture').adapter_id,'numeric.fixture')
         with self.assertRaises(ValueError): first.get(ADAPTER_ID)
-        with self.assertRaises(ValueError): second.get('docking.prerequisites')
+        with self.assertRaises(ValueError): second.get('numeric.fixture')
         self.assertEqual(mixed.get(ADAPTER_ID).descriptor(),second.get(ADAPTER_ID).descriptor())
-        self.assertEqual(mixed.get('docking.prerequisites').descriptor(),first.get('docking.prerequisites').descriptor())
+        self.assertEqual(mixed.get('numeric.fixture').descriptor(),first.get('numeric.fixture').descriptor())
 
     def test_changed_dataset_cannot_borrow_registered_task_identity(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -96,9 +95,9 @@ class PortabilityTests(unittest.TestCase):
             store=Store(directory)
             try:
                 Controller(store).initialize('run',budgets={'tool_calls':{'limit':1,'hard':True}})
-                runtime=core_runtime.Runtime(store,'run',adapters=[make_adapter(),docking_adapter()])
+                runtime=core_runtime.Runtime(store,'run',adapters=[make_adapter(),fixture_adapter()])
                 self.assertNotIn(ADAPTER_ID,runtime.capability_catalog())
-                self.assertIn('docking.prerequisites',runtime.capability_catalog())
+                self.assertIn('numeric.fixture',runtime.capability_catalog())
                 with self.assertRaisesRegex(ValueError,'verified artifact acceptance'):
                     runtime.execute_adapter(ADAPTER_ID,{},trigger_id='not-yet-accepted')
                 self.assertEqual(store.list('run','effect'),[])
