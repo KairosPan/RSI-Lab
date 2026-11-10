@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 from rsi_lab.__main__ import main as cli_main
 from rsi_lab.runtime import Runtime
-from rsi_lab.store import Store
+from rsi_lab.store import Store, digest
 from tests.v2.liveness_support import BUDGETS, Scripted, none, open_run
 
 REPO = Path(__file__).resolve().parents[2]
@@ -120,6 +120,45 @@ class ReconcileCommandTests(unittest.TestCase):
         self.assertEqual(store.get('r', 'effect', effect['id'])['status'], 'unknown')
         store.verify_history('r')
 
+    def test_receipt_for_a_real_timeout_charges_only_resources_without_a_settled_cost(self):
+        store, controller, rt = open_run(self, config=LIVE)
+        rt.enqueue_lab('lab-1')
+        def timed_out(effect, packet):       # the shape CodexExecutor produces at its timeout
+            return {'status': 'unknown', 'actual_costs': {'model_calls': 1, 'wall_seconds': 1.25},
+                    'reason': 'killed at the executor timeout'}
+        rt.run_until_wait(timed_out, LIVE_RES)
+        effect = store.list('r', 'effect')[0]
+        repeated = operator_receipt(effect['id'])                      # tokens and wall_seconds
+        with self.assertRaises(ValueError):
+            controller.reconcile('r', effect['id'], repeated, 'k1')
+        self.assertEqual(store.get('r', 'effect', effect['id'])['status'], 'unknown')
+        unsettled_only = {**repeated, 'actual_costs': {'tokens': 1000}}
+        settled = controller.reconcile('r', effect['id'], unsettled_only, 'k2')
+        self.assertEqual((settled['status'], settled['accounting_unknown']), ('failed_definite', False))
+        self.assertTrue(all(b['reserved'] == 0 for b in store.list('r', 'budget')))
+        store.verify_history('r')
+
+    def test_reconciliation_that_still_requires_fencing_refuses_the_discard(self):
+        store, controller, rt, effect, session = self.timed_out_lab_call()
+        receipt = operator_receipt(effect['id'], recovery_requires_fencing=True)
+        controller.reconcile('r', effect['id'], receipt, 'operator-reconcile')
+        rt.recover()
+        with self.assertRaises(ValueError):
+            rt.agents.discard_completed_turn(session['id'], 'timeout', 'discard-1')
+        store.verify_history('r')
+
+    def test_reconcile_refuses_a_receipt_bound_to_another_effect_or_without_provenance(self):
+        store, controller, rt, effect, session = self.timed_out_lab_call()
+        other_effect = operator_receipt(effect['id'])
+        other_effect['reconciliation'] = {**other_effect['reconciliation'], 'effect_id': 'effect_' + '0' * 24}
+        no_provenance = operator_receipt(effect['id'])
+        no_provenance['reconciliation'] = {**no_provenance['reconciliation'], 'provenance': ''}
+        for receipt in (other_effect, no_provenance):
+            with self.subTest(receipt=receipt['reconciliation']), self.assertRaises(ValueError):
+                controller.reconcile('r', effect['id'], receipt, 'k-' + digest(receipt)[:8])
+        self.assertEqual(store.get('r', 'effect', effect['id'])['status'], 'unknown')
+        store.verify_history('r')
+
 
 class TimeoutConfigTests(unittest.TestCase):
     def test_model_timeout_defaults_to_300_and_reads_the_run_config(self):
@@ -145,6 +184,19 @@ class TimeoutConfigTests(unittest.TestCase):
              patch.object(Runtime, 'run_until_wait', return_value={'status': 'quiescent'}):
             self.assertEqual(main(['--root', root, '--run', 'r', 'run-until-wait']), 0)
         self.assertEqual(executor_class.call_args.kwargs['timeout_seconds'], 42)
+
+    def test_init_refuses_invalid_policy_keys_before_creating_the_run(self):
+        for key, bad in (('unknown_usage_policy', 'zero'), ('model_failure_retries', 6), ('model_timeout_seconds', 0)):
+            with self.subTest(key=key):
+                root = tempfile.mkdtemp(prefix='rsi-init-')
+                self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+                path = write_json(self, {'budgets': BUDGETS, key: bad})
+                with self.assertRaises(ValueError):
+                    main(['--root', root, '--run', 'r', 'init', '--config', path])
+                store = Store(root)
+                self.addCleanup(store.close)
+                with self.assertRaises(KeyError):
+                    store.run('r')
 
 
 class ErrorSurfaceTests(unittest.TestCase):

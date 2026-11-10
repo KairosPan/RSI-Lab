@@ -110,6 +110,10 @@ def broken_publication(effect, receipt):
     raise TypeError('broken publication')
 
 
+def empty_publication(effect, receipt):
+    return {}
+
+
 def _probe(adapter_id, effect_kind, prepare, execute, publication):
     return Adapter(adapter_id=adapter_id, version='1', effect_kind=effect_kind, manifest={'scope': 'probe'},
                    prepare=prepare, reservations=one_tool_call, execute=execute, publication=publication)
@@ -125,6 +129,10 @@ def lenient_adapter():
 
 def broken_publication_adapter():
     return _probe('probe_bad', 'probe_bad_tool', strict_prepare, record_execution, broken_publication)
+
+
+def malformed_publication_adapter():
+    return _probe('probe_malformed', 'probe_malformed_tool', strict_prepare, record_execution, empty_publication)
 
 
 def dying_adapter():

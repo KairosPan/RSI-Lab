@@ -2,6 +2,8 @@
 import unittest
 
 from tests.v2.liveness_support import (BUDGETS, ISSUE, RES, Scripted, diag, none, open_run, validating_adapter)
+from tests.v2.test_operator_recovery import LIVE, LIVE_RES, operator_receipt
+from tests.v2.test_operator_recovery import unknown as timed_out
 
 EMPTY_ATTENTION = {'stalled_issues': [], 'stopped_lab': None, 'sessions_requiring_recovery': [],
                    'capacity_blocked_work': []}
@@ -106,6 +108,22 @@ class DriverReportTests(unittest.TestCase):
         self.assertEqual(out['status'], 'awaiting_producer_or_deadline')
         self.assertEqual(out['report']['work_status'], 'pending_queued')     # the evidence_retrieve producer Work is ready
         self.assertEqual(out['report']['attention']['stalled_issues'], [])
+        store.verify_history('r')
+
+    def test_ready_work_behind_a_session_requiring_recovery_is_stalled(self):
+        store, controller, rt = open_run(self, config=LIVE)
+        rt.enqueue_lab('lab-1')
+        rt.run_until_wait(timed_out, LIVE_RES)
+        effect = store.list('r', 'effect')[0]
+        controller.reconcile('r', effect['id'], operator_receipt(effect['id'], actual_costs={'tokens': 1000,
+                                                                                            'wall_seconds': 10}), 'k')
+        rt.recover()
+        lab2 = rt.enqueue_lab('lab-2')
+        executor = Scripted({'lab': none})
+        out = rt.run_until_wait(executor, LIVE_RES)
+        self.assertEqual((out['status'], out['reason']), ('stalled', 'sessions_requiring_recovery'))
+        self.assertEqual(executor.calls, [])
+        self.assertEqual(store.get('r', 'work', lab2['id'])['status'], 'ready')
         store.verify_history('r')
 
     def test_budget_denial_is_reported_as_resource_exhausted(self):

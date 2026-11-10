@@ -4,7 +4,8 @@ import unittest
 
 from rsi_lab.runtime import Runtime
 from tests.v2.liveness_support import (EXECUTIONS, ISSUE, RES, BUDGETS, Scripted, broken_publication_adapter, by_seq,
-                                       diag, dying_adapter, lenient_adapter, none, open_run, validating_adapter)
+                                       diag, dying_adapter, lenient_adapter, malformed_publication_adapter, none,
+                                       open_run, validating_adapter)
 
 
 def trial_payload(plan_ref):
@@ -170,6 +171,37 @@ class ToolRequestTests(unittest.TestCase):
         self.assertEqual(store.get('r', 'work', diagnostic['id'])['status'], 'ready')
         store.verify_history('r')
 
+    def test_error_after_dispatch_is_a_step_error_not_an_admission_skip(self):
+        store, controller, rt = open_run(self, adapters=[malformed_publication_adapter()])
+        rt.enqueue_lab('lab-1')
+        executor = Scripted({'lab': lambda d: ('request_diagnostic', diag({'record_id': 'a'},
+                                                                          capability_id='probe_malformed'))})
+        out = rt.run_until_wait(executor, RES, max_steps=6)
+        effect = store.list('r', 'effect', kind='probe_malformed_tool')[0]
+        self.assertEqual(effect['status'], 'succeeded')
+        self.assertEqual(out['skipped'], [])
+        self.assertEqual(out['step_errors'], [{'work_id': effect['work_id'], 'effect_id': effect['id'],
+                                               'reason': 'Adapter publication requires facts, conclusions and data'}])
+        self.assertEqual(out['status'], 'blocked_adapter')
+        self.assertEqual(len(EXECUTIONS), 1)
+        store.verify_history('r')
+
+    def test_rejecting_a_finished_diagnostic_does_not_touch_its_dependency(self):
+        store, controller, rt_a = open_run(self, adapters=[lenient_adapter()])
+        rt_a.enqueue_lab('lab-1')
+        executor = Scripted({'lab': in_order(('request_diagnostic', diag({'wrong_key': 1})), none(None)),
+                             'discovery': none})
+        rt_a.run_until_wait(executor, RES, max_steps=10)
+        work = store.list('r', 'work', kind='diagnostic')[0]
+        self.assertEqual(work['status'], 'succeeded')
+        before = store.get('r', 'dependency', work['inputs']['dependency_id'])
+        rt_b = Runtime(store, 'r', adapters=[validating_adapter()])
+        with self.assertRaises(ValueError):
+            rt_b.execute_adapter('probe', {'wrong_key': 1}, trigger_id=work['id'], work_id=work['id'])
+        self.assertEqual(store.get('r', 'dependency', work['inputs']['dependency_id']), before)
+        self.assertEqual(store.get('r', 'work', work['id'])['status'], 'succeeded')
+        store.verify_history('r')
+
 
 class PreparedEffectTests(unittest.TestCase):
     def setUp(self):
@@ -199,7 +231,7 @@ class PreparedEffectTests(unittest.TestCase):
         self.assertEqual(out['skipped'], [])
         store.verify_history('r')
 
-    def test_prepared_tool_effect_is_cancelled_when_its_capability_is_no_longer_admitted(self):
+    def test_prepared_tool_effect_is_held_when_its_capability_is_no_longer_admitted(self):
         store, controller, rt = open_run(self, adapters=[validating_adapter()])
         rt.enqueue_lab('lab-1')
         executor = Scripted({'lab': in_order(('request_diagnostic', diag({'record_id': 'a'})), none(None)),
@@ -218,9 +250,11 @@ class PreparedEffectTests(unittest.TestCase):
         restarted = Runtime(store, 'r', adapters=[validating_adapter()])
         out = restarted.run_until_wait(executor, RES, max_steps=6)
         effect = store.list('r', 'effect', kind='probe_tool')[0]
-        self.assertEqual([c['effect_id'] for c in out['cancelled_prepared']], [effect['id']])
-        self.assertIn('accepted artifact', out['cancelled_prepared'][0]['reason'])
-        self.assertEqual((effect['status'], effect['never_dispatched']), ('failed_definite', True))
+        self.assertEqual(out['status'], 'blocked_prepared')
+        self.assertEqual([p['effect_id'] for p in out['prepared_blocking']], [effect['id']])
+        self.assertIn('accepted artifact', out['prepared_blocking'][0]['reason'])
+        self.assertEqual(out['cancelled_prepared'], [])
+        self.assertEqual(effect['status'], 'prepared')
         self.assertEqual(EXECUTIONS, [])
         store.verify_history('r')
 

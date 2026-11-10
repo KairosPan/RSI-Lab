@@ -108,6 +108,17 @@ class UnknownUsagePolicyTests(unittest.TestCase):
         self.assertEqual(store.get('r', 'budget', 'tokens')['reserved'], 50)
         store.verify_history('r')
 
+    def test_resource_reserved_at_zero_is_never_charged(self):
+        store, controller, rt = open_run(self, config=CHARGE)
+        rt.enqueue_lab('lab-1')
+        executor = Scripted({'lab': none}, receipt=no_tokens)
+        rt.run_until_wait(executor, RES)            # RES reserves tokens: 0
+        effect = store.list('r', 'effect')[0]
+        self.assertTrue(effect['accounting_unknown'])
+        self.assertNotIn('tokens', effect['actual_costs'])
+        self.assertEqual(store.list('r', 'proposal'), [])
+        store.verify_history('r')
+
     def test_invalid_policy_value_is_refused(self):
         with self.assertRaises(ValueError):
             open_run(self, config={'unknown_usage_policy': 'zero'})

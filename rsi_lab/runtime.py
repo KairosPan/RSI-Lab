@@ -30,6 +30,22 @@ def recovery_error(stage, item_id, exc):
     return {'stage': stage, 'id': item_id, 'error_type': type(exc).__name__, 'reason': str(exc)}
 
 
+def unknown_usage_policy(config):
+    """The run's validated ``unknown_usage_policy``; ``hold`` when unset."""
+    value = config.get('unknown_usage_policy', 'hold')
+    if value not in {'hold', 'charge_reservation'}:
+        raise ValueError('unknown_usage_policy must be hold or charge_reservation')
+    return value
+
+
+def model_failure_retries(config):
+    """The run's validated ``model_failure_retries``; 0 when unset."""
+    value = config.get('model_failure_retries', 0)
+    if type(value) is not int or not 0 <= value <= 5:
+        raise ValueError('model_failure_retries must be an integer from 0 to 5')
+    return value
+
+
 class Runtime:
     controller_factory = Controller
     trial_engine_factory = TrialEngine
@@ -42,11 +58,8 @@ class Runtime:
         from .adapters import AdapterRegistry
         self.adapters = AdapterRegistry(adapters)
         self.config = store.run(run_id)['config']
-        if self.config.get('unknown_usage_policy', 'hold') not in {'hold', 'charge_reservation'}:
-            raise ValueError('unknown_usage_policy must be hold or charge_reservation')
-        retries = self.config.get('model_failure_retries', 0)
-        if type(retries) is not int or not 0 <= retries <= 5:
-            raise ValueError('model_failure_retries must be an integer from 0 to 5')
+        unknown_usage_policy(self.config)
+        model_failure_retries(self.config)
         self.research_policy = normalize_research_policy(self.config.get('research_policy'))
         self.agents = AgentState(store, run_id)
         self.improvements = ImprovementLoop(self) if enabled(self.config,'meta_lab') else None
@@ -316,7 +329,9 @@ class Runtime:
         Returns the Effect as stored afterwards. Dispatching and unknown calls
         keep their holds: only a known outcome can be settled this way. A
         journal-recovered call still awaiting writer-exit proof is left alone,
-        because the later journal receipt carries its measured costs.
+        because the later journal receipt carries its measured costs. A
+        resource held at 0 is never charged: that would record unmeasured
+        usage as 0, so such a call keeps its reconciliation duty.
         """
         if (self.config.get('unknown_usage_policy', 'hold') != 'charge_reservation'
                 or effect['kind'] not in {'lab', 'meta'} or effect['status'] not in {'succeeded', 'failed_definite'}
@@ -326,6 +341,8 @@ class Runtime:
         if prior.get('recovered_from_journal') is True and prior.get('recovery_requires_fencing') is True:
             return effect
         missing = sorted(r for r in effect['reservations'] if r not in effect.get('actual_costs', {}))
+        if any(effect['held_reservations'][r] == 0 for r in missing):
+            return effect
         receipt = {'status': effect['status'],
                    'actual_costs': {r: effect['held_reservations'][r] for r in missing},
                    'estimated_resources': missing,
@@ -927,6 +944,9 @@ class Runtime:
         the failure so a parked issue wakes; a Lab request returns to the Lab.
         """
         work_id, inputs = work['id'], work['inputs']
+        # A finished Work keeps its recorded outcome: write nothing for it.
+        if self.store.get(self.run_id, 'work', work_id)['status'] != 'ready':
+            raise ValueError('Work is not eligible for dispatch')
         if inputs.get('dependency_id'):
             self.controller.dependency(self.run_id, inputs['dependency_id'], inputs['capability_id'],
                 {'status': 'failed', 'reason': reason, 'work_id': work_id},
@@ -1127,6 +1147,17 @@ class Runtime:
             and o['scope']['agent_instance_id'] == agent and o['scope']['branch_id'] == branch), None)
         return owner is None or self.store.get(self.run_id, 'agent_session', owner['session_id'])['status'] == 'idle'
 
+    def _only_unselectable_agent_work(self):
+        """No Wait is open and every ready Work is agent Work whose session is not idle.
+
+        The driver never selects such Work, so nothing will arrive for it.
+        """
+        if any(w['status'] in {'waiting', 'disposition_due', 'disposed'}
+               for w in self.store.list(self.run_id, 'wait')):
+            return False
+        return all(w['kind'] in {'lab', 'meta_discovery', 'meta_disposition', 'disposition'}
+                   and not self._agent_available(w) for w in self.controller.ready(self.run_id))
+
     def finalize(self, reason):
         if not isinstance(reason, str) or not reason.strip():
             raise ValueError('A finalization reason is required')
@@ -1204,7 +1235,7 @@ class Runtime:
         if type(max_steps) is not int or not 1 <= max_steps <= 1000:
             raise ValueError('The cooperative driver requires a bounded positive step allowance')
         recovery_errors = self.recover()['errors']
-        actions, skipped, cancelled, blocking = [], [], [], []
+        actions, skipped, cancelled, blocking, step_errors = [], [], [], [], []
         selected, blocking_ids = set(), set()
         outcome, reason, steps = 'step_limit_reached', None, 0
         while steps < max_steps:
@@ -1221,8 +1252,10 @@ class Runtime:
                 if candidate['id'] in blocking_ids:
                     continue
                 if candidate['kind'] not in {'lab', 'meta'}:
+                    # A refused acceptance may be a host problem a restart
+                    # fixes, so the Effect is held, never cancelled, for it.
                     try:
-                        self.adapters.resolve(candidate)
+                        self._require_admitted_adapter(self.adapters.resolve(candidate).adapter_id)
                     except ValueError as exc:
                         blocking_ids.add(candidate['id'])
                         blocking.append({'effect_id': candidate['id'], 'kind': candidate['kind'], 'reason': str(exc)})
@@ -1263,6 +1296,9 @@ class Runtime:
                 owned = self.store.get(self.run_id, 'effect', owned) if owned else None
                 if owned is not None and owned['status'] == 'prepared':
                     self._cancel_refused(owned, str(exc), cancelled, blocking, blocking_ids)
+                elif owned is not None:
+                    # Raised after dispatch: not an admission refusal.
+                    step_errors.append({'work_id': work['id'], 'effect_id': owned['id'], 'reason': str(exc)})
                 else:
                     skipped.append({'work_id': work['id'], 'reason': str(exc)})
                 continue
@@ -1273,7 +1309,8 @@ class Runtime:
             # The allowance ran out; keep the concrete reason of the first skip.
             reason = skipped[0]['reason']
         report = build_report(self, skipped=skipped)
-        if outcome == 'quiescent':
+        if outcome == 'quiescent' or (outcome == 'awaiting_producer_or_deadline'
+                                      and self._only_unselectable_agent_work()):
             # Nothing runs, yet an obligation is left without a scheduled owner.
             attention = report['attention']
             reason = next((name for name in ('stalled_issues', 'stopped_lab', 'sessions_requiring_recovery',
@@ -1281,7 +1318,7 @@ class Runtime:
             if reason:
                 outcome = 'stalled'
         result = {'status': outcome, 'reason': reason, 'steps': actions, 'state': self.status(),
-                  'recovery_errors': recovery_errors, 'skipped': skipped,
+                  'recovery_errors': recovery_errors, 'skipped': skipped, 'step_errors': step_errors,
                   'cancelled_prepared': cancelled, 'prepared_blocking': blocking, 'report': report}
         # Include observation sequence in the key: equivalent polls can be
         # recorded without altering a wait's evidence or scheduling version.
