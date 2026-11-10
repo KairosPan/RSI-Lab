@@ -199,6 +199,31 @@ class PreparedEffectTests(unittest.TestCase):
         self.assertEqual(out['skipped'], [])
         store.verify_history('r')
 
+    def test_prepared_tool_effect_is_cancelled_when_its_capability_is_no_longer_admitted(self):
+        store, controller, rt = open_run(self, adapters=[validating_adapter()])
+        rt.enqueue_lab('lab-1')
+        executor = Scripted({'lab': in_order(('request_diagnostic', diag({'record_id': 'a'})), none(None)),
+                             'discovery': none})
+        original = rt.controller.dispatch_effect
+        def dies_before_tool_dispatch(run_id, effect_id, fn):
+            if store.get(run_id, 'effect', effect_id)['kind'] == 'probe_tool':
+                raise KeyboardInterrupt('simulated process death after prepare, before dispatch')
+            return original(run_id, effect_id, fn)
+        rt.controller.dispatch_effect = dies_before_tool_dispatch
+        with self.assertRaises(KeyboardInterrupt):
+            rt.run_until_wait(executor, RES, max_steps=6)
+        self.assertEqual(store.list('r', 'effect', kind='probe_tool')[0]['status'], 'prepared')
+        store.mutate('r', 'other-version', 'capability_recorded', lambda tx: tx.insert('capability', 'probe:2',
+            {'status': 'verified', 'capability_id': 'probe', 'capability_version': '2', 'artifact_ref': 'x'}), payload={})
+        restarted = Runtime(store, 'r', adapters=[validating_adapter()])
+        out = restarted.run_until_wait(executor, RES, max_steps=6)
+        effect = store.list('r', 'effect', kind='probe_tool')[0]
+        self.assertEqual([c['effect_id'] for c in out['cancelled_prepared']], [effect['id']])
+        self.assertIn('accepted artifact', out['cancelled_prepared'][0]['reason'])
+        self.assertEqual((effect['status'], effect['never_dispatched']), ('failed_definite', True))
+        self.assertEqual(EXECUTIONS, [])
+        store.verify_history('r')
+
     def test_effect_that_already_left_prepared_is_never_resumed(self):
         store, controller, rt = open_run(self, adapters=[dying_adapter()])
         rt.enqueue_lab('lab-1')

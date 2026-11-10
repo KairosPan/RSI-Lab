@@ -803,8 +803,7 @@ class Runtime:
 
     def execute_adapter(self, adapter_id, inputs, *, trigger_id, work_id=None):
         adapter = self.adapters.get(adapter_id)
-        if adapter_id not in self.capability_catalog():
-            raise ValueError('The executable adapter requires verified artifact acceptance before use')
+        self._require_admitted_adapter(adapter_id)
         descriptor = adapter.descriptor()
         from pathlib import Path
         for path,expected_hash in descriptor['implementation_sources'].items():
@@ -846,8 +845,16 @@ class Runtime:
     def resume_adapter_effect(self, effect):
         """Dispatch a persisted prepared adapter Effect; prepare is never called again."""
         adapter = self.adapters.resolve(effect)
+        # The capability may have lost its accepted standing since prepare.
+        self._require_admitted_adapter(adapter.adapter_id)
         current = self.controller.dispatch_effect(self.run_id, effect['id'], adapter.execute)
         return self._settled_adapter_effect(current)
+
+    def _require_admitted_adapter(self, adapter_id):
+        # capability_catalog() itself raises when the loaded adapter differs
+        # from the accepted artifact or several verified versions compete.
+        if adapter_id not in self.capability_catalog():
+            raise ValueError('The executable adapter requires verified artifact acceptance before use')
 
     def _settled_adapter_effect(self, current):
         if current['status'] != 'succeeded' or current.get('accounting_unknown'):
