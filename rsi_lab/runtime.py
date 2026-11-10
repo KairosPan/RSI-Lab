@@ -25,14 +25,8 @@ from .research_policy import normalize_research_policy
 
 
 def recovery_error(stage, item_id, exc):
-    """A reportable recovery failure that holds no reference into the failing code.
-
-    str(exc) is often the very string constant of the raising function, and
-    Adapter.descriptor() hashes marshal output, which changes while extra
-    references to a code constant exist. The reason is therefore a copy.
-    """
-    return {'stage': stage, 'id': item_id, 'error_type': type(exc).__name__,
-            'reason': str(exc).encode('utf-8', 'surrogatepass').decode('utf-8', 'surrogatepass')}
+    """A reportable recovery failure for one recovery stage and item."""
+    return {'stage': stage, 'id': item_id, 'error_type': type(exc).__name__, 'reason': str(exc)}
 
 
 class Runtime:
