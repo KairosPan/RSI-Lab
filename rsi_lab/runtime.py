@@ -314,11 +314,16 @@ class Runtime:
         """Charge a finished call's unmeasured resources at their held amount when the run opts in.
 
         Returns the Effect as stored afterwards. Dispatching and unknown calls
-        keep their holds: only a known outcome can be settled this way.
+        keep their holds: only a known outcome can be settled this way. A
+        journal-recovered call still awaiting writer-exit proof is left alone,
+        because the later journal receipt carries its measured costs.
         """
         if (self.config.get('unknown_usage_policy', 'hold') != 'charge_reservation'
                 or effect['kind'] not in {'lab', 'meta'} or effect['status'] not in {'succeeded', 'failed_definite'}
                 or not effect.get('accounting_unknown')):
+            return effect
+        prior = json.loads(self.store.read_blob(effect['result_ref']))
+        if prior.get('recovered_from_journal') is True and prior.get('recovery_requires_fencing') is True:
             return effect
         missing = sorted(r for r in effect['reservations'] if r not in effect.get('actual_costs', {}))
         receipt = {'status': effect['status'],
@@ -1267,7 +1272,7 @@ class Runtime:
         if outcome == 'step_limit_reached' and skipped:
             # The allowance ran out; keep the concrete reason of the first skip.
             reason = skipped[0]['reason']
-        report = build_report(self, skipped=skipped, recovery_errors=recovery_errors, prepared_blocking=blocking)
+        report = build_report(self, skipped=skipped)
         if outcome == 'quiescent':
             # Nothing runs, yet an obligation is left without a scheduled owner.
             attention = report['attention']

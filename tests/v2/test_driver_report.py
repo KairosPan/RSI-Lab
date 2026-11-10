@@ -83,6 +83,8 @@ class DriverReportTests(unittest.TestCase):
         self.assertEqual((out['status'], out['reason']), ('stalled', 'stopped_lab'))
         self.assertEqual([(w['work_id'], w['kind']) for w in out['report']['attention']['capacity_blocked_work']],
                          [(lab['id'], 'lab')])
+        self.assertEqual(out['report']['attention']['capacity_blocked_work'][0]['reason'],
+                         'Persistent observable history and new input exceed the registered context budget')
         store.verify_history('r')
 
     def test_session_requiring_recovery_is_listed(self):

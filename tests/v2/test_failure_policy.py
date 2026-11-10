@@ -95,6 +95,19 @@ class UnknownUsagePolicyTests(unittest.TestCase):
         self.assertEqual(store.get('r', 'budget', 'tokens')['reserved'], 50)
         store.verify_history('r')
 
+    def test_call_awaiting_writer_exit_proof_is_not_charged(self):
+        store, controller, rt = open_run(self, config=CHARGE)
+        rt.enqueue_lab('lab-1')
+        executor = Scripted({'lab': none}, receipt=lambda r, i: {**no_tokens(r, i), 'recovered_from_journal': True,
+                                                                'recovery_requires_fencing': True,
+                                                                'native_writer_quiesced': False})
+        rt.run_until_wait(executor, RES1)
+        rt.recover()
+        effect = store.list('r', 'effect')[0]
+        self.assertTrue(effect['accounting_unknown'])
+        self.assertEqual(store.get('r', 'budget', 'tokens')['reserved'], 50)
+        store.verify_history('r')
+
     def test_invalid_policy_value_is_refused(self):
         with self.assertRaises(ValueError):
             open_run(self, config={'unknown_usage_policy': 'zero'})

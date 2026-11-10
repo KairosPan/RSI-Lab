@@ -80,7 +80,7 @@ Lab 和 Meta 的工具权限由本轮命令模式与已注册能力决定，不�
 
 两个可选的失败策略键也写在运行配置顶层，省略时保持原有行为：
 
-- `unknown_usage_policy`：取 `hold`（默认）或 `charge_reservation`。模型调用已得到 `succeeded` 或 `failed_definite` 结果、但回执缺少部分用量（例如没有 token 计数）时，`hold` 保留这些资源的预约和对账义务：该调用的提议不会被应用，所属问题也不能关闭。`charge_reservation` 让 Runtime 按仍持有的完整预约结算这些资源，结算回执的 `estimated_resources` 列出这些资源名，`reconciliation.provenance` 为 `run config unknown_usage_policy=charge_reservation`。这些金额是上限估计，不是实测值。`dispatching` 或 `unknown` 的调用不受影响，仍需按[未知模型调用的对账](#未知模型调用的对账)处理。
+- `unknown_usage_policy`：取 `hold`（默认）或 `charge_reservation`。模型调用已得到 `succeeded` 或 `failed_definite` 结果、但回执缺少部分用量（例如没有 token 计数）时，`hold` 保留这些资源的预约和对账义务：该调用的提议不会被应用，所属问题也不能关闭。`charge_reservation` 让 Runtime 按仍持有的完整预约结算这些资源，结算回执的 `estimated_resources` 列出这些资源名，`reconciliation.provenance` 为 `run config unknown_usage_policy=charge_reservation`。这些金额是上限估计，不是实测值。从执行日志恢复、但仍缺少 CLI 进程已退出证明的调用暂不计费，直到该证明到达或操作者完成对账。`dispatching` 或 `unknown` 的调用不受影响，仍需按[未知模型调用的对账](#未知模型调用的对账)处理。
 - `model_failure_retries`：0 到 5 的整数，默认 0。Lab、Meta discovery 或 Meta disposition 调用收到 provider 的明确失败（`failed_definite`，回执确认收到终态且调用确实已派发）时，为同一问题和优先级加入一个新的同类 Work，输入带 `retry_of`（这条链第一个 Work 的身份）和 `retry_attempt`；每条链最多重试该次数。失败的 Effect 本身永不重新派发；问题已关闭时不重试；等待到期后的 `disposition` 仍然每个等待周期只尝试一次，不重试。重复执行 `recover` 不会重复加入重试 Work。
 
 其他取值会使 Runtime 拒绝启动该运行。

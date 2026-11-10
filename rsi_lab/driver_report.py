@@ -15,12 +15,8 @@ STOPPED_PROPOSALS = {'rejected', 'blocked_stale', 'blocked_action'}
 CAPACITY_BLOCKS = {'blocked_capacity', 'packet_unrepresentable'}
 
 
-def build_report(runtime, *, skipped=(), recovery_errors=(), prepared_blocking=()):
-    """Settlement, Work and attention status of ``runtime``'s run.
-
-    ``recovery_errors`` and ``prepared_blocking`` are accepted with the other
-    driver results; the driver status already reports them.
-    """
+def build_report(runtime, *, skipped=()):
+    """Settlement, Work and attention status of ``runtime``'s run; ``skipped`` comes from the driver."""
     store, run_id = runtime.store, runtime.run_id
     effects = store.list(run_id, 'effect')
     works = store.list(run_id, 'work')
@@ -110,5 +106,6 @@ def _capacity_blocked_work(store, works):
             continue
         outcome = json.loads(store.read_blob(work['outcome_ref']))
         if isinstance(outcome, dict) and outcome.get('status') in CAPACITY_BLOCKS:
-            rows.append({'work_id': work['id'], 'kind': work['kind'], 'reason': outcome['status']})
+            rows.append({'work_id': work['id'], 'kind': work['kind'],
+                         'reason': outcome.get('reason') or outcome['status']})
     return rows
