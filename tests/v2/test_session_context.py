@@ -33,7 +33,60 @@ def fixture(cwd, *, thread=THREAD, prompt='First research question'):
             + frame('event_msg', {'type': 'task_complete', 'turn_id': 'turn-1'}))
 
 
+def usage_metadata(thread=THREAD):
+    counters = {'input_tokens': 100, 'cached_input_tokens': 20, 'cache_write_input_tokens': 0,
+                'output_tokens': 8, 'reasoning_output_tokens': 3, 'total_tokens': 108}
+    return {'thread_id': thread, 'session_id': thread, 'turn_id': 'turn-1',
+            'root_turn_id': 'turn-1', 'response_id': 'response-1',
+            'usage': counters, 'turn_token_usage': dict(counters), 'thread_token_usage': dict(counters)}
+
+
 class NativeSnapshotTests(unittest.TestCase):
+    def test_native_world_state_and_usage_are_fully_counted_audit_metadata(self):
+        with tempfile.TemporaryDirectory() as root:
+            original = fixture(root)
+            world = {'full': True, 'state': {'model': 'test-model',
+                     'host_skills': {'body': 'Synthetic instructions remain counted, never source authority.'}}}
+            raw = original + frame('world_state', world) + frame('token_usage_record', usage_metadata())
+            before = snapshot_from_bytes(original, expected_thread_id=THREAD, expected_cwd=root)
+            after = snapshot_from_bytes(raw, expected_thread_id=THREAD, expected_cwd=root, expected_prefix=before)
+            self.assertEqual(after['observable_history_bytes'], len(raw))
+            self.assertEqual(after['prefix_sha256'], digest(raw))
+            self.assertEqual(after['messages'], before['messages'])
+            self.assertEqual(after['runtime_metadata_count'], 2)
+            self.assertNotEqual(after['runtime_metadata_sha256'], before['runtime_metadata_sha256'])
+            self.assertFalse(after['provider_context_verified'])
+            self.assertIn('none', after['read_authority'])
+            self.assertTrue(validate_rollout_extension(before, after)['same_owner'])
+
+    def test_malformed_native_metadata_and_foreign_usage_owner_are_rejected(self):
+        with tempfile.TemporaryDirectory() as root:
+            tails = [frame('world_state', {'full': 'true', 'state': {}}),
+                     frame('world_state', {'full': True, 'state': []}),
+                     frame('world_state', {'full': True, 'state': {}, 'type': 'function_call'}),
+                     frame('token_usage_record', {**usage_metadata(), 'usage': {'input_tokens': -1, 'output_tokens': 1}}),
+                     frame('token_usage_record', {**usage_metadata(), 'usage': {'input_tokens': True, 'output_tokens': 1}})]
+            for tail in tails:
+                with self.subTest(tail=tail), self.assertRaisesRegex(ContextUnavailable, 'context_unverifiable'):
+                    snapshot_from_bytes(fixture(root) + tail, expected_thread_id=THREAD, expected_cwd=root)
+            for field in ('thread_id', 'session_id'):
+                with self.subTest(field=field), self.assertRaisesRegex(ContextUnavailable, 'session_owner_mismatch'):
+                    snapshot_from_bytes(fixture(root) + frame('token_usage_record',
+                        {**usage_metadata(), field: OTHER}), expected_thread_id=THREAD, expected_cwd=root)
+
+    def test_metadata_does_not_allow_native_tools_compaction_or_prefix_rewrite(self):
+        with tempfile.TemporaryDirectory() as root:
+            raw = fixture(root) + frame('world_state', {'full': False, 'state': {'model': 'test-model'}})
+            before = snapshot_from_bytes(raw, expected_thread_id=THREAD, expected_cwd=root)
+            for tail in (frame('response_item', {'type': 'function_call', 'name': 'shell'}),
+                         frame('compacted', {'message': 'Only a summary remains'}),
+                         frame('world_state', {'type': 'compaction', 'full': False, 'state': {}})):
+                with self.subTest(tail=tail), self.assertRaisesRegex(ContextUnavailable, 'context_unverifiable'):
+                    snapshot_from_bytes(raw + tail, expected_thread_id=THREAD, expected_cwd=root)
+            with self.assertRaisesRegex(ContextUnavailable, 'session_prefix_mismatch'):
+                snapshot_from_bytes(raw.replace(b'"full":false', b'"full":true'),
+                    expected_thread_id=THREAD, expected_cwd=root, expected_prefix=before)
+
     def test_exact_owned_prefix_without_claiming_provider_visibility(self):
         with tempfile.TemporaryDirectory() as root:
             raw = fixture(root)

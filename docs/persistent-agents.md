@@ -14,7 +14,7 @@
 | Agent 工作记忆 | 目标引用、计划、尝试、理由摘要、暂定假设、未决问题、下一步和相关来源引用 | SQLite 中追加不可变修订，按 task/run/branch/agent owner 归属；会话重建保留当前 head。内容标记为 `unverified_working_state` |
 | 执行日志 | 每次调用的原始 stdout/stderr、事件、输入、输出、错误、用量和终态 | `calls/<effect_id>/journal.jsonl` 保存逐条持久事件与 hash 链；模型无权确认水位或改写旧事件 |
 | 共享执行账本 | Work、Effect、Wait、真实回执、来源事实和资源消耗 | `ledger.sqlite3` 与 `objects/`；控制器是唯一写入入口，恢复与去重以这些状态为准 |
-| 共享 Scientific Memory | 目标设计中的科研问题、证据、判断、调查、经验和决定 | 当前基础事实存储不是完整六对象服务。工作记忆、Handoff 或日志内容不会自动变成经过支持检查的科研结论 |
+| 共享 Scientific Memory | 科研问题、证据、判断、调查、经验和决定 | 基线模式仅有基础事实存储；启用 `research_features.scientific_memory` 后使用有版本和来源绑定的六对象服务，见 [PABLO 研究入口](pablo-research.md)。工作记忆、Handoff 或日志内容不会自动变成经过支持检查的科研结论 |
 
 运行根目录中的 `agents/<session_id>/workspace/` 是该会话独立的原生工作目录。默认 Codex 认证和原生会话文件仍由使用者自己的 Codex 配置目录管理；软件不会复制登录凭证到任务目录。调用回执记录原生 thread 身份和已核验的 rollout 路径。
 
@@ -98,6 +98,21 @@ python3 -m rsi_lab --root runs/my-task --run main \
 ```
 
 `your_domain.adapters:make_adapter` 与配置文件路径是使用者提供的占位符，不是本仓库自动安装的能力。
+
+研究闭环的任务语义也由宿主与领域适配器提供。冻结配置中的可选 `research_policy` 可以声明
+`recommendation_kinds`、`recommendation_guidance` 和 `final_review_guidance`；省略时内核不假定
+搜索任务、评分目标或优化方向。推荐类别进入实际响应 schema、接纳校验与 Effect 元数据；
+最终复核只限制可执行动作，不代表目标成功，是否进入该阶段由任务宿主判断。
+
+适配器可以提供 `measure(effect, publication) -> dict`，作为源文件与代码哈希绑定的可信回调。
+内核仅在成功执行后调用它，并将有界、有限 JSON 对象放入 `measurement.domain_metrics`，
+不读取其中的分数或解释最大化/最小化方向。执行状态、原始回执与 publication 哈希仍由控制器
+独立保存，领域指标不能覆盖它们；没有回调就只记录执行凭据。测量与复核 Work 同事务提交，
+恢复复用已提交的测量，不重新执行工具或重新解释结果。
+
+Scientific Memory 的领域身份及经验解释继续通过 `scientific_identity_provider` 注入。
+内核负责对象修订、来源闭包、交付预算和负结果保留；分子规范化、具体指标、文献主题及
+结束条件保留在领域模块和任务宿主中。
 
 ## 工作记忆更新
 
