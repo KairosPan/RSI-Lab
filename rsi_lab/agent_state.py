@@ -418,7 +418,18 @@ class AgentState:
                                    and effect['status'] == 'failed_definite'
                                    for effect, receipt in zip(effects, receipts))
             terminal = receipts[-1]
-            if not never_dispatched and (terminal.get('terminal_received') is not True
+            # A call without a terminal (for example killed at the executor
+            # timeout) qualifies only through a reconciliation bound to its
+            # last Effect that also proves the native writer has exited.
+            reconciliation = terminal.get('reconciliation')
+            reconciled = (all(effect['status'] in {'succeeded', 'failed_definite'} for effect in effects)
+                          and isinstance(reconciliation, dict)
+                          and reconciliation.get('effect_id') == effects[-1]['id']
+                          and isinstance(reconciliation.get('provenance'), str)
+                          and bool(reconciliation['provenance'])
+                          and terminal.get('native_writer_quiesced') is True
+                          and terminal.get('recovery_requires_fencing') is not True)
+            if not never_dispatched and not reconciled and (terminal.get('terminal_received') is not True
                     or terminal.get('native_writer_quiesced') is False
                     or terminal.get('recovery_requires_fencing') is True):
                 raise ValueError('A certified terminal and quiescent native writer are required')

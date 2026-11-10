@@ -65,7 +65,7 @@ Lab 和 Meta 的工具权限由本轮命令模式与已注册能力决定，不�
 }
 ```
 
-`model_calls` 和 `tool_calls` 是控制器可执行的调用次数限制；token/时间是显式软预约与实际用量结算，不构成 provider 内部的硬停止保证。模型选择、总预算与既有运行配置不可通过恢复偷偷改变；新任务用新的运行目录。
+可选的 `model_timeout_seconds` 与 `model_reservation` 并列，设定 `meta-step`、`lab-step` 和 `run-until-wait` 中每次模型调用的超时秒数，取值为 1 到 3600 的数字，省略时为 300。超时被终止的调用结算为 `unknown`，处理方法见[未知模型调用的对账](#未知模型调用的对账)。`model_calls` 和 `tool_calls` 是控制器可执行的调用次数限制；token/时间是显式软预约与实际用量结算，不构成 provider 内部的硬停止保证。模型选择、总预算与既有运行配置不可通过恢复偷偷改变；新任务用新的运行目录。
 
 ```sh
 python3 -m rsi_lab --root runs/my-task --run main \
@@ -85,6 +85,7 @@ python3 -m rsi_lab --root runs/my-task --run main status
 | `run-until-wait --max-steps 20` | 推进就绪的 Lab/Meta/工具工作后返回，保留尚未完成的义务 |
 | `status` | 查看会话、turn、待执行/阻塞工作、预算和需要对账的 Effect |
 | `recover` | 摄取持久回执，或从所属调用日志恢复已知终态；补做幂等发布/提议处理，不盲目重发未知调用 |
+| `reconcile --effect EFFECT_ID --receipt PATH` | 用操作者写的、绑定该 Effect 的回执结算一次 `unknown` 调用，随后执行 `recover`；可加 `--key KEY`，同一回执重复执行无副作用 |
 | `agent-checkpoint` | 在当前会话没有活动 turn 的安全边界保存检查点 |
 | `agent-rebuild` | 显式隔离可确认已结束的坏 turn 并更换会话，保留同一 owner 的工作记忆与所有共享事实 |
 | `finalize --reason TEXT` | 持久登记停止原因并禁止新的普通模型/工具工作，保留已承诺的恢复责任 |
@@ -168,6 +169,35 @@ python3 -m rsi_lab --root runs/my-task --run main recover
 ```
 
 停止后仍可摄取已经发生的结果和完成本地恢复；不会为了生成总结而隐式新增模型调用。存在未知调用、未完成科学目标或待复核结果时，分别保留这些状态。
+
+### 未知模型调用的对账
+
+模型调用超过 `model_timeout_seconds` 被终止，或进程在没有终态的情况下消失时，Effect 结算为 `unknown`：它继续占用预算预约和该 agent 的会话，`run-until-wait` 返回 `blocked_external`，`agent-rebuild` 也会拒绝。系统不会自行判断结果，必须由操作者对账：
+
+1. 用 `status` 找到 `unknown` Effect 的身份，确认对应的 CLI 进程（包括其进程组）确实已经退出。不能确认时不要继续。
+2. 写一份 JSON 回执：`status` 为 `failed_definite`；`actual_costs` 列出该 Effect 仍持有预约的每项资源（即 `held_reservations` 中仍大于 0 的项目），无法确定实际用量时按完整预约计费，没有证据时不能写 0；`native_writer_quiesced` 为 `true`；`reconciliation` 写明该 Effect 身份和一句来源说明。例如：
+
+```json
+{
+  "status": "failed_definite",
+  "actual_costs": {"tokens": 4096, "wall_seconds": 300},
+  "native_writer_quiesced": true,
+  "error": "killed at the executor timeout",
+  "reconciliation": {"effect_id": "EFFECT_ID", "provenance": "operator: 已确认进程组被终止"}
+}
+```
+
+3. 执行 `reconcile`，再用 `agent-rebuild` 隔离该 turn 并更换会话，最后用 `lab-start` 开始新的工作：
+
+```sh
+python3 -m rsi_lab --root runs/my-task --run main \
+  reconcile --effect EFFECT_ID --receipt runs/my-task/reconcile-EFFECT_ID.json
+python3 -m rsi_lab --root runs/my-task --run main \
+  agent-rebuild --session SESSION_ID --reason "模型调用超时，已对账"
+python3 -m rsi_lab --root runs/my-task --run main lab-start --event after-timeout
+```
+
+`reconcile` 输出结算后的 Effect 和 `recover` 的结果；默认操作键由 Effect 身份和回执内容决定，同一回执重复执行不会重复计费。回执报告了未预约的资源、未绑定该 Effect 或与已结算用量矛盾时，命令拒绝并保持 `unknown`。只有回执同时证明 writer 已退出（`native_writer_quiesced` 为 `true`，且没有 `recovery_requires_fencing`）时，`agent-rebuild` 才会隔离这个没有终态的 turn；该 turn 的提议和工作记忆增量不会被应用，已结算的费用保留。
 
 ## 当前 CLI 上下文边界
 
