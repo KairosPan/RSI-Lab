@@ -23,6 +23,7 @@ from .call_recovery import recover_codex_receipt, RecoveryBlocked
 from .improvements import ImprovementLoop, enabled
 from .research_policy import normalize_research_policy
 from .driver_report import build_report
+from .orchestration import Orchestration, orchestration_config
 
 
 def recovery_error(stage, item_id, exc):
@@ -60,6 +61,7 @@ class Runtime:
         self.config = store.run(run_id)['config']
         unknown_usage_policy(self.config)
         model_failure_retries(self.config)
+        orchestration = orchestration_config(self.config)
         self.research_policy = normalize_research_policy(self.config.get('research_policy'))
         self.agents = AgentState(store, run_id)
         self.improvements = ImprovementLoop(self) if enabled(self.config,'meta_lab') else None
@@ -67,6 +69,7 @@ class Runtime:
         if enabled(self.config,'scientific_memory'):
             from .scientific_memory import ScientificMemory
             self.scientific_memory = ScientificMemory(store, run_id, identity_provider=scientific_identity_provider)
+        self.orchestration = Orchestration(self, orchestration) if orchestration else None
 
     def _mutate(self, key, event, fn, payload):
         return self.store.mutate(self.run_id, key, event, fn, payload=payload)

@@ -9,6 +9,7 @@ import sys
 from .controller import Controller
 from .plans import register_task_plan
 from .roles import CodexExecutor
+from .orchestration import orchestration_config
 from .runtime import Runtime, model_failure_retries, unknown_usage_policy
 from .store import Store, digest
 
@@ -69,7 +70,7 @@ def main(argv=None):
         if args.command=='init':
             config=read(args.config)
             # The config is immutable once stored; refuse what Runtime would later reject.
-            for check in (unknown_usage_policy,model_failure_retries,model_timeout):check(config)
+            for check in (unknown_usage_policy,model_failure_retries,model_timeout,orchestration_config):check(config)
             budgets=config.pop('budgets');capacity=config.pop('max_external',1)
             result=controller.initialize(args.run,budgets=budgets,max_external=capacity,config=config)
         else:
