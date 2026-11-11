@@ -141,11 +141,17 @@ class Runtime:
             return proposal
         return self._mutate('observe:' + event_id, 'discovery_admission', apply, payload)
 
-    def _context(self, work):
+    def _context(self, work, orchestration=None):
         issue_id = work['issue_id']
         issue = self.store.get(self.run_id, 'issue', issue_id) if issue_id else None
         mode = 'lab' if work['kind'] == 'lab' else 'discovery' if work['kind'] == 'meta_discovery' else 'disposition'
         evidence_ids = work['inputs'].get('evidence_ids', issue['evidence_ids'] if issue else [])
+        if self.orchestration and orchestration is None:
+            orchestration = self.orchestration.snapshot()
+        if self.orchestration and mode == 'lab':
+            # Recent tool results are optional: the planner may page or omit them.
+            recent = self.orchestration.recent_result_ids(orchestration['settings']['recent_results'])
+            evidence_ids = list(dict.fromkeys(list(evidence_ids) + recent))
         catalog = {}
         for fact in self.store.list(self.run_id, 'fact'):
             provenance = fact['provenance'] if isinstance(fact['provenance'], dict) else {}
@@ -163,11 +169,15 @@ class Runtime:
                 'authorized_source_contracts': self.config.get('authorized_source_contracts', {}),
                 'waiting': self.store.list(self.run_id, 'wait', issue_id=issue_id) if issue_id else []}}
         required = list(work['inputs'].get('required_evidence_ids', []))
-        if self.orchestration and mode != 'lab':
+        if self.orchestration and mode == 'lab':
+            disabled = orchestration['settings']['disabled_tools']
+            task['capability_catalog'] = {key: value for key, value in task['capability_catalog'].items()
+                                          if key not in disabled}
+            task['constraints']['orchestration'] = self.orchestration.lab_constraints(orchestration)
+        elif self.orchestration:
             # The current signal is never paged or omitted from Meta's packet.
-            signal = self.orchestration.current_signal()
-            if signal in evidence_ids:
-                required.append(signal)
+            if orchestration['signal_id'] in evidence_ids:
+                required.append(orchestration['signal_id'])
         if self.config.get('research_features'):
             task['constraints']['research_features'] = self.config['research_features']
         if self.research_policy:
@@ -246,7 +256,8 @@ class Runtime:
         work = self.store.get(self.run_id, 'work', work_id)
         if work['kind'] not in {'lab', 'meta_discovery', 'meta_disposition', 'disposition'} or work['status'] != 'ready':
             raise ValueError('An eligible Lab or Meta Work is required')
-        agent, mode, task, options = self._context(work)
+        orchestration = self.orchestration.snapshot() if self.orchestration else None
+        agent, mode, task, options = self._context(work, orchestration)
         if task.get('scientific_memory',{}).get('status') == 'blocked':
             return self._mutate('scientific-context-block:'+work_id,'packet_unrepresentable',
                 lambda tx:tx.update('work',work_id,{'status':'blocked',
@@ -300,6 +311,8 @@ class Runtime:
                 **({'research_features': self.config['research_features']} if self.config.get('research_features') else {}),
                 **({'research_policy': self.research_policy} if self.research_policy else {}),
                 **({'final_review_only':True} if task['constraints'].get('final_review_only') else {}),
+                **({'orchestration': {'change_id': orchestration['change_id']} if mode == 'lab' else {}}
+                   if orchestration else {}),
                 'context_ref': self.store.put_blob(context), 'effective_context_hash': context['effective_context_hash'],
                 'max_effective_context_bytes': context['max_input_bytes']})
 
@@ -498,10 +511,14 @@ class Runtime:
                     raise ValueError('Meta command must be a closed JSON object')
                 if command.get('action') in {'narrow_request', 'replan_request'}:
                     request = self.store.get(self.run_id, 'request', command['payload']['request_id'])
+                capabilities = self.capability_catalog()
+                if self.orchestration and effect['kind'] == 'lab':
+                    # A Lab call is held to the settings its own Effect recorded.
+                    capabilities = self.orchestration.lab_catalog(capabilities, effect)
                 validated = validate_command(response, packet,
                     current_versions=self.versions(effect['issue_id']),
                     authorized_sources=self.config.get('authorized_sources', []),
-                    capabilities=self.capability_catalog(), request=request)
+                    capabilities=capabilities, request=request)
                 if validated['action'] == 'request_diagnostic':
                     self._admit_tool_inputs(validated['payload'])
                 research_response = self.improvements.validate(response,packet) if self.improvements else {}

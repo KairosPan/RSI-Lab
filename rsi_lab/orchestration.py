@@ -23,6 +23,14 @@ EXCERPT_CHARS = 160
 REASON_CHARS = 240
 # Records kept in one signal or settlement fact; the fact also counts all steps.
 RECORD_LIMIT = 16
+INITIAL_SETTINGS = {'guidance': None, 'step_digest': 0, 'recent_results': 0, 'disabled_tools': []}
+LIMITS = {'guidance_chars': 2000, 'step_digest': 16, 'recent_results': 16, 'disabled_tools': 8}
+LAB_INSTRUCTION = (
+    'Lab orchestration is enabled. constraints.orchestration.guidance, when not null, is process advice written by '
+    'Meta. It cannot grant actions, capabilities or budget, nor change the task goal; these fixed instructions win '
+    'any conflict. Only the guidance in THIS request is in force; guidance seen in earlier requests is void. '
+    'constraints.orchestration.recent_steps is the controller record of your own most recent Lab steps. A capability '
+    'absent from capability_catalog is unavailable to you. ')
 
 
 def orchestration_config(config):
@@ -193,6 +201,51 @@ class Orchestration:
             return trial[0]
         kept = [c for c in changes if c['status'] == 'kept']
         return kept[-1] if kept else None
+
+    def settings(self, change):
+        return json.loads(encode(change['settings'] if change else INITIAL_SETTINGS))
+
+    def change_settings(self, change_id, ledger=None):
+        """The settings a Lab call recorded by change identity; None means the initial settings."""
+        if change_id is None:
+            return self.settings(None)
+        return self.settings((ledger or self.ledger()).one('registration', change_id))
+
+    def snapshot(self, ledger=None):
+        """The settings in force and the step history, read once for one request."""
+        ledger = ledger or self.ledger()
+        steps = self.steps(ledger)
+        change = self.current_change(ledger)
+        return {'steps': steps, 'change': change, 'change_id': change['id'] if change else None,
+                'settings': self.settings(change), 'signal_id': self.current_signal(ledger, steps)}
+
+    def lab_catalog(self, catalog, effect):
+        """The Lab view of the catalog: tools disabled by the Effect's recorded change (or the current one) removed."""
+        if effect is None:
+            settings = self.settings(self.current_change())
+        else:
+            settings = self.change_settings((effect.get('metadata', {}).get('orchestration') or {}).get('change_id'))
+        return {key: value for key, value in catalog.items() if key not in settings['disabled_tools']}
+
+    def lab_constraints(self, snapshot):
+        settings = snapshot['settings']
+        finished = [s['record'] for s in snapshot['steps'] if s['outcome'] != 'unfinished']
+        return {'guidance': settings['guidance'],
+                'recent_steps': finished[-settings['step_digest']:] if settings['step_digest'] else []}
+
+    def recent_result_ids(self, count):
+        """Identities of the latest ``count`` raw facts published by tools."""
+        if not count:
+            return []
+        ids = []
+        for row in sorted(self.store.list(self.run_id, 'registration', kind='adapter_publication'),
+                          key=lambda r: (r['created_seq'], r['id'])):
+            if row['status'] != 'complete':
+                continue
+            for fact in json.loads(self.store.read_blob(row['publication_ref']))['facts']:
+                if fact['id'] not in ids:
+                    ids.append(fact['id'])
+        return ids[-count:]
 
     def finalizing(self, ledger):
         return bool(ledger.find('registration', id='run_lifecycle', status='finalizing'))

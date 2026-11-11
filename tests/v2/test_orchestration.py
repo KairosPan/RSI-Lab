@@ -379,5 +379,170 @@ class SignalTests(unittest.TestCase):
         store.verify_history('r')
 
 
+
+INITIAL = {'guidance': None, 'step_digest': 0, 'recent_results': 0, 'disabled_tools': []}
+
+
+def install(store, settings, *, status='kept', change_id='change-1'):
+    """Record a change directly; the proposal path is exercised by the action tests."""
+    document = {'kind': 'orchestration_change', 'status': status, 'settings': {**INITIAL, **settings}}
+    return store.mutate('r', 'test-install:' + change_id, 'test_change_installed',
+                        lambda tx: tx.insert('registration', change_id, document), document)
+
+
+def set_status(store, change_id, status):
+    return store.mutate('r', 'test-status:' + change_id + ':' + status, 'test_change_status',
+                        lambda tx: tx.update('registration', change_id, {'status': status}), {'status': status})
+
+
+def lab_packets(executor):
+    return [d for d in executor.seen if d['mode'] == 'lab']
+
+
+class UnchangedWithoutOrchestrationTests(unittest.TestCase):
+    def test_packets_schema_and_effect_records_match_the_baseline(self):
+        from rsi_lab import roles
+        store, controller, rt = open_run(self)
+        controller.add_fact('r', 'f1', 'raw_fact', {'x': 1}, {'source': 'fixture'}, 'k1')
+        rt.enqueue_lab('lab-1', ['f1'])
+        executor = Scripted({'lab': lambda d: ('propose_issue', ISSUE),
+                             'disposition': lambda d: CLOSE})
+        rt.run_until_wait(executor, RES, max_steps=12)
+        effects = by_seq(store.list('r', 'effect'))
+        # Identities computed on the baseline commit before this feature.
+        self.assertEqual([e['packet_hash'] for e in effects],
+                         ['9a35bfbd5afd8f2726a8e7889e081c4c4bb3e7a28f2419c404c7d9b8fc336f1d',
+                          'c2a56d33a9d971086c6194d69e6a91fb2f525c0b3eca6c94463a858b5b17230e'])
+        for effect in effects:
+            self.assertNotIn('orchestration', effect['metadata'])
+        for data in executor.seen:
+            self.assertNotIn('orchestration', data['task']['constraints'])
+        self.assertNotIn('propose_lab_settings', json.dumps(roles.response_schema('disposition', working_memory=True)))
+        store.verify_history('r')
+
+
+class LabSettingsTests(unittest.TestCase):
+    def setUp(self):
+        EXECUTIONS.clear()
+
+    def test_initial_settings_change_nothing_but_the_orchestration_block(self):
+        store, controller, rt = open_run(self, config=ORCH, adapters=[validating_adapter()])
+        rt.enqueue_lab('lab-1')
+        executor = Scripted({'lab': none})
+        rt.run_until_wait(executor, RES, max_steps=2)
+        data = lab_packets(executor)[0]
+        self.assertEqual(data['task']['constraints']['orchestration'], {'guidance': None, 'recent_steps': []})
+        self.assertIn('probe', data['task']['capability_catalog'])
+        effect = store.list('r', 'effect', kind='lab')[0]
+        self.assertIsNone(effect['metadata']['orchestration']['change_id'])
+        store.verify_history('r')
+
+    def test_guidance_and_instruction_reach_later_lab_requests(self):
+        store, controller, rt = open_run(self, config=ORCH)
+        install(store, {'guidance': 'Use record ids from the unit map.'})
+        rt.enqueue_lab('lab-1')
+        executor = Scripted({'lab': none})
+        rt.run_until_wait(executor, RES, max_steps=2)
+        self.assertEqual(lab_packets(executor)[0]['task']['constraints']['orchestration']['guidance'],
+                         'Use record ids from the unit map.')
+        effect = store.list('r', 'effect', kind='lab')[0]
+        self.assertEqual(effect['metadata']['orchestration']['change_id'], 'change-1')
+        prompt = json.loads(store.read_blob(effect['packet_ref']))['prompt']
+        self.assertIn('Only the guidance in THIS request is in force', prompt)
+        store.verify_history('r')
+
+    def test_step_digest_gives_that_many_records(self):
+        store, controller, rt = open_run(self, config={'orchestration': {'no_result_steps': 8, 'max_changes': 1}},
+                                         adapters=[validating_adapter()])
+        install(store, {'step_digest': 2})
+        rt.enqueue_lab('lab-1')
+        executor = Scripted({'lab': in_order(record('a'), record('b'), record('c'), none(None)), 'discovery': none})
+        rt.run_until_wait(executor, RES, max_steps=20)
+        packets = lab_packets(executor)
+        self.assertEqual([len(p['task']['constraints']['orchestration']['recent_steps']) for p in packets], [0, 1, 2, 2])
+        last = packets[-1]['task']['constraints']['orchestration']['recent_steps']
+        self.assertEqual([r['inputs_excerpt'] for r in last], ['{"record_id": "b"}', '{"record_id": "c"}'])
+        self.assertEqual([r['outcome'] for r in last], ['new_result', 'new_result'])
+        store.verify_history('r')
+
+    def test_recent_results_are_optional_evidence(self):
+        store, controller, rt = open_run(self, config={'orchestration': {'no_result_steps': 8, 'max_changes': 1}},
+                                         adapters=[validating_adapter()])
+        install(store, {'recent_results': 2})
+        rt.enqueue_lab('lab-1')
+        executor = Scripted({'lab': in_order(record('a'), record('b'), record('c'), none(None)), 'discovery': none})
+        rt.run_until_wait(executor, RES, max_steps=20)
+        published = [r['id'] for r in by_seq(store.list('r', 'fact'))]
+        last = lab_packets(executor)[-1]
+        delivered = [p['evidence_id'] for p in last['delivered_pages']]
+        self.assertEqual(set(published[-2:]) - set(delivered), set())
+        self.assertNotIn(published[0], delivered)
+        self.assertTrue(set(published[-2:]) - set(last['required_evidence_ids']))
+        store.verify_history('r')
+
+    def test_recent_results_are_paged_or_omitted_under_small_capacity(self):
+        store, controller, rt = open_run(self, config={'orchestration': {'no_result_steps': 8, 'max_changes': 1},
+                                                       'max_input_bytes': 20000})
+        for i in range(6):
+            controller.add_fact('r', 'big%d' % i, 'raw_fact', {'text': 'x' * 6000}, {'source': 'bulk'}, 'big%d' % i)
+            store.mutate('r', 'pub%d' % i, 'test_publication', lambda tx, i=i: tx.insert(
+                'registration', 'pub%d' % i, {'kind': 'adapter_publication', 'status': 'complete',
+                                              'publication_ref': tx.blob({'facts': [{'id': 'big%d' % i}],
+                                                                          'conclusions': [], 'data': None})}), {})
+        install(store, {'recent_results': 6})
+        rt.enqueue_lab('lab-1')
+        executor = Scripted({'lab': none})
+        out = rt.run_until_wait(executor, RES, max_steps=2)
+        self.assertEqual(executor.calls, ['lab'])
+        data = lab_packets(executor)[0]
+        delivered = {p['evidence_id']: p for p in data['delivered_pages']}
+        self.assertTrue(any(not p['complete_source'] for p in delivered.values())
+                        or len(delivered) < 6)
+        self.assertEqual(out['report']['attention']['capacity_blocked_work'], [])
+        store.verify_history('r')
+
+    def test_disabled_tool_leaves_the_lab_catalog_and_its_request_is_refused(self):
+        store, controller, rt = open_run(self, config=ORCH, adapters=[validating_adapter(), second_adapter()])
+        install(store, {'disabled_tools': ['probe']})
+        rt.enqueue_lab('lab-1')
+        executor = Scripted({'lab': lambda d: record('a'), 'discovery': none})
+        rt.run_until_wait(executor, RES, max_steps=3)
+        data = lab_packets(executor)[0]
+        self.assertNotIn('probe', data['task']['capability_catalog'])
+        self.assertIn('probe2', data['task']['capability_catalog'])
+        proposal = by_seq(store.list('r', 'proposal'))[0]
+        self.assertEqual(proposal['status'], 'rejected')
+        self.assertEqual(proposal['error'], 'Diagnostic requires an accepted registered capability version')
+        self.assertEqual(store.list('r', 'work', kind='diagnostic'), [])
+        store.verify_history('r')
+
+    def test_meta_requests_and_queued_calls_are_not_affected(self):
+        store, controller, rt = open_run(self, config=ORCH, adapters=[validating_adapter()])
+        rt.enqueue_lab('lab-1')
+        rt.run_lab(rt.controller.ready('r')[0]['id'], Scripted({'lab': lambda d: record('a')}), RES)
+        install(store, {'disabled_tools': ['probe']})
+        controller.add_fact('r', 'f1', 'raw_fact', {'x': 1}, {'source': 'fixture'}, 'k1')
+        controller.open_issue('r', 'i1', ['anomaly', 's', 't'], 'h', 's', ['f1'], ['alt'], ['c', 'f'], 'i1')
+        rt.run_until_wait(Scripted({'disposition': in_order(record('m'), CLOSE), 'lab': none, 'discovery': none}),
+                          RES, max_steps=10)
+        tools = by_seq(store.list('r', 'effect', kind='probe_tool'))
+        self.assertEqual([e['status'] for e in tools], ['succeeded', 'succeeded'])
+        disposition = [p for p in store.list('r', 'proposal') if p['command'] and p['command']['mode'] == 'disposition']
+        self.assertEqual([p['status'] for p in disposition], ['applied', 'applied'])
+        store.verify_history('r')
+
+    def test_a_lab_proposal_is_checked_against_the_settings_its_effect_recorded(self):
+        store, controller, rt = open_run(self, config=ORCH, adapters=[validating_adapter()])
+        install(store, {'disabled_tools': ['probe']}, status='trial')
+        lab = rt.enqueue_lab('lab-1')
+        rt.prepare_meta(lab['id'], RES)
+        set_status(store, 'change-1', 'reverted')
+        result = rt.run_lab(lab['id'], Scripted({'lab': lambda d: record('a')}), RES)
+        self.assertEqual(result['proposal']['status'], 'rejected')
+        self.assertEqual(store.list('r', 'effect', kind='lab')[0]['metadata']['orchestration']['change_id'], 'change-1')
+        self.assertIn('probe', rt.orchestration.lab_catalog(rt.capability_catalog(), None))
+        store.verify_history('r')
+
+
 if __name__ == '__main__':
     unittest.main()

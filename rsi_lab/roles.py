@@ -217,6 +217,9 @@ class MetaAgent:
                 'Use only evidence delivered in THIS request for citations; persistent history '
                 'does not grant original-source reading authority. no_action means no further '
                 'admitted action, not proof the scientific goal succeeded. ')
+        if mode == 'lab' and 'orchestration' in task.get('constraints', {}):
+            from .orchestration import LAB_INSTRUCTION
+            instructions += LAB_INSTRUCTION
         if 'agent_state' in task:
             instructions += ('Your persistent session and private working memory are supplied by the '
                 'controller. Set working_memory_delta to a string encoding a JSON object; use "{}" for no changes. Never change owner, '
