@@ -175,6 +175,7 @@ class Runtime:
                                           if key not in disabled}
             task['constraints']['orchestration'] = self.orchestration.lab_constraints(orchestration)
         elif self.orchestration:
+            task['constraints']['orchestration'] = self.orchestration.meta_constraints(orchestration)
             # The current signal is never paged or omitted from Meta's packet.
             if orchestration['signal_id'] in evidence_ids:
                 required.append(orchestration['signal_id'])
@@ -311,8 +312,8 @@ class Runtime:
                 **({'research_features': self.config['research_features']} if self.config.get('research_features') else {}),
                 **({'research_policy': self.research_policy} if self.research_policy else {}),
                 **({'final_review_only':True} if task['constraints'].get('final_review_only') else {}),
-                **({'orchestration': {'change_id': orchestration['change_id']} if mode == 'lab' else {}}
-                   if orchestration else {}),
+                # The executor recomputes the response schema from this record.
+                **({'orchestration': self.orchestration.metadata(mode, orchestration)} if orchestration else {}),
                 'context_ref': self.store.put_blob(context), 'effective_context_hash': context['effective_context_hash'],
                 'max_effective_context_bytes': context['max_input_bytes']})
 
@@ -521,6 +522,8 @@ class Runtime:
                     capabilities=capabilities, request=request)
                 if validated['action'] == 'request_diagnostic':
                     self._admit_tool_inputs(validated['payload'])
+                if validated['action'] == 'propose_lab_settings':
+                    self.orchestration.admit(validated)
                 research_response = self.improvements.validate(response,packet) if self.improvements else {}
                 work = self.store.get(self.run_id, 'work', effect['work_id'])
                 allowed = work['inputs'].get('allowed_action')
@@ -720,6 +723,8 @@ class Runtime:
                 {'narrow_request': 'narrow_request', 'replan_request': 'replan', 'close_unresolved': 'close_unresolved', 'escalate': 'ask_user'}[p['expiry_action']], key)
         if action == 'close_issue':
             return c.close_issue(run, iid, p['resolution'], p['reason'], key, evidence_ids=command['evidence_ids'])
+        if action == 'propose_lab_settings' and self.orchestration:
+            return self.orchestration.publish(proposal, key, iid, deadline)
         raise ValueError('Unregistered action')
 
     def ingest_delivery(self, request_id, content, provenance, *, kind='raw', page=0, source_version=1):

@@ -31,6 +31,20 @@ LAB_INSTRUCTION = (
     'any conflict. Only the guidance in THIS request is in force; guidance seen in earlier requests is void. '
     'constraints.orchestration.recent_steps is the controller record of your own most recent Lab steps. A capability '
     'absent from capability_catalog is unavailable to you. ')
+META_INSTRUCTION = (
+    'Lab orchestration is enabled. A fact whose provenance source is controller_orchestration_signal is the '
+    'controller measurement of Lab steps without a new result, or of a Lab chain that stopped on a rejection or a '
+    'failed tool. It is a suspicion to investigate, not a diagnosis: low output can come from the task itself. '
+    'constraints.orchestration shows the Lab settings in force, their limits, the changes remaining, any change in '
+    'trial and the current signal fact. ')
+LAB_SETTINGS_INSTRUCTION = (
+    'In disposition mode propose_lab_settings submits the COMPLETE Lab settings: guidance (text or null), '
+    'step_digest, recent_results and disabled_tools; copy every value you do not change from '
+    'constraints.orchestration.settings, within constraints.orchestration.limits. disabled_tools can only remove '
+    'catalog tools from the Lab. It is admitted only if the command cites the current signal fact '
+    '(constraints.orchestration.signal_fact_id), no change is in trial, a change remains, and the settings differ '
+    'from those in force. The controller alone keeps or reverts the change: it keeps it once the Lab produces a new '
+    'result and reverts it otherwise. That verdict is not evidence of scientific benefit. ')
 
 
 def orchestration_config(config):
@@ -217,7 +231,25 @@ class Orchestration:
         steps = self.steps(ledger)
         change = self.current_change(ledger)
         return {'steps': steps, 'change': change, 'change_id': change['id'] if change else None,
-                'settings': self.settings(change), 'signal_id': self.current_signal(ledger, steps)}
+                'settings': self.settings(change), 'signal_id': self.current_signal(ledger, steps),
+                'changes': self.changes(ledger)}
+
+    def metadata(self, mode, snapshot):
+        """The Effect record: the static schema switch, and for Lab the change in force."""
+        record = {'lab_settings_action': self.max_changes > 0}
+        if mode == 'lab':
+            record['change_id'] = snapshot['change_id']
+        return record
+
+    def meta_constraints(self, snapshot):
+        trial = next((c for c in snapshot['changes'] if c['status'] == 'trial'), None)
+        return {'lab_settings_action': self.max_changes > 0, 'no_result_steps': self.no_result_steps,
+                'settings': snapshot['settings'], 'limits': dict(LIMITS),
+                'changes_remaining': max(0, self.max_changes - len(snapshot['changes'])),
+                'trial_change': {'change_id': trial['id'], 'settings': trial['settings'],
+                                 'signal_fact_id': trial['signal_fact_id'], 'deadline_at': trial['deadline_at']}
+                                if trial else None,
+                'signal_fact_id': snapshot['signal_id']}
 
     def lab_catalog(self, catalog, effect):
         """The Lab view of the catalog: tools disabled by the Effect's recorded change (or the current one) removed."""
@@ -246,6 +278,79 @@ class Orchestration:
                 if fact['id'] not in ids:
                     ids.append(fact['id'])
         return ids[-count:]
+
+    # Admission and publication ---------------------------------------------
+
+    def admit(self, command, ledger=None):
+        """The complete settings a propose_lab_settings command may publish; ValueError when it may not."""
+        ledger = ledger or self.ledger()
+        if self.max_changes == 0:
+            raise ValueError('This run does not admit Lab settings changes')
+        payload = command['payload']
+        guidance = payload['guidance']
+        if guidance is not None and (not isinstance(guidance, str) or len(guidance) > LIMITS['guidance_chars']):
+            raise ValueError('Lab guidance must be null or at most %d characters' % LIMITS['guidance_chars'])
+        for name in ('step_digest', 'recent_results'):
+            if type(payload[name]) is not int or not 0 <= payload[name] <= LIMITS[name]:
+                raise ValueError('%s must be an integer from 0 to %d' % (name, LIMITS[name]))
+        tools = payload['disabled_tools']
+        if len(tools) > LIMITS['disabled_tools'] or len(set(tools)) != len(tools):
+            raise ValueError('disabled_tools must name at most %d distinct capabilities' % LIMITS['disabled_tools'])
+        unknown = set(tools) - set(self.runtime.capability_catalog())
+        if unknown:
+            raise ValueError('disabled_tools names capabilities outside the catalog: ' + ', '.join(sorted(unknown)))
+        settings = {'guidance': guidance, 'step_digest': payload['step_digest'],
+                    'recent_results': payload['recent_results'], 'disabled_tools': sorted(tools)}
+        signal = self.current_signal(ledger)
+        if signal is None or signal not in command['evidence_ids']:
+            raise ValueError('A Lab settings change must cite the current orchestration signal fact')
+        changes = self.changes(ledger)
+        if any(c['status'] == 'trial' for c in changes):
+            raise ValueError('A Lab settings change is already in trial')
+        if len(changes) >= self.max_changes:
+            raise ValueError('No Lab settings change remains under max_changes')
+        if settings == self.settings(self.current_change(ledger)):
+            raise ValueError('The proposed Lab settings equal the settings in force')
+        return settings, signal
+
+    def lab_idle(self, ledger, steps):
+        """No Lab Work is ready or leased and every Lab step has finished."""
+        if any(w['status'] in {'ready', 'leased'} for w in ledger.find('work', kind='lab')):
+            return False
+        return all(s['outcome'] != 'unfinished' for s in steps)
+
+    def publish(self, proposal, key, issue_id, deadline):
+        """Record the change in trial, restart a stopped Lab, then park the issue on the change."""
+        change_id = identity('object', proposal['id'])
+        def release(tx):
+            ledger = self.ledger(tx)
+            settings, signal = self.admit(proposal['command'], ledger)
+            previous = self.current_change(ledger)
+            change = tx.insert('registration', change_id, {
+                'kind': 'orchestration_change', 'status': 'trial', 'settings': settings,
+                'rationale': proposal['command']['payload']['rationale'], 'signal_fact_id': signal,
+                'previous_change_id': previous['id'] if previous else None, 'issue_id': issue_id,
+                'proposal_id': proposal['id'], 'deadline_at': deadline, 'result': None, 'reason': None,
+                'settlement_fact_id': None})
+            lab = None
+            if self.lab_idle(ledger, self.steps(ledger)):
+                labs = sorted(ledger.find('work', kind='lab'), key=lambda w: (w['created_seq'], w['id']))
+                last = labs[-1]['inputs'] if labs else {}
+                inputs = {name: last[name] for name in ('agent_instance_id', 'branch_id', 'scientific_query')
+                          if name in last}
+                inputs.update(evidence_ids=list(dict.fromkeys(list(last.get('evidence_ids', [])) + [signal])),
+                              required_evidence_ids=list(dict.fromkeys(
+                                  list(last.get('required_evidence_ids', [])) + [signal])),
+                              orchestration_change_id=change_id)
+                lab = self.runtime.controller._work(tx, None, 'lab', 'orchestration:' + change_id, inputs=inputs)
+            return {'change': change, 'lab_work_id': lab['id'] if lab else None}
+        released = self.runtime._mutate(key + ':release', 'orchestration_change_released', release,
+                                        {'proposal_id': proposal['id']})
+        controller = self.runtime.controller
+        dependency = controller.dependency(self.run_id, change_id, 'lab_orchestration', {'status': 'trial'},
+                                           key + ':dependency')
+        wait = self.runtime._park(issue_id, dependency, key + ':park', deadline=deadline, expiry='close_unresolved')
+        return {'change_id': change_id, 'lab_work_id': released['lab_work_id'], 'wait_id': wait['id']}
 
     def finalizing(self, ledger):
         return bool(ledger.find('registration', id='run_lifecycle', status='finalizing'))

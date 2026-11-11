@@ -544,5 +544,265 @@ class LabSettingsTests(unittest.TestCase):
         store.verify_history('r')
 
 
+
+def reject(data):
+    return 'request_diagnostic', diag({'wrong': 1})
+
+
+def settings(**values):
+    return {**INITIAL, 'rationale': 'Lab keeps sending the wrong input field', **values}
+
+
+GUIDE = settings(guidance='Send exactly {"record_id": ...} to probe version 1.', step_digest=4)
+
+
+def run_next(rt, kinds, executor):
+    """Run the first ready Work of the given kinds; tools run through their loaded adapter."""
+    work = next(w for w in rt.controller.ready('r') if w['kind'] in kinds)
+    if work['kind'] == 'diagnostic':
+        return rt.execute_adapter(work['inputs']['capability_id'], json.loads(work['inputs']['inputs_json']),
+                                  trigger_id=work['id'], work_id=work['id'])
+    return rt.run_meta(work['id'], executor, RES)
+
+
+def stopped_run(test, config=ORCH, adapters=None):
+    """A Lab chain stopped by two rejections; its signal opened an issue whose disposition is ready."""
+    store, controller, rt = open_run(test, config=config, adapters=adapters or [validating_adapter()])
+    rt.enqueue_lab('lab-1')
+    rt.run_until_wait(Scripted({'lab': reject, 'discovery': discover}), RES, max_steps=3)
+    issue = store.list('r', 'issue')[0]
+    work = [w for w in rt.controller.ready('r') if w['kind'] == 'meta_disposition']
+    test.assertEqual(len(work), 1)
+    return store, controller, rt, issue, work[0]
+
+
+def propose(rt, work, payload, *, receipt=None):
+    return rt.run_meta(work['id'], Scripted({'disposition': lambda d: ('propose_lab_settings', payload)},
+                                            receipt=receipt), RES)['proposal']
+
+
+def changes(store):
+    return by_seq(store.list('r', 'registration', kind='orchestration_change'))
+
+
+class ActionTests(unittest.TestCase):
+    def setUp(self):
+        EXECUTIONS.clear()
+
+    def test_action_appears_only_when_changes_are_allowed(self):
+        from rsi_lab import roles
+        store, controller, rt, issue, work = stopped_run(self, config={'orchestration': {'no_result_steps': 2,
+                                                                                          'max_changes': 0}})
+        effect = rt.prepare_meta(work['id'], RES)
+        envelope = json.loads(store.read_blob(effect['packet_ref']))
+        self.assertNotIn('propose_lab_settings', json.dumps(envelope['response_schema']))
+        self.assertEqual(effect['metadata']['orchestration'], {'lab_settings_action': False})
+        proposal = rt.run_meta(work['id'], Scripted({'disposition': lambda d: ('propose_lab_settings', GUIDE)}),
+                               effect['reservations'])['proposal']
+        self.assertEqual(proposal['status'], 'rejected')
+        self.assertEqual(changes(store), [])
+        for mode in ('lab', 'discovery'):
+            self.assertEqual(roles.response_schema(mode, working_memory=True, lab_settings=True),
+                             roles.response_schema(mode, working_memory=True))
+        enabled = roles.response_schema('disposition', working_memory=True, lab_settings=True)
+        self.assertIn('propose_lab_settings', json.dumps(enabled))
+        self.assertEqual(roles.response_schema('disposition', final_review_only=True, lab_settings=True),
+                         roles.response_schema('disposition', final_review_only=True))
+        store.verify_history('r')
+
+    def test_meta_sees_settings_limits_and_the_current_signal(self):
+        store, controller, rt, issue, work = stopped_run(self)
+        executor = Scripted({'disposition': lambda d: CLOSE})
+        rt.run_meta(work['id'], executor, RES)
+        constraints = executor.seen[0]['task']['constraints']['orchestration']
+        self.assertEqual(constraints['settings'], INITIAL)
+        self.assertEqual(constraints['signal_fact_id'], signals(store)[0]['id'])
+        self.assertEqual(constraints['changes_remaining'], 2)
+        self.assertIsNone(constraints['trial_change'])
+        self.assertEqual(constraints['limits']['guidance_chars'], 2000)
+        prompt = json.loads(store.read_blob(store.list('r', 'effect', kind='meta')[-1]['packet_ref']))['prompt']
+        self.assertIn('not a diagnosis', prompt)
+        self.assertIn('propose_lab_settings', prompt)
+        store.verify_history('r')
+
+    def test_out_of_range_unknown_tool_and_unchanged_settings_are_rejected(self):
+        bad = {'guidance too long': settings(guidance='g' * 2001),
+               'digest too large': settings(step_digest=17),
+               'results too large': settings(recent_results=17),
+               'too many tools': settings(disabled_tools=['t%d' % i for i in range(9)]),
+               'repeated tool': settings(disabled_tools=['probe', 'probe']),
+               'unknown tool': settings(disabled_tools=['nope']),
+               'unchanged': settings()}
+        for name, payload in bad.items():
+            with self.subTest(name):
+                store, controller, rt, issue, work = stopped_run(self)
+                proposal = propose(rt, work, payload)
+                self.assertEqual(proposal['status'], 'rejected')
+                self.assertEqual(changes(store), [])
+                store.verify_history('r')
+
+    def test_a_command_must_cite_the_current_signal(self):
+        store, controller, rt, issue, work = stopped_run(self)
+        def uncited(receipt, index):
+            receipt['response']['command']['evidence_ids'] = []
+            return receipt
+        proposal = propose(rt, work, GUIDE, receipt=uncited)
+        self.assertEqual(proposal['status'], 'rejected')
+        self.assertIn('current orchestration signal', proposal['error'])
+        store.verify_history('r')
+
+    def test_a_signal_expires_once_lab_produces_a_new_result(self):
+        store, controller, rt, issue, work = stopped_run(self)
+        rt.enqueue_lab('lab-2')
+        run_next(rt, {'lab'}, Scripted({'lab': lambda d: record('fresh')}))
+        run_next(rt, {'diagnostic'}, None)
+        self.assertEqual(outcomes(rt)[-1], ('new_result', 'new_result'))
+        proposal = propose(rt, work, GUIDE)
+        self.assertEqual(proposal['status'], 'rejected')
+        self.assertIn('current orchestration signal', proposal['error'])
+        store.verify_history('r')
+
+    def test_one_change_at_a_time_and_at_most_max_changes(self):
+        store, controller, rt, issue, work = stopped_run(self, config={'orchestration': {'no_result_steps': 2,
+                                                                                          'max_changes': 1}})
+        self.assertEqual(propose(rt, work, GUIDE)['status'], 'applied')
+        controller.add_fact('r', 'f2', 'raw_fact', {'x': 2}, {'source': 'fixture'}, 'f2')
+        controller.open_issue('r', 'again', issue['semantic_key'], 'h', 's', ['f2'], ['a'], ['c', 'f'], 'again')
+        second = next(w for w in rt.controller.ready('r') if w['kind'] == 'meta_disposition')
+        proposal = propose(rt, second, settings(guidance='Another idea.'))
+        self.assertEqual(proposal['status'], 'rejected')
+        self.assertIn('already in trial', proposal['error'])
+        set_status(store, changes(store)[0]['id'], 'reverted')
+        controller.add_fact('r', 'f3', 'raw_fact', {'x': 3}, {'source': 'fixture'}, 'f3')
+        controller.open_issue('r', 'third', issue['semantic_key'], 'h', 's', ['f3'], ['a'], ['c', 'f'], 'third')
+        third = next(w for w in rt.controller.ready('r') if w['kind'] == 'meta_disposition')
+        proposal = propose(rt, third, settings(guidance='Another idea.'))
+        self.assertEqual(proposal['status'], 'rejected')
+        self.assertIn('max_changes', proposal['error'])
+        self.assertEqual(len(changes(store)), 1)
+        store.verify_history('r')
+
+
+class RealExecutorTests(unittest.TestCase):
+    def invoke_fixture(self, prompt, schema, folder, model, effort, timeout, **session):
+        from rsi_lab import roles
+        from rsi_lab.packets import encoded
+        folder.mkdir(parents=True)
+        (folder / 'prompt.txt').write_text(roles.transport.PREAMBLE + prompt)
+        response = {'command': {}, 'working_memory_delta': '{}'}
+        result = {'response': response, 'usage': {'input_tokens': 1, 'output_tokens': 1}, 'usage_complete': True,
+                  'error': None, 'wall_seconds': .01, 'returncode': 0}
+        (folder / 'transport_result.json').write_bytes(encoded(result))
+        (folder / 'events.jsonl').write_text(json.dumps({'type': 'turn.completed', 'usage': result['usage']}))
+        return result
+
+    def test_codex_executor_recomputes_the_schema_from_the_effect_record(self):
+        from unittest.mock import patch
+        from rsi_lab import roles
+        store, controller, rt = open_run(self, config=ORCH, adapters=[validating_adapter()])
+        rt.enqueue_lab('lab-1')
+        rt.run_until_wait(Scripted({'lab': reject, 'discovery': none}), RES, max_steps=2)
+        rt.orchestration.advance()
+        controller.open_issue('r', 'i1', ['anomaly', 's', 't'], 'h', 's', [signals(store)[0]['id']], ['a'],
+                              ['c', 'f'], 'i1')
+        work = next(w for w in rt.controller.ready('r') if w['kind'] == 'meta_disposition')
+        effect = rt.prepare_meta(work['id'], RES)
+        packet = store.read_blob(effect['packet_ref'])
+        envelope = json.loads(packet)
+        self.assertIn('propose_lab_settings', json.dumps(envelope['response_schema']))
+        self.assertEqual(effect['metadata']['orchestration'], {'lab_settings_action': True})
+        dispatching = {**effect, 'status': 'dispatching', 'metadata': {**effect['metadata'], 'session_fence': 1}}
+        root = tempfile.mkdtemp(prefix='rsi-orch-codex-')
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        with patch.object(roles.transport, 'invoke', side_effect=self.invoke_fixture) as invoke:
+            roles.CodexExecutor(os.path.join(root, 'calls'))(dispatching, packet)
+            invoke.assert_called_once()
+            self.assertEqual(invoke.call_args.args[1], envelope['response_schema'])
+        with patch.object(roles.transport, 'invoke') as invoke:
+            for metadata in ({k: v for k, v in dispatching['metadata'].items() if k != 'orchestration'},
+                             {**dispatching['metadata'], 'orchestration': {'lab_settings_action': False}}):
+                with self.subTest(metadata=metadata.get('orchestration')), self.assertRaises(ValueError):
+                    roles.CodexExecutor(os.path.join(root, 'calls2'))({**dispatching, 'metadata': metadata}, packet)
+            invoke.assert_not_called()
+        store.verify_history('r')
+
+
+class PublicationTests(unittest.TestCase):
+    def setUp(self):
+        EXECUTIONS.clear()
+
+    def test_publication_records_the_change_parks_the_issue_and_restarts_a_stopped_lab(self):
+        store, controller, rt, issue, work = stopped_run(self)
+        signal = signals(store)[0]['id']
+        proposal = propose(rt, work, GUIDE)
+        self.assertEqual(proposal['status'], 'applied')
+        result = json.loads(store.read_blob(proposal['result_ref']))
+        [change] = changes(store)
+        self.assertEqual(change['status'], 'trial')
+        self.assertEqual(change['settings'], {k: v for k, v in GUIDE.items() if k != 'rationale'})
+        self.assertEqual(change['signal_fact_id'], signal)
+        self.assertIsNone(change['previous_change_id'])
+        self.assertEqual(change['issue_id'], issue['id'])
+        [wait] = store.list('r', 'wait')
+        self.assertEqual((wait['status'], wait['expiry_action'], wait['dependency_id']),
+                         ('waiting', 'close_unresolved', change['id']))
+        self.assertEqual(wait['deadline_at'], change['deadline_at'])
+        lab = store.get('r', 'work', result['lab_work_id'])
+        self.assertEqual(lab['status'], 'ready')
+        self.assertIn(signal, lab['inputs']['required_evidence_ids'])
+        self.assertNotIn('repair_of', lab['inputs'])
+        executor = Scripted({'lab': none})
+        run_next(rt, {'lab'}, executor)
+        self.assertEqual(store.list('r', 'effect', id=lab['effect_id'] if lab['effect_id'] else
+                                    store.get('r', 'work', lab['id'])['effect_id'])[0]['metadata']['orchestration'],
+                         {'lab_settings_action': True, 'change_id': change['id']})
+        constraints = executor.seen[0]['task']['constraints']['orchestration']
+        self.assertEqual(constraints['guidance'], GUIDE['guidance'])
+        self.assertEqual(len(constraints['recent_steps']), 2)
+        store.verify_history('r')
+
+    def test_an_unfinished_last_step_gets_no_extra_lab_step(self):
+        store, controller, rt = open_run(self, config=ORCH, adapters=[validating_adapter()])
+        rt.enqueue_lab('lab-1')
+        lab = Scripted({'lab': lambda d: record('a'), 'discovery': discover})
+        for kinds in ({'lab'}, {'diagnostic'}, {'lab'}, {'diagnostic'}, {'lab'}, {'diagnostic'}):
+            run_next(rt, kinds, lab)
+        rt.orchestration.advance()
+        run_next(rt, {'meta_discovery'}, lab)
+        while any(w['kind'] == 'meta_discovery' for w in rt.controller.ready('r')):
+            run_next(rt, {'meta_discovery'}, lab)
+        run_next(rt, {'lab'}, lab)
+        self.assertEqual(outcomes(rt)[-1], ('unfinished', None))
+        work = next(w for w in rt.controller.ready('r') if w['kind'] == 'meta_disposition')
+        labs = len(store.list('r', 'work', kind='lab'))
+        proposal = propose(rt, work, GUIDE)
+        self.assertEqual(proposal['status'], 'applied')
+        self.assertIsNone(json.loads(store.read_blob(proposal['result_ref']))['lab_work_id'])
+        self.assertEqual(len(store.list('r', 'work', kind='lab')), labs)
+        run_next(rt, {'diagnostic'}, lab)
+        self.assertEqual(len(store.list('r', 'work', kind='lab')), labs + 1)
+        store.verify_history('r')
+
+    def test_interrupted_publication_resumes_to_the_same_result(self):
+        store, controller, rt, issue, work = stopped_run(self)
+        park = rt._park
+        def die(*args, **kwargs):
+            raise KeyboardInterrupt('simulated death before parking')
+        rt._park = die
+        with self.assertRaises(KeyboardInterrupt):
+            propose(rt, work, GUIDE)
+        [proposal] = [p for p in store.list('r', 'proposal') if p['status'] == 'admitted']
+        self.assertEqual(len(changes(store)), 1)
+        self.assertEqual(store.list('r', 'wait'), [])
+        rt._park = park
+        applied = rt.apply_meta(proposal['effect_id'])
+        self.assertEqual(applied['status'], 'applied')
+        self.assertEqual(rt.apply_meta(proposal['effect_id']), applied)
+        self.assertEqual(len(changes(store)), 1)
+        self.assertEqual(len(store.list('r', 'wait')), 1)
+        self.assertEqual(len([w for w in store.list('r', 'work', kind='lab') if w['trigger'].startswith('orchestration:')]), 1)
+        store.verify_history('r')
+
+
 if __name__ == '__main__':
     unittest.main()
