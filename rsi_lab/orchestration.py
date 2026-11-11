@@ -16,6 +16,7 @@ from .controller import identity
 from .store import digest, encode
 
 UNSETTLED = {'prepared', 'dispatching', 'unknown'}
+CAPACITY_BLOCKS = {'blocked_capacity', 'packet_unrepresentable'}
 STOPPED_PROPOSALS = {'rejected', 'blocked_stale', 'blocked_action'}
 # A Lab chain that ends on one of these has stopped abnormally.
 STOP_CODES = {'proposal_rejected', 'proposal_blocked_stale', 'proposal_blocked_action', 'tool_failed'}
@@ -415,9 +416,86 @@ class Orchestration:
                 return None
         return self.runtime.observe('orchestration:' + pid, 'coded_anomaly', 0, [fid])
 
-    def advance(self):
+    # Settlement ------------------------------------------------------------
+
+    def verdict(self, change, ledger, now):
+        """(status, reason) for a change in trial, or None while it must keep waiting."""
+        steps = self.steps(ledger)
+        mine = [s for s in steps if s['change_id'] == change['id']]
+        if any(s['outcome'] == 'new_result' for s in mine):
+            return 'kept', 'new_result'
+        if len([s for s in mine if s['outcome'] != 'unfinished']) >= self.no_result_steps:
+            return 'reverted', 'no_result'
+        # Publication restarts a stopped Lab, so a stop seen now arose in the trial.
+        if self.stopped(steps, ledger) or self._capacity_blocked(ledger, change):
+            return 'reverted', 'lab_stopped'
+        if self.finalizing(ledger) or now >= change['deadline_at']:
+            return 'reverted', 'no_conclusion'
+        return None
+
+    def _capacity_blocked(self, ledger, change):
+        for work in ledger.find('work', kind='lab', status='blocked'):
+            if work['updated_seq'] <= change['created_seq'] or work.get('effect_id') or not work.get('outcome_ref'):
+                continue
+            outcome = ledger.read(work['outcome_ref'])
+            if isinstance(outcome, dict) and outcome.get('status') in CAPACITY_BLOCKS:
+                return True
+        return False
+
+    def settle(self, now):
+        """Keep or revert the change in trial when code can decide; nothing is written while it waits."""
+        ledger = self.ledger()
+        trial = next((c for c in self.changes(ledger) if c['status'] == 'trial'), None)
+        if trial is not None and self.verdict(trial, ledger, now) is not None:
+            change_id = trial['id']
+            def apply(tx):
+                inside = self.ledger(tx)
+                current = inside.one('registration', change_id)
+                decided = self.verdict(current, inside, now) if current['status'] == 'trial' else None
+                if decided is None:
+                    raise _NoDecision()
+                status, reason = decided
+                records = [s['record'] for s in self.steps(inside) if s['change_id'] == change_id]
+                fid = identity('orchestration_settlement', change_id)
+                content = {'kind': 'orchestration_settlement', 'change_id': change_id, 'result': status,
+                           'reason': reason, 'no_result_steps': self.no_result_steps, 'settings': current['settings'],
+                           'previous_change_id': current['previous_change_id'], 'step_count': len(records),
+                           'omitted_steps': max(0, len(records) - RECORD_LIMIT), 'steps': records[-RECORD_LIMIT:],
+                           'benefit_claim': 'not_evaluated'}
+                tx.insert('fact', fid, {'kind': 'validation', 'content_ref': tx.blob(content),
+                                        'provenance': {'source': 'code_settlement', 'change_id': change_id}})
+                issue = inside.one('issue', current['issue_id']) if current['issue_id'] else None
+                if issue and issue['status'] == 'open':
+                    tx.update('issue', issue['id'], {'evidence_ids': issue['evidence_ids'] + [fid],
+                                                     'evidence_revision': issue['evidence_revision'] + 1})
+                return tx.update('registration', change_id, {'status': status, 'reason': reason,
+                                                            'settlement_fact_id': fid})
+            try:
+                self.runtime._mutate('orchestration-settle:' + change_id, 'orchestration_change_settled', apply,
+                                     {'change_id': change_id})
+            except _NoDecision:
+                pass
+        # Notify every settled change whose dependency still says trial,
+        # including one whose notification a crash interrupted.
+        notified = []
+        for change in self.changes():
+            if change['status'] == 'trial':
+                continue
+            dependency = self.ledger().one('dependency', change['id'])
+            if dependency is None or dependency['value'].get('status') != 'trial':
+                continue
+            self.runtime.controller.dependency(self.run_id, change['id'], 'lab_orchestration',
+                {'status': change['status'], 'reason': change['reason'], 'fact_id': change['settlement_fact_id']},
+                'orchestration-settle-dependency:' + change['id'])
+            notified.append(change['id'])
+        if notified:
+            self.runtime.controller.tick(self.run_id)
+        return notified
+
+    def advance(self, now=None):
         """One controller pass: settle a change in trial, then judge the signal."""
-        return {'signal': self.signal()}
+        now = self.clock() if now is None else now
+        return {'settled': self.settle(now), 'signal': self.signal()}
 
 
 class _NoDecision(Exception):

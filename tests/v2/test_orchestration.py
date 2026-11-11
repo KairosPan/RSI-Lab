@@ -804,5 +804,195 @@ class PublicationTests(unittest.TestCase):
         store.verify_history('r')
 
 
+
+def guided(data):
+    """Lab that only gets the input right once Meta's guidance is in force."""
+    return record('a') if data['task']['constraints']['orchestration']['guidance'] else reject(data)
+
+
+def settlement(store, change):
+    fact = store.get('r', 'fact', change['settlement_fact_id'])
+    return fact, json.loads(store.read_blob(fact['content_ref']))
+
+
+def published_trial(test, config=ORCH, adapters=None, payload=GUIDE):
+    store, controller, rt, issue, work = stopped_run(test, config=config, adapters=adapters)
+    test.assertEqual(propose(rt, work, payload)['status'], 'applied')
+    return store, controller, rt, issue, changes(store)[0]
+
+
+class SettlementTests(unittest.TestCase):
+    def setUp(self):
+        EXECUTIONS.clear()
+
+    def assert_settled(self, store, rt, change_id, status, reason):
+        change = store.get('r', 'registration', change_id)
+        self.assertEqual((change['status'], change['reason']), (status, reason))
+        fact, content = settlement(store, change)
+        self.assertEqual(fact['kind'], 'validation')
+        self.assertEqual(fact['provenance'], {'source': 'code_settlement', 'change_id': change_id})
+        self.assertEqual((content['result'], content['reason'], content['benefit_claim']),
+                         (status, reason, 'not_evaluated'))
+        self.assertEqual(content['no_result_steps'], rt.orchestration.no_result_steps)
+        self.assertEqual(content['step_count'], len(content['steps']))
+        self.assertEqual(content['settings'], change['settings'])
+        issue = store.get('r', 'issue', change['issue_id'])
+        self.assertIn(fact['id'], issue['evidence_ids'])
+        self.assertEqual(store.get('r', 'dependency', change_id)['value']['status'], status)
+        self.assertEqual(store.list('r', 'wait')[0]['status'], 'fired')
+        woken = [w for w in store.list('r', 'work', kind='meta_disposition')
+                 if w['trigger'].startswith('dependency:' + change_id)]
+        self.assertEqual(len(woken), 1)
+        return change, content
+
+    def test_a_new_result_keeps_the_change(self):
+        store, controller, rt, issue, change = published_trial(self)
+        executor = Scripted({'lab': guided, 'discovery': none, 'disposition': lambda d: CLOSE})
+        rt.run_until_wait(executor, RES, max_steps=4)
+        change, content = self.assert_settled(store, rt, change['id'], 'kept', 'new_result')
+        self.assertEqual(rt.orchestration.current_change()['id'], change['id'])
+        rt.run_until_wait(executor, RES, max_steps=10)
+        disposition = [d for d in executor.seen if d['mode'] == 'disposition'][-1]
+        self.assertIn(change['settlement_fact_id'], [p['evidence_id'] for p in disposition['delivered_pages']])
+        self.assertEqual(store.get('r', 'issue', issue['id'])['status'], 'closed_unresolved')
+        store.verify_history('r')
+
+    def test_n_steps_without_a_new_result_revert_and_published_facts_remain(self):
+        store, controller, rt = open_run(self, config=ORCH, adapters=[validating_adapter()])
+        rt.enqueue_lab('lab-1')
+        executor = Scripted({'lab': lambda d: record('a'), 'discovery': discover,
+                             'disposition': in_order(('propose_lab_settings', GUIDE), CLOSE)})
+        rt.run_until_wait(executor, RES, max_steps=26)
+        [change] = changes(store)
+        change, content = self.assert_settled(store, rt, change['id'], 'reverted', 'no_result')
+        under = [s for s in rt.orchestration.steps() if s['change_id'] == change['id']]
+        self.assertEqual([s['outcome'] for s in under][:N], ['no_result'] * N)
+        self.assertEqual([r['reason_code'] for r in content['steps']][:N], ['repeated_result'] * N)
+        tools = [e for e in store.list('r', 'effect', kind='probe_tool') if e['status'] == 'succeeded']
+        for effect in tools:
+            self.assertTrue(store.list('r', 'fact', id='probe_' + effect['id'][-16:]))
+        guided_flags = [d['task']['constraints']['orchestration']['guidance'] is not None
+                        for d in lab_packets(executor)]
+        last_guided = max(i for i, flag in enumerate(guided_flags) if flag)
+        self.assertEqual(last_guided - guided_flags.index(True) + 1, N)
+        self.assertTrue(guided_flags[last_guided + 1:])
+        self.assertFalse(any(guided_flags[last_guided + 1:]))
+        for data in lab_packets(executor)[last_guided + 1:]:
+            self.assertEqual(data['task']['constraints']['orchestration']['recent_steps'], [])
+        self.assertEqual(rt.orchestration.current_change(), None)
+        self.assertEqual(len(signals(store)), 1)
+        store.verify_history('r')
+
+    def test_a_stop_during_the_trial_reverts(self):
+        store, controller, rt, issue, change = published_trial(
+            self, adapters=[validating_adapter(), failing_adapter()])
+        rt.run_until_wait(Scripted({'lab': lambda d: ('request_diagnostic', diag({'record_id': 'a'}, 'probe_fail')),
+                                    'discovery': none, 'disposition': lambda d: CLOSE}), RES, max_steps=3)
+        self.assert_settled(store, rt, change['id'], 'reverted', 'lab_stopped')
+        self.assertEqual(rt.orchestration.current_change(), None)
+        store.verify_history('r')
+
+    def test_a_capacity_block_during_the_trial_reverts_at_once(self):
+        from rsi_lab.packets import PacketBuilder
+        store, controller, rt, issue, change = published_trial(self)
+        rt.packet_builder_factory = lambda catalog, max_input_bytes: PacketBuilder(catalog, max_input_bytes=300)
+        rt.run_until_wait(Scripted({'disposition': lambda d: CLOSE}), RES, max_steps=2)
+        self.assert_settled(store, rt, change['id'], 'reverted', 'lab_stopped')
+        store.verify_history('r')
+
+    def test_the_deadline_reverts_without_a_conclusion(self):
+        store, controller, rt, issue, change = published_trial(self)
+        executor = Scripted({'lab': none, 'disposition': lambda d: CLOSE})
+        rt.run_until_wait(executor, RES, max_steps=1)
+        self.assertEqual(store.get('r', 'registration', change['id'])['status'], 'trial')
+        events = store.verify_history('r')['events']
+        rt.orchestration.clock = lambda: change['deadline_at'] - 1
+        rt.orchestration.advance()
+        self.assertEqual(store.verify_history('r')['events'], events)
+        rt.orchestration.clock = lambda: change['deadline_at']
+        rt.run_until_wait(executor, RES, max_steps=1)
+        self.assert_settled(store, rt, change['id'], 'reverted', 'no_conclusion')
+        rt.enqueue_lab('after')
+        rt.run_until_wait(executor, RES, max_steps=3)
+        self.assertEqual(lab_packets(executor)[-1]['task']['constraints']['orchestration'],
+                         {'guidance': None, 'recent_steps': []})
+        store.verify_history('r')
+
+    def test_finalizing_reverts_a_change_in_trial(self):
+        store, controller, rt, issue, change = published_trial(self)
+        rt.finalize('operator stop')
+        change = store.get('r', 'registration', change['id'])
+        self.assertEqual((change['status'], change['reason']), ('reverted', 'no_conclusion'))
+        self.assertIn(change['settlement_fact_id'], store.get('r', 'issue', issue['id'])['evidence_ids'])
+        store.verify_history('r')
+
+    def test_settlement_is_idempotent_and_resumes_after_a_crash(self):
+        store, controller, rt, issue, change = published_trial(self)
+        rt.run_until_wait(Scripted({'lab': none}), RES, max_steps=1)
+        dependency = rt.controller.dependency
+        def die(run_id, dependency_id, producer, value, key):
+            if key.startswith('orchestration-settle-dependency:'):
+                raise KeyboardInterrupt('simulated death before notification')
+            return dependency(run_id, dependency_id, producer, value, key)
+        rt.controller.dependency = die
+        rt.orchestration.clock = lambda: change['deadline_at'] + 1
+        with self.assertRaises(KeyboardInterrupt):
+            rt.orchestration.advance()
+        self.assertEqual(store.get('r', 'registration', change['id'])['status'], 'reverted')
+        self.assertEqual(store.list('r', 'wait')[0]['status'], 'waiting')
+        rt.controller.dependency = dependency
+        rt.orchestration.advance()
+        self.assertEqual(store.list('r', 'wait')[0]['status'], 'fired')
+        events = store.verify_history('r')['events']
+        rt.orchestration.advance()
+        rt.orchestration.advance()
+        self.assertEqual(store.verify_history('r')['events'], events)
+        self.assertEqual(len([f for f in store.list('r', 'fact') if f['kind'] == 'validation']), 1)
+        store.verify_history('r')
+
+
+class EndToEndTests(unittest.TestCase):
+    """The two paths of the design example, with N = 4."""
+    CONFIG = {'orchestration': {'no_result_steps': 4, 'max_changes': 2}}
+
+    def setUp(self):
+        EXECUTIONS.clear()
+
+    def test_guidance_fixes_a_rejected_lab_and_is_kept(self):
+        store, controller, rt = open_run(self, config=self.CONFIG, adapters=[validating_adapter()])
+        rt.enqueue_lab('lab-1')
+        resolve = ('close_issue', {'resolution': 'resolved', 'reason': 'Lab produces results again'})
+        executor = Scripted({'lab': lambda d: guided(d) if not any(
+                                 'record_id' in (s['inputs_excerpt'] or '') and s['outcome'] == 'new_result'
+                                 for s in d['task']['constraints']['orchestration']['recent_steps']) else none(d),
+                             'discovery': discover,
+                             'disposition': in_order(('propose_lab_settings', GUIDE), resolve)})
+        out = rt.run_until_wait(executor, RES, max_steps=30)
+        self.assertEqual(executor.calls[:4], ['lab', 'lab', 'discovery', 'disposition'])
+        self.assertEqual(json.loads(store.read_blob(signals(store)[0]['content_ref']))['reason'], 'lab_stopped')
+        [change] = changes(store)
+        self.assertEqual((change['status'], change['reason']), ('kept', 'new_result'))
+        self.assertEqual(store.list('r', 'issue')[0]['status'], 'resolved')
+        self.assertEqual(rt.orchestration.current_change()['id'], change['id'])
+        self.assertEqual(out['status'], 'quiescent')
+        store.verify_history('r')
+
+    def test_a_change_that_does_not_help_is_reverted(self):
+        store, controller, rt = open_run(self, config=self.CONFIG, adapters=[validating_adapter()])
+        rt.enqueue_lab('lab-1')
+        executor = Scripted({'lab': reject, 'discovery': discover,
+                             'disposition': in_order(('propose_lab_settings', GUIDE), CLOSE)})
+        rt.run_until_wait(executor, RES, max_steps=30)
+        [change] = changes(store)
+        self.assertEqual((change['status'], change['reason']), ('reverted', 'lab_stopped'))
+        self.assertEqual(rt.orchestration.current_change(), None)
+        self.assertEqual(len(signals(store)), 1)
+        self.assertEqual(store.list('r', 'issue')[0]['status'], 'closed_unresolved')
+        packets = lab_packets(executor)
+        self.assertEqual([p['task']['constraints']['orchestration']['guidance'] is not None for p in packets],
+                         [False, False, True, True])
+        store.verify_history('r')
+
+
 if __name__ == '__main__':
     unittest.main()

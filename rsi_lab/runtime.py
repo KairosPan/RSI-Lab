@@ -1197,6 +1197,9 @@ class Runtime:
                 return old[0]
             return tx.insert('registration', 'run_lifecycle', {'status': 'finalizing', 'reason': reason})
         state = self._mutate('finalize-run', 'run_finalizing', apply, {'reason': reason})
+        if self.orchestration:
+            # A change still in trial has no conclusion and is reverted.
+            self.orchestration.advance()
         for effect in self.store.list(self.run_id, 'effect', status='prepared'):
             work = self.store.get(self.run_id, 'work', effect['work_id'])
             if work['kind'] not in {'effect_reconcile', 'trial_settle'}:
