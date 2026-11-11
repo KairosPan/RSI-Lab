@@ -170,14 +170,15 @@ class Runtime:
                 'waiting': self.store.list(self.run_id, 'wait', issue_id=issue_id) if issue_id else []}}
         required = list(work['inputs'].get('required_evidence_ids', []))
         if self.orchestration and mode == 'lab':
-            disabled = orchestration['settings']['disabled_tools']
-            task['capability_catalog'] = {key: value for key, value in task['capability_catalog'].items()
-                                          if key not in disabled}
+            task['capability_catalog'] = self.orchestration.lab_catalog(task['capability_catalog'],
+                                                                        orchestration['settings'])
             task['constraints']['orchestration'] = self.orchestration.lab_constraints(orchestration)
         elif self.orchestration:
-            task['constraints']['orchestration'] = self.orchestration.meta_constraints(orchestration)
-            # The current signal is never paged or omitted from Meta's packet.
-            if orchestration['signal_id'] in evidence_ids:
+            # Where the request carries the current signal it is never paged
+            # or omitted; elsewhere Meta is not shown an identity it cannot cite.
+            citable = orchestration['signal_id'] in evidence_ids
+            task['constraints']['orchestration'] = self.orchestration.meta_constraints(orchestration, citable)
+            if citable:
                 required.append(orchestration['signal_id'])
         if self.config.get('research_features'):
             task['constraints']['research_features'] = self.config['research_features']
@@ -515,7 +516,8 @@ class Runtime:
                 capabilities = self.capability_catalog()
                 if self.orchestration and effect['kind'] == 'lab':
                     # A Lab call is held to the settings its own Effect recorded.
-                    capabilities = self.orchestration.lab_catalog(capabilities, effect)
+                    capabilities = self.orchestration.lab_catalog(capabilities,
+                                                                  self.orchestration.effect_settings(effect))
                 validated = validate_command(response, packet,
                     current_versions=self.versions(effect['issue_id']),
                     authorized_sources=self.config.get('authorized_sources', []),
@@ -1164,7 +1166,8 @@ class Runtime:
                     if e['status'] in {'dispatching', 'unknown'} or e.get('accounting_unknown')],
                 'budgets': self.store.list(self.run_id, 'budget'),
                 'agent_sessions': self.store.list(self.run_id, 'agent_session'),
-                'agent_turns': self.store.list(self.run_id, 'agent_turn')}
+                'agent_turns': self.store.list(self.run_id, 'agent_turn'),
+                **({'orchestration': self.orchestration.status()} if self.orchestration else {})}
 
     def _agent_available(self, work):
         if work['kind'] not in {'lab', 'meta_discovery', 'meta_disposition', 'disposition'}:

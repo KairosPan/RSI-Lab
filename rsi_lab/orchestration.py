@@ -13,13 +13,13 @@ import json
 import time
 
 from .controller import identity
+from .driver_report import CAPACITY_BLOCKS, STOPPED_PROPOSALS, UNSETTLED
 from .store import digest, encode
 
-UNSETTLED = {'prepared', 'dispatching', 'unknown'}
-CAPACITY_BLOCKS = {'blocked_capacity', 'packet_unrepresentable'}
-STOPPED_PROPOSALS = {'rejected', 'blocked_stale', 'blocked_action'}
-# A Lab chain that ends on one of these has stopped abnormally.
-STOP_CODES = {'proposal_rejected', 'proposal_blocked_stale', 'proposal_blocked_action', 'tool_failed'}
+# A Lab chain that ends on one of these has stopped abnormally. The driver
+# report's stopped_lab is wider: it also covers failed and blocked Lab Work.
+STOP_CODES = {'proposal_rejected', 'proposal_blocked_stale', 'proposal_blocked_action', 'tool_failed',
+              'tool_cancelled'}
 EXCERPT_CHARS = 160
 REASON_CHARS = 240
 # Records kept in one signal or settlement fact; the fact also counts all steps.
@@ -35,15 +35,16 @@ LAB_INSTRUCTION = (
 META_INSTRUCTION = (
     'Lab orchestration is enabled. A fact whose provenance source is controller_orchestration_signal is the '
     'controller measurement of Lab steps without a new result, or of a Lab chain that stopped on a rejection or a '
-    'failed tool. It is a suspicion to investigate, not a diagnosis: low output can come from the task itself. '
+    'failed or cancelled tool call. It is a suspicion to investigate, not a diagnosis: low output can come from the task itself. '
     'constraints.orchestration shows the Lab settings in force, their limits, the changes remaining, any change in '
-    'trial and the current signal fact. ')
+    'trial and, when this request delivers it, the current signal fact. ')
 LAB_SETTINGS_INSTRUCTION = (
     'In disposition mode propose_lab_settings submits the COMPLETE Lab settings: guidance (text or null), '
     'step_digest, recent_results and disabled_tools; copy every value you do not change from '
     'constraints.orchestration.settings, within constraints.orchestration.limits. disabled_tools can only remove '
     'catalog tools from the Lab. It is admitted only if the command cites the current signal fact '
-    '(constraints.orchestration.signal_fact_id), no change is in trial, a change remains, and the settings differ '
+    '(constraints.orchestration.signal_fact_id; when that is null this request cannot change Lab settings), '
+    'no change is in trial, a change remains, and the settings differ '
     'from those in force. The controller alone keeps or reverts the change: it keeps it once the Lab produces a new '
     'result and reverts it otherwise. That verdict is not evidence of scientific benefit. ')
 
@@ -189,17 +190,29 @@ class Orchestration:
             return None
         return {'id': identity('orchestration_period', rows[0]['effect_id']), 'steps': rows}
 
-    def stopped(self, steps, ledger=None):
-        """The latest Lab Work finished, nothing follows it, and its step ended on a rejection or tool failure."""
-        ledger = ledger or self.ledger()
+    def _last_lab(self, ledger):
+        """The latest Lab Work when no Lab Work is ready or leased, else None."""
         labs = ledger.find('work', kind='lab')
         if not labs or any(w['status'] in {'ready', 'leased'} for w in labs):
-            return False
-        last = max(labs, key=lambda w: (w['created_seq'], w['id']))
-        if last['status'] != 'succeeded' or not last.get('effect_id'):
-            return False
+            return None
+        return max(labs, key=lambda w: (w['created_seq'], w['id']))
+
+    def stop_step(self, steps, ledger=None):
+        """The step on which the latest Lab chain stopped abnormally, or None.
+
+        The latest Lab Work finished, nothing follows it, and its step ended
+        on a rejection or on a failed or cancelled tool call.
+        """
+        last = self._last_lab(ledger or self.ledger())
+        if last is None or last['status'] != 'succeeded' or not last.get('effect_id'):
+            return None
         step = next((s for s in steps if s['effect_id'] == last['effect_id']), None)
-        return step is not None and step['outcome'] == 'no_result' and step['reason_code'] in STOP_CODES
+        if step is not None and step['outcome'] == 'no_result' and step['reason_code'] in STOP_CODES:
+            return step
+        return None
+
+    def stopped(self, steps, ledger=None):
+        return self.stop_step(steps, ledger) is not None
 
     # Changes ---------------------------------------------------------------
 
@@ -242,7 +255,8 @@ class Orchestration:
             record['change_id'] = snapshot['change_id']
         return record
 
-    def meta_constraints(self, snapshot):
+    def meta_constraints(self, snapshot, citable):
+        """``citable``: this request delivers the current signal, so its command may cite it."""
         trial = next((c for c in snapshot['changes'] if c['status'] == 'trial'), None)
         return {'lab_settings_action': self.max_changes > 0, 'no_result_steps': self.no_result_steps,
                 'settings': snapshot['settings'], 'limits': dict(LIMITS),
@@ -250,15 +264,15 @@ class Orchestration:
                 'trial_change': {'change_id': trial['id'], 'settings': trial['settings'],
                                  'signal_fact_id': trial['signal_fact_id'], 'deadline_at': trial['deadline_at']}
                                 if trial else None,
-                'signal_fact_id': snapshot['signal_id']}
+                'signal_fact_id': snapshot['signal_id'] if citable else None}
 
-    def lab_catalog(self, catalog, effect):
-        """The Lab view of the catalog: tools disabled by the Effect's recorded change (or the current one) removed."""
-        if effect is None:
-            settings = self.settings(self.current_change())
-        else:
-            settings = self.change_settings((effect.get('metadata', {}).get('orchestration') or {}).get('change_id'))
+    def lab_catalog(self, catalog, settings):
+        """The Lab view of the catalog under ``settings``: disabled tools removed."""
         return {key: value for key, value in catalog.items() if key not in settings['disabled_tools']}
+
+    def effect_settings(self, effect):
+        """The settings a Lab Effect recorded when it was prepared."""
+        return self.change_settings((effect.get('metadata', {}).get('orchestration') or {}).get('change_id'))
 
     def lab_constraints(self, snapshot):
         settings = snapshot['settings']
@@ -314,11 +328,58 @@ class Orchestration:
             raise ValueError('The proposed Lab settings equal the settings in force')
         return settings, signal
 
-    def lab_idle(self, ledger, steps):
-        """No Lab Work is ready or leased and every Lab step has finished."""
-        if any(w['status'] in {'ready', 'leased'} for w in ledger.find('work', kind='lab')):
+    def lab_continues(self, ledger, steps):
+        """A Lab Work is ready or leased, or the latest Lab Work's own step has yet to finish.
+
+        Only the latest chain is asked: an older step that never finishes
+        must not keep a change from being tried.
+        """
+        labs = ledger.find('work', kind='lab')
+        if any(w['status'] in {'ready', 'leased'} for w in labs):
+            return True
+        if not labs:
             return False
-        return all(s['outcome'] != 'unfinished' for s in steps)
+        last = max(labs, key=lambda w: (w['created_seq'], w['id']))
+        step = next((s for s in steps if s['effect_id'] == last.get('effect_id')), None)
+        return step is not None and step['outcome'] == 'unfinished'
+
+    def _restart(self, tx, ledger, change_id, signal):
+        """Queue the one Lab step a change may add; the Work identity allows it once per change."""
+        labs = sorted(ledger.find('work', kind='lab'), key=lambda w: (w['created_seq'], w['id']))
+        last = labs[-1]['inputs'] if labs else {}
+        inputs = {name: last[name] for name in ('agent_instance_id', 'branch_id', 'scientific_query') if name in last}
+        inputs.update(evidence_ids=list(dict.fromkeys(list(last.get('evidence_ids', [])) + [signal])),
+                      required_evidence_ids=list(dict.fromkeys(list(last.get('required_evidence_ids', [])) + [signal])),
+                      orchestration_change_id=change_id)
+        return self.runtime.controller._work(tx, None, 'lab', 'orchestration:' + change_id, inputs=inputs)
+
+    def _restart_due(self, ledger, change):
+        """The change is in trial, no Lab step has used it, its restart is unused and the Lab will not go on."""
+        if change is None or change['status'] != 'trial' or self.finalizing(ledger):
+            return False
+        if ledger.one('work', identity('work', None, 'lab', 'orchestration:' + change['id'])):
+            return False
+        steps = self.steps(ledger)
+        return not any(s['change_id'] == change['id'] for s in steps) and not self.lab_continues(ledger, steps)
+
+    def restart(self):
+        """Give a change in trial its Lab step when the step pending at publication ended without a successor."""
+        ledger = self.ledger()
+        trial = next((c for c in self.changes(ledger) if c['status'] == 'trial'), None)
+        if not self._restart_due(ledger, trial):
+            return None
+        change_id = trial['id']
+        def apply(tx):
+            inside = self.ledger(tx)
+            current = inside.one('registration', change_id)
+            if not self._restart_due(inside, current):
+                raise _NoDecision()
+            return self._restart(tx, inside, change_id, current['signal_fact_id'])
+        try:
+            return self.runtime._mutate('orchestration-restart:' + change_id, 'orchestration_lab_restarted', apply,
+                                        {'change_id': change_id})['id']
+        except _NoDecision:
+            return None
 
     def publish(self, proposal, key, issue_id, deadline):
         """Record the change in trial, restart a stopped Lab, then park the issue on the change."""
@@ -334,16 +395,8 @@ class Orchestration:
                 'proposal_id': proposal['id'], 'deadline_at': deadline, 'result': None, 'reason': None,
                 'settlement_fact_id': None})
             lab = None
-            if self.lab_idle(ledger, self.steps(ledger)):
-                labs = sorted(ledger.find('work', kind='lab'), key=lambda w: (w['created_seq'], w['id']))
-                last = labs[-1]['inputs'] if labs else {}
-                inputs = {name: last[name] for name in ('agent_instance_id', 'branch_id', 'scientific_query')
-                          if name in last}
-                inputs.update(evidence_ids=list(dict.fromkeys(list(last.get('evidence_ids', [])) + [signal])),
-                              required_evidence_ids=list(dict.fromkeys(
-                                  list(last.get('required_evidence_ids', [])) + [signal])),
-                              orchestration_change_id=change_id)
-                lab = self.runtime.controller._work(tx, None, 'lab', 'orchestration:' + change_id, inputs=inputs)
+            if not self.lab_continues(ledger, self.steps(ledger)):
+                lab = self._restart(tx, ledger, change_id, signal)
             return {'change': change, 'lab_work_id': lab['id'] if lab else None}
         released = self.runtime._mutate(key + ':release', 'orchestration_change_released', release,
                                         {'proposal_id': proposal['id']})
@@ -426,8 +479,10 @@ class Orchestration:
             return 'kept', 'new_result'
         if len([s for s in mine if s['outcome'] != 'unfinished']) >= self.no_result_steps:
             return 'reverted', 'no_result'
-        # Publication restarts a stopped Lab, so a stop seen now arose in the trial.
-        if self.stopped(steps, ledger) or self._capacity_blocked(ledger, change):
+        # A stop of a step prepared before the change is not the change's
+        # failure; restart() then gives the change its own Lab step.
+        stop = self.stop_step(steps, ledger)
+        if (stop is not None and stop['change_id'] == change['id']) or self._capacity_blocked(ledger, change):
             return 'reverted', 'lab_stopped'
         if self.finalizing(ledger) or now >= change['deadline_at']:
             return 'reverted', 'no_conclusion'
@@ -493,9 +548,20 @@ class Orchestration:
         return notified
 
     def advance(self, now=None):
-        """One controller pass: settle a change in trial, then judge the signal."""
+        """One controller pass: settle a change in trial, restart its Lab if due, then judge the signal."""
         now = self.clock() if now is None else now
-        return {'settled': self.settle(now), 'signal': self.signal()}
+        return {'settled': self.settle(now), 'restarted': self.restart(), 'signal': self.signal()}
+
+    def status(self):
+        """What an operator needs to see why a signal or verdict is still withheld."""
+        ledger = self.ledger()
+        steps = self.steps(ledger)
+        period = self.period(steps)
+        trial = next((c for c in self.changes(ledger) if c['status'] == 'trial'), None)
+        rows = period['steps'] if period else []
+        return {'signal_fact_id': self.current_signal(ledger, steps), 'trial_change_id': trial['id'] if trial else None,
+                'period_steps': len(rows),
+                'unfinished_steps': [s['effect_id'] for s in rows if s['outcome'] == 'unfinished']}
 
 
 class _NoDecision(Exception):

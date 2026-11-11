@@ -12,8 +12,8 @@ from rsi_lab.adapters import Adapter
 from rsi_lab.orchestration import orchestration_config
 from rsi_lab.runtime import Runtime
 from rsi_lab.store import Store
-from tests.v2.liveness_support import (BUDGETS, EXECUTIONS, ISSUE, RES, Scripted, by_seq, diag, none, one_fact, one_tool_call,
-                                       open_run, strict_prepare, validating_adapter)
+from tests.v2.liveness_support import (BUDGETS, EXECUTIONS, ISSUE, RES, Scripted, by_seq, diag, malformed_publication_adapter,
+                                       none, one_fact, one_tool_call, open_run, strict_prepare, validating_adapter)
 
 N = 2
 ORCH = {'orchestration': {'no_result_steps': N, 'max_changes': 2}}
@@ -540,7 +540,8 @@ class LabSettingsTests(unittest.TestCase):
         result = rt.run_lab(lab['id'], Scripted({'lab': lambda d: record('a')}), RES)
         self.assertEqual(result['proposal']['status'], 'rejected')
         self.assertEqual(store.list('r', 'effect', kind='lab')[0]['metadata']['orchestration']['change_id'], 'change-1')
-        self.assertIn('probe', rt.orchestration.lab_catalog(rt.capability_catalog(), None))
+        self.assertIn('probe', rt.orchestration.lab_catalog(rt.capability_catalog(),
+                                                            rt.orchestration.snapshot()['settings']))
         store.verify_history('r')
 
 
@@ -991,6 +992,199 @@ class EndToEndTests(unittest.TestCase):
         packets = lab_packets(executor)
         self.assertEqual([p['task']['constraints']['orchestration']['guidance'] is not None for p in packets],
                          [False, False, True, True])
+        store.verify_history('r')
+
+
+class ReviewTests(unittest.TestCase):
+    """Regressions for the review of the first implementation."""
+    CONFIG = {'orchestration': {'no_result_steps': 4, 'max_changes': 2}}
+
+    def setUp(self):
+        EXECUTIONS.clear()
+
+    def test_an_old_step_that_never_finishes_does_not_keep_a_change_from_being_tried(self):
+        store, controller, rt = open_run(self, config=self.CONFIG,
+                                         adapters=[validating_adapter(), malformed_publication_adapter()])
+        rt.enqueue_lab('lab-1')
+        stuck = ('request_diagnostic', diag({'record_id': 'x'}, 'probe_malformed'))
+        rt.run_until_wait(Scripted({'lab': lambda d: stuck}), RES, max_steps=2)
+        self.assertEqual(outcomes(rt), [('unfinished', None)])
+        rt.enqueue_lab('lab-2')
+        executor = Scripted({'lab': in_order(record('a'), reject(None), reject(None), record('b'), none(None)),
+                             'discovery': discover, 'disposition': in_order(('propose_lab_settings', GUIDE), CLOSE)})
+        rt.run_until_wait(executor, RES, max_steps=30)
+        [change] = changes(store)
+        under = [s for s in rt.orchestration.steps() if s['change_id'] == change['id']]
+        self.assertTrue(under)
+        self.assertEqual((change['status'], change['reason']), ('kept', 'new_result'))
+        store.verify_history('r')
+
+    def test_a_stop_of_the_step_pending_at_publication_restarts_the_lab_once_instead_of_reverting(self):
+        store, controller, rt = open_run(self, config=ORCH, adapters=[validating_adapter(), failing_adapter()])
+        rt.enqueue_lab('lab-1')
+        fail = ('request_diagnostic', diag({'record_id': 'a'}, 'probe_fail'))
+        lab = Scripted({'lab': in_order(record('a'), record('a'), record('a'), fail, record('z')),
+                        'discovery': discover})
+        for kinds in ({'lab'}, {'diagnostic'}, {'lab'}, {'diagnostic'}, {'lab'}, {'diagnostic'}):
+            run_next(rt, kinds, lab)
+        rt.orchestration.advance()
+        while any(w['kind'] == 'meta_discovery' for w in rt.controller.ready('r')):
+            run_next(rt, {'meta_discovery'}, lab)
+        run_next(rt, {'lab'}, lab)
+        work = next(w for w in rt.controller.ready('r') if w['kind'] == 'meta_disposition')
+        proposal = propose(rt, work, GUIDE)
+        self.assertIsNone(json.loads(store.read_blob(proposal['result_ref']))['lab_work_id'])
+        [change] = changes(store)
+        run_next(rt, {'diagnostic'}, lab)
+        self.assertEqual(outcomes(rt)[-1], ('no_result', 'tool_failed'))
+        rt.orchestration.advance()
+        self.assertEqual(store.get('r', 'registration', change['id'])['status'], 'trial')
+        restarts = [w for w in store.list('r', 'work', kind='lab') if w['trigger'] == 'orchestration:' + change['id']]
+        self.assertEqual([w['status'] for w in restarts], ['ready'])
+        self.assertIn(change['signal_fact_id'], restarts[0]['inputs']['required_evidence_ids'])
+        events = store.verify_history('r')['events']
+        rt.orchestration.advance()
+        self.assertEqual(store.verify_history('r')['events'], events)
+        run_next(rt, {'lab'}, lab)
+        run_next(rt, {'diagnostic'}, lab)
+        rt.orchestration.advance()
+        change = store.get('r', 'registration', change['id'])
+        self.assertEqual((change['status'], change['reason']), ('kept', 'new_result'))
+        store.verify_history('r')
+
+    def test_a_stop_of_the_restarted_lab_reverts(self):
+        store, controller, rt, issue, change = published_trial(self, config=self.CONFIG)
+        rt.run_until_wait(Scripted({'lab': reject, 'disposition': lambda d: CLOSE}), RES, max_steps=6)
+        change = store.get('r', 'registration', change['id'])
+        self.assertEqual((change['status'], change['reason']), ('reverted', 'lab_stopped'))
+        self.assertEqual(len([w for w in store.list('r', 'work', kind='lab')
+                              if w['trigger'].startswith('orchestration:')]), 1)
+        store.verify_history('r')
+
+    def test_a_cancelled_tool_call_is_a_stop(self):
+        store, controller, rt = open_run(self, config=ORCH, adapters=[validating_adapter()])
+        dispatch = rt.controller.dispatch_effect
+        def refuse(run_id, effect_id, executor):
+            if store.get(run_id, 'effect', effect_id)['kind'] == 'probe_tool':
+                raise ValueError('simulated dispatch refusal')
+            return dispatch(run_id, effect_id, executor)
+        rt.controller.dispatch_effect = refuse
+        rt.enqueue_lab('lab-1')
+        executor = Scripted({'lab': lambda d: record('a'), 'discovery': none})
+        out = rt.run_until_wait(executor, RES, max_steps=10)
+        self.assertEqual(len(out['cancelled_prepared']), 1)
+        self.assertEqual(outcomes(rt), [('no_result', 'tool_cancelled')])
+        [fact] = signals(store)
+        self.assertEqual(json.loads(store.read_blob(fact['content_ref']))['reason'], 'lab_stopped')
+        self.assertEqual(executor.calls, ['lab', 'discovery'])
+        store.verify_history('r')
+
+    def test_meta_is_shown_the_signal_only_where_it_can_cite_it(self):
+        store, controller, rt, issue, work = stopped_run(self)
+        fid = signals(store)[0]['id']
+        controller.add_fact('r', 'other', 'raw_fact', {'x': 1}, {'source': 'fixture'}, 'other')
+        controller.open_issue('r', 'i-other', ['other', 's', 't'], 'h', 's', ['other'], ['alt'], ['c', 'f'], 'i-other')
+        controller.tick('r')
+        other = next(w for w in rt.controller.ready('r') if w['kind'] == 'meta_disposition' and w['issue_id'] == 'i-other')
+        executor = Scripted({'disposition': lambda d: CLOSE})
+        rt.run_meta(other['id'], executor, RES)
+        self.assertNotIn(fid, [p['evidence_id'] for p in executor.seen[0]['delivered_pages']])
+        self.assertIsNone(executor.seen[0]['task']['constraints']['orchestration']['signal_fact_id'])
+        rt.run_meta(work['id'], executor, RES)
+        self.assertEqual(executor.seen[1]['task']['constraints']['orchestration']['signal_fact_id'], fid)
+        store.verify_history('r')
+
+    def test_status_names_the_steps_a_withheld_signal_waits_on(self):
+        store, controller, rt = open_run(self, config=ORCH, adapters=[malformed_publication_adapter()])
+        rt.enqueue_lab('lab-1')
+        stuck = ('request_diagnostic', diag({'record_id': 'x'}, 'probe_malformed'))
+        out = rt.run_until_wait(Scripted({'lab': lambda d: stuck}), RES, max_steps=4)
+        self.assertEqual(signals(store), [])
+        [step] = rt.orchestration.steps()
+        self.assertEqual(out['state']['orchestration'],
+                         {'signal_fact_id': None, 'trial_change_id': None, 'period_steps': 1,
+                          'unfinished_steps': [step['effect_id']]})
+        store2, controller2, rt2 = open_run(self)
+        self.assertNotIn('orchestration', rt2.status())
+        store.verify_history('r')
+
+    def test_only_the_latest_lab_chain_decides_whether_the_lab_stopped(self):
+        store, controller, rt = open_run(self, config=self.CONFIG, adapters=[validating_adapter()])
+        rt.enqueue_lab('lab-1')
+        executor = Scripted({'lab': in_order(reject(None), reject(None), none(None))})
+        run_next(rt, {'lab'}, executor)
+        run_next(rt, {'lab'}, executor)
+        self.assertTrue(rt.orchestration.stopped(rt.orchestration.steps()))
+        rt.enqueue_lab('lab-2')
+        run_next(rt, {'lab'}, executor)
+        self.assertFalse(rt.orchestration.stopped(rt.orchestration.steps()))
+        rt.orchestration.advance()
+        self.assertEqual(signals(store), [])
+        store.verify_history('r')
+
+    def test_reverting_a_second_change_returns_to_the_first_kept_settings(self):
+        store, controller, rt, issue, first = published_trial(self)
+        second = settings(guidance='Try the other probe.', step_digest=2, recent_results=3, disabled_tools=['probe'])
+        executor = Scripted({'lab': lambda d: record('a'), 'discovery': discover,
+                             'disposition': in_order(CLOSE, ('propose_lab_settings', second), CLOSE)})
+        rt.run_until_wait(executor, RES, max_steps=40)
+        one, two = changes(store)
+        self.assertEqual((one['status'], one['reason']), ('kept', 'new_result'))
+        self.assertEqual(two['previous_change_id'], one['id'])
+        self.assertEqual(two['status'], 'reverted')
+        self.assertEqual(rt.orchestration.current_change()['id'], one['id'])
+        self.assertEqual(rt.orchestration.snapshot()['settings'], {k: v for k, v in GUIDE.items() if k != 'rationale'})
+        store.verify_history('r')
+
+    def test_a_revert_restores_all_four_settings(self):
+        payload = settings(guidance='Use probe2.', step_digest=3, recent_results=2, disabled_tools=['probe'])
+        store, controller, rt, issue, change = published_trial(
+            self, adapters=[validating_adapter(), second_adapter()], payload=payload)
+        executor = Scripted({'lab': lambda d: record('a'), 'discovery': none, 'disposition': lambda d: CLOSE})
+        rt.run_until_wait(executor, RES, max_steps=8)
+        self.assertNotIn('probe', lab_packets(executor)[0]['task']['capability_catalog'])
+        self.assertEqual(store.get('r', 'registration', change['id'])['status'], 'reverted')
+        self.assertEqual(rt.orchestration.snapshot()['settings'], INITIAL)
+        rt.enqueue_lab('after')
+        rt.run_until_wait(executor, RES, max_steps=2)
+        after = lab_packets(executor)[-1]
+        self.assertIn('probe', after['task']['capability_catalog'])
+        self.assertEqual(after['task']['constraints']['orchestration'], {'guidance': None, 'recent_steps': []})
+        store.verify_history('r')
+
+    def test_a_settlement_after_the_wait_expired_replaces_the_expiry_disposition(self):
+        store, controller, rt, issue, change = published_trial(self)
+        run_next(rt, {'lab'}, Scripted({'lab': none}))
+        controller.tick('r', now=change['deadline_at'] + 1)
+        [wait] = store.list('r', 'wait')
+        self.assertEqual(wait['status'], 'disposition_due')
+        due = [w for w in rt.controller.ready('r') if w['kind'] == 'disposition']
+        self.assertEqual(len(due), 1)
+        rt.orchestration.clock = lambda: change['deadline_at'] + 1
+        rt.orchestration.advance()
+        self.assertEqual(store.get('r', 'registration', change['id'])['reason'], 'no_conclusion')
+        self.assertEqual(store.get('r', 'work', due[0]['id'])['status'], 'cancelled')
+        ready = [w for w in rt.controller.ready('r') if w['kind'] in {'disposition', 'meta_disposition'}]
+        self.assertEqual([w['trigger'].startswith('dependency:' + change['id']) for w in ready], [True])
+        store.verify_history('r')
+
+    def test_a_change_is_published_and_kept_with_meta_lab_and_scientific_memory_enabled(self):
+        config = {**self.CONFIG, 'research_features': {'meta_lab': True, 'scientific_memory': True},
+                  'max_input_bytes': 500000}
+        store, controller, rt = open_run(self, config=config, adapters=[validating_adapter()])
+        rt.enqueue_lab('lab-1')
+        def research_fields(receipt, index):
+            response = receipt['response']
+            response['scientific_memory_updates'] = '[]'
+            response['recommendation_responses' if response['command']['mode'] == 'lab' else 'improvement_reviews'] = []
+            return receipt
+        executor = Scripted({'lab': in_order(reject(None), reject(None), record('a'), none(None)),
+                             'discovery': discover, 'disposition': in_order(('propose_lab_settings', GUIDE), CLOSE)},
+                            receipt=research_fields)
+        rt.run_until_wait(executor, RES, max_steps=30)
+        [change] = changes(store)
+        self.assertEqual((change['status'], change['reason']), ('kept', 'new_result'))
+        self.assertEqual(lab_packets(executor)[2]['task']['constraints']['orchestration']['guidance'], GUIDE['guidance'])
         store.verify_history('r')
 
 
