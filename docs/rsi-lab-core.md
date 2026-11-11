@@ -70,6 +70,67 @@ Meta 使用 discovery 与 disposition 模式，共享问题账本。前者从目
 
 领域检查表是工具能力，不是发现模式的完整问题空间。仅复述预先列出的缺口不能证明自主发现。研究模式的 Meta→Lab 建议由来源绑定，实际采用、工具执行、测量与复核分别留痕。推荐类别与最终复核语义由任务宿主提供，内核不推断任务是搜索、最大化或最小化。
 
+## Meta 调整 Lab 编排
+
+在运行配置里声明 `orchestration` 后，控制器会测量 Lab 有没有产出。没有产出时它叫醒 Meta，Meta 可以改 Lab 的四项设置，改动保留还是撤回由代码判定。不声明的运行行为和请求包字节都不变。
+
+```json
+"orchestration": {"no_result_steps": 4, "max_changes": 2}
+```
+
+`no_result_steps`（下称 N）取 2 到 64，`max_changes` 取 0 到 20，两个键都必须写，出现其他键即拒绝。`init` 和 `Runtime` 都做这个检查，运行开始后不能修改。`max_changes` 为 0 时只发信号，Meta 不能改设置。
+
+**步骤与新结果。** 一次 Lab 模型调用算一步。模型服务明确失败、从未派发就被取消、仅做最终复核的调用不算。Lab 请求的工具成功发布，且至少一条事实的内容在更早的事实里没有出现过，这一步才算“新结果”。重复内容、提议被拒或被阻塞、工具拒绝输入、工具明确失败、`no_action` 和 `propose_issue` 都算没有新结果。调用、提议或工具结果还没结清的步骤算未结束。
+
+**信号。** 最近一个新结果之后的步骤构成一段无结果期，用第一步的 Effect 标识命名。期内步骤都结束后，满足以下任一条件就发信号：
+
+- 期内满 N 步；
+- Lab 非正常停下，即最后一个 Lab Work 的提议被拒或被阻塞，且修复机会已用完，或它请求的工具明确失败。
+
+信号是一条 `raw_fact`，`provenance.source` 为 `controller_orchestration_signal`，内容包括原因（`no_result_streak` 或 `lab_stopped`）和各步的记录。随后控制器用 `observe(..., 'coded_anomaly', ...)` 叫醒 Meta 发现。同一段无结果期最多发一次。有改动在试用、或运行已进入收尾时，不发信号。当前信号出现在 Meta 请求包的证据里时，它是必需证据，不会被分页或省略。
+
+**四项设置。** 都只作用于 Lab。
+
+| 设置 | 作用 | 上限 |
+| --- | --- | --- |
+| `guidance` | 写进 Lab 请求包的 `task.constraints.orchestration.guidance` | 2000 字符，`null` 表示没有 |
+| `step_digest` | 在 `task.constraints.orchestration.recent_steps` 附上 Lab 最近几步的记录 | 16 |
+| `recent_results` | 把最近几条工具发布的事实作为可选证据交给 Lab，放不下时分页或省略 | 16 |
+| `disabled_tools` | 从 Lab 的能力目录里拿掉这些能力 | 8 个 |
+
+每个 Lab Effect 在 `metadata.orchestration.change_id` 记下当时生效的改动。Lab 的提议按这一步记录的设置校验，所以请求已停用的工具会被拒。已经排队的工具调用照常执行，Meta 自己请求这些工具也不受影响。
+
+**改动。** Meta 处置时可用 `propose_lab_settings` 提交完整的四项设置和 `rationale`。只有 `max_changes` 大于 0 时，这个动作才出现在处置模式的 schema 里；这个开关写在每个 Lab 和 Meta Effect 的 `metadata.orchestration.lab_settings_action`，`CodexExecutor` 据此重算 schema。接纳时代码检查：
+
+- 命令引用了当前无结果期的信号事实；Lab 已经又出了新结果的，信号过期；
+- 没有正在试用的改动，已发布次数小于 `max_changes`；
+- 取值在上限内，停用的能力在目录里，设置与当前生效的不同。
+
+接纳后，改动记为 `registration`（`kind='orchestration_change'`，状态 `trial`），Issue 挂起在这个改动上，截止时间是提议事件时间加 `wait_timeout_seconds`。如果 Lab 已经停下（没有就绪或已租用的 Lab Work，所有步骤都已结束），控制器补一个 Lab 步骤，它的输入带上信号事实。最后一步还没结清时不补。
+
+**判定。** 只看记录了这个改动的 Lab 步骤，按顺序取第一条成立的：
+
+| 情况 | 结果 | 原因码 |
+| --- | --- | --- |
+| 其中一步出了新结果 | 保留 | `new_result` |
+| 已有 N 步结束，都没有新结果 | 撤回 | `no_result` |
+| 试用期间 Lab 非正常停下，或 Lab Work 因容量阻塞 | 撤回 | `lab_stopped` |
+| 到截止时间，或运行进入收尾 | 撤回 | `no_conclusion` |
+
+其余情况继续等，不写任何事件。结算写一条 `validation` 事实（`provenance.source='code_settlement'`），内容固定带 `benefit_claim: "not_evaluated"`。Issue 还开着时，这条事实加进它的证据，然后更新依赖，Meta 处置被叫醒。撤回只影响之后构建的 Lab 请求包；这次改动下产生的事实、费用和回执都保留，也不补 Lab 步骤。保留的设置一直生效。
+
+**接入。** `run_until_wait` 每轮先调用 `runtime.orchestration.advance()` 再 `tick`，`finalize` 登记收尾后也调用一次。不经过 `run_until_wait` 的宿主要自己调用 `advance()`，命令行的 `tick` 子命令不调用它。所有写入都走 `Store.mutate`，键里只有标识，崩溃后重复调用返回已提交的结果。
+
+**局限。**
+
+- 判定只说明 Lab 又出了结果，不证明科研收益。
+- 四项是一起判定的，分不清是哪一项起了作用。
+- 工具输出带时间戳或随机数时，重复请求也会被算成新结果。
+- Lab 已在会话里读过的内容，撤回后也抹不掉。
+- 改动发布时上一步还没结清，如果这一步之后停下，改动会按 `lab_stopped` 撤回，即使还没有一步用上新设置。Meta 可以在剩余次数内再提一次，这次发布会补一个 Lab 步骤。
+
+设计与理由见 [设计文档](superpowers/specs/2026-11-10-meta-orchestration-policy-design.md)，实现见 [Orchestration](../rsi_lab/orchestration.py)，验收见 [测试](../tests/v2/test_orchestration.py)。
+
 ## 合成 CSV 示例
 
 `rsi_domains.tabular.demo.run_demo` 使用 Wh/kWh 混合读数 CSV。初始输入没有单位映射，演示实际执行以下过程：
