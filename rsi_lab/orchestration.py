@@ -177,3 +177,90 @@ class Orchestration:
             return False
         step = next((s for s in steps if s['effect_id'] == last['effect_id']), None)
         return step is not None and step['outcome'] == 'no_result' and step['reason_code'] in STOP_CODES
+
+    # Changes ---------------------------------------------------------------
+
+    def changes(self, ledger=None):
+        ledger = ledger or self.ledger()
+        return sorted(ledger.find('registration', kind='orchestration_change'),
+                      key=lambda r: (r['created_seq'], r['id']))
+
+    def current_change(self, ledger=None):
+        """The change in trial, else the latest kept one, else None (initial settings)."""
+        changes = self.changes(ledger)
+        trial = [c for c in changes if c['status'] == 'trial']
+        if trial:
+            return trial[0]
+        kept = [c for c in changes if c['status'] == 'kept']
+        return kept[-1] if kept else None
+
+    def finalizing(self, ledger):
+        return bool(ledger.find('registration', id='run_lifecycle', status='finalizing'))
+
+    # Signal ----------------------------------------------------------------
+
+    def signal_fact_id(self, period_id):
+        return identity('orchestration_signal', period_id)
+
+    def current_signal(self, ledger=None, steps=None):
+        """The recorded signal fact identity of the current no-result period, if any."""
+        ledger = ledger or self.ledger()
+        period = self.period(self.steps(ledger) if steps is None else steps)
+        if period is None:
+            return None
+        fid = self.signal_fact_id(period['id'])
+        return fid if ledger.one('fact', fid) else None
+
+    def _signal_reason(self, ledger, steps, period):
+        if period is None or self.finalizing(ledger):
+            return None
+        if any(c['status'] == 'trial' for c in self.changes(ledger)):
+            return None
+        if any(s['outcome'] == 'unfinished' for s in period['steps']):
+            return None
+        if self.stopped(steps, ledger):
+            return 'lab_stopped'
+        if len(period['steps']) >= self.no_result_steps:
+            return 'no_result_streak'
+        return None
+
+    def signal(self):
+        """Record the current period's signal once and wake Meta discovery once; idempotent."""
+        ledger = self.ledger()
+        steps = self.steps(ledger)
+        period = self.period(steps)
+        if period is None:
+            return None
+        pid, fid = period['id'], self.signal_fact_id(period['id'])
+        if ledger.one('fact', fid) is None:
+            if self._signal_reason(ledger, steps, period) is None:
+                return None
+            def apply(tx):
+                inside = self.ledger(tx)
+                now = self.steps(inside)
+                current = self.period(now)
+                reason = self._signal_reason(inside, now, current)
+                if current is None or current['id'] != pid or reason is None:
+                    raise _NoDecision()
+                change = self.current_change(inside)
+                records = [s['record'] for s in current['steps']]
+                content = {'kind': 'orchestration_signal', 'reason': reason, 'period_id': pid,
+                           'no_result_steps': self.no_result_steps,
+                           'active_change_id': change['id'] if change else None,
+                           'step_count': len(records), 'omitted_steps': max(0, len(records) - RECORD_LIMIT),
+                           'steps': records[-RECORD_LIMIT:]}
+                return tx.insert('fact', fid, {'kind': 'raw_fact', 'content_ref': tx.blob(content),
+                    'provenance': {'source': 'controller_orchestration_signal', 'period_id': pid}})
+            try:
+                self.runtime._mutate('orchestration-signal:' + pid, 'orchestration_signal', apply, {'period_id': pid})
+            except _NoDecision:
+                return None
+        return self.runtime.observe('orchestration:' + pid, 'coded_anomaly', 0, [fid])
+
+    def advance(self):
+        """One controller pass: settle a change in trial, then judge the signal."""
+        return {'signal': self.signal()}
+
+
+class _NoDecision(Exception):
+    """Raised inside a transaction to roll back when nothing is to be recorded."""

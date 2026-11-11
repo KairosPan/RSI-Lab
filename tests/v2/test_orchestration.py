@@ -12,7 +12,7 @@ from rsi_lab.adapters import Adapter
 from rsi_lab.orchestration import orchestration_config
 from rsi_lab.runtime import Runtime
 from rsi_lab.store import Store
-from tests.v2.liveness_support import (BUDGETS, EXECUTIONS, RES, Scripted, by_seq, diag, none, one_fact, one_tool_call,
+from tests.v2.liveness_support import (BUDGETS, EXECUTIONS, ISSUE, RES, Scripted, by_seq, diag, none, one_fact, one_tool_call,
                                        open_run, strict_prepare, validating_adapter)
 
 N = 2
@@ -190,6 +190,192 @@ class StepOutcomeTests(unittest.TestCase):
         controller.enqueue('r', 'lab', 'final', 'final', inputs={'evidence_ids': [], 'final_review_only': True})
         rt.run_lab(rt.controller.ready('r')[0]['id'], Scripted({'lab': none}), RES)
         self.assertEqual(rt.orchestration.steps(), [])
+        store.verify_history('r')
+
+
+
+def is_signal(data):
+    return any('controller_orchestration_signal' in page['source'] for page in data['delivered_pages'])
+
+
+def discover(data):
+    return ('propose_issue', ISSUE) if is_signal(data) else none(data)
+
+
+CLOSE = ('close_issue', {'resolution': 'closed_unresolved', 'reason': 'not pursued'})
+
+
+def signals(store):
+    return [f for f in store.list('r', 'fact') if f['provenance'].get('source') == 'controller_orchestration_signal']
+
+
+def signal_discoveries(store):
+    return [w for w in store.list('r', 'work', kind='meta_discovery') if w['trigger'].startswith('event:orchestration:')]
+
+
+class SignalTests(unittest.TestCase):
+    def setUp(self):
+        EXECUTIONS.clear()
+
+    def test_n_steps_without_a_new_result_write_one_fact_and_wake_discovery(self):
+        store, controller, rt = open_run(self, config=ORCH, adapters=[validating_adapter()])
+        rt.enqueue_lab('lab-1')
+        executor = Scripted({'lab': lambda d: record('a'), 'discovery': none})
+        rt.run_until_wait(executor, RES, max_steps=14)
+        self.assertEqual([o for o, _ in outcomes(rt)][:3], ['new_result', 'no_result', 'no_result'])
+        facts = signals(store)
+        self.assertEqual(len(facts), 1)
+        content = json.loads(store.read_blob(facts[0]['content_ref']))
+        self.assertEqual(content['reason'], 'no_result_streak')
+        self.assertEqual(content['no_result_steps'], N)
+        self.assertIsNone(content['active_change_id'])
+        self.assertEqual([r['outcome'] for r in content['steps']], ['no_result', 'no_result'])
+        self.assertEqual(facts[0]['kind'], 'raw_fact')
+        work = signal_discoveries(store)
+        self.assertEqual(len(work), 1)
+        self.assertEqual(work[0]['inputs']['evidence_ids'], [facts[0]['id']])
+        seen = [d for d in executor.seen if d['mode'] == 'discovery' and is_signal(d)]
+        self.assertEqual(len(seen), 1)
+        self.assertIn(facts[0]['id'], seen[0]['required_evidence_ids'])
+        store.verify_history('r')
+
+    def test_fewer_than_n_steps_do_not_signal(self):
+        store, controller, rt = open_run(self, config={'orchestration': {'no_result_steps': 3, 'max_changes': 1}},
+                                         adapters=[validating_adapter()])
+        rt.enqueue_lab('lab-1')
+        rt.run_until_wait(Scripted({'lab': in_order(record('a'), record('a'), record('a'), none(None)),
+                                    'discovery': none}), RES, max_steps=20)
+        self.assertEqual([o for o, _ in outcomes(rt)], ['new_result', 'no_result', 'no_result', 'no_result'])
+        self.assertEqual(len(signals(store)), 1)
+        store2, controller2, rt2 = open_run(self, config={'orchestration': {'no_result_steps': 3, 'max_changes': 1}},
+                                            adapters=[validating_adapter()], run_id='r')
+        rt2.enqueue_lab('lab-1')
+        rt2.run_until_wait(Scripted({'lab': in_order(record('a'), record('a'), none(None)),
+                                     'discovery': none}), RES, max_steps=20)
+        self.assertEqual([o for o, _ in outcomes(rt2)], ['new_result', 'no_result', 'no_result'])
+        self.assertEqual(signals(store2), [])
+        store.verify_history('r')
+        store2.verify_history('r')
+
+    def test_a_new_result_in_between_restarts_the_count(self):
+        store, controller, rt = open_run(self, config=ORCH, adapters=[validating_adapter()])
+        rt.enqueue_lab('lab-1')
+        rt.run_until_wait(Scripted({'lab': in_order(record('a'), record('a'), record('b'), record('b'), none(None)),
+                                    'discovery': none}), RES, max_steps=20)
+        self.assertEqual([o for o, _ in outcomes(rt)], ['new_result', 'no_result', 'new_result', 'no_result', 'no_result'])
+        facts = signals(store)
+        self.assertEqual(len(facts), 1)
+        self.assertEqual(len(json.loads(store.read_blob(facts[0]['content_ref']))['steps']), 2)
+        store.verify_history('r')
+
+    def test_two_rejections_wake_discovery_in_the_same_driver_call(self):
+        store, controller, rt = open_run(self, config=ORCH, adapters=[validating_adapter()])
+        rt.enqueue_lab('lab-1')
+        executor = Scripted({'lab': lambda d: ('request_diagnostic', diag({'wrong': 1})), 'discovery': none})
+        rt.run_until_wait(executor, RES, max_steps=10)
+        self.assertEqual(executor.calls, ['lab', 'lab', 'discovery'])
+        content = json.loads(store.read_blob(signals(store)[0]['content_ref']))
+        self.assertEqual(content['reason'], 'lab_stopped')
+        self.assertIn('Probe adapter requires exactly record_id', content['steps'][0]['reason'])
+        store.verify_history('r')
+
+    def test_a_definite_tool_failure_wakes_discovery(self):
+        store, controller, rt = open_run(self, config=ORCH, adapters=[failing_adapter()])
+        rt.enqueue_lab('lab-1')
+        executor = Scripted({'lab': lambda d: ('request_diagnostic', diag({'record_id': 'a'}, 'probe_fail')),
+                             'discovery': none})
+        rt.run_until_wait(executor, RES, max_steps=10)
+        self.assertEqual(executor.calls, ['lab', 'discovery'])
+        self.assertEqual(json.loads(store.read_blob(signals(store)[0]['content_ref']))['reason'], 'lab_stopped')
+        store.verify_history('r')
+
+    def test_no_action_model_failure_and_capacity_block_do_not_signal(self):
+        store, controller, rt = open_run(self, config=ORCH)
+        rt.enqueue_lab('lab-1')
+        rt.run_until_wait(Scripted({'lab': none}), RES, max_steps=5)
+        self.assertEqual(signals(store), [])
+
+        def fail_second(receipt, index):
+            return receipt if index == 0 else {**receipt, 'status': 'failed_definite', 'response': None}
+        store, controller, rt = open_run(self, config=ORCH, adapters=[validating_adapter()])
+        rt.enqueue_lab('lab-1')
+        rt.run_until_wait(Scripted({'lab': lambda d: ('request_diagnostic', diag({'wrong': 1}))},
+                                   receipt=fail_second), RES, max_steps=5)
+        self.assertEqual([w['status'] for w in by_seq(store.list('r', 'work', kind='lab'))], ['succeeded', 'failed'])
+        self.assertEqual(signals(store), [])
+
+        from rsi_lab.packets import PacketBuilder
+        store, controller, rt = open_run(self, config=ORCH, adapters=[validating_adapter()])
+        rt.enqueue_lab('lab-1')
+        rt.run_meta(rt.controller.ready('r')[0]['id'],
+                    Scripted({'lab': lambda d: ('request_diagnostic', diag({'wrong': 1}))}), RES)
+        rt.packet_builder_factory = lambda catalog, max_input_bytes: PacketBuilder(catalog, max_input_bytes=300)
+        out = rt.run_until_wait(Scripted({}), RES, max_steps=5)
+        self.assertEqual(out['report']['attention']['capacity_blocked_work'][0]['kind'], 'lab')
+        self.assertEqual(signals(store), [])
+        store.verify_history('r')
+
+    def test_repeated_advance_writes_nothing_and_a_later_period_signals_again(self):
+        store, controller, rt = open_run(self, config=ORCH, adapters=[validating_adapter()])
+        rt.enqueue_lab('lab-1')
+        lab = in_order(record('a'), record('a'), record('a'), record('b'), record('b'), record('b'), none(None))
+        rt.run_until_wait(Scripted({'lab': lab, 'discovery': none}), RES, max_steps=9)
+        self.assertEqual(len(signals(store)), 1)
+        events = store.verify_history('r')['events']
+        rt.orchestration.advance()
+        rt.orchestration.advance()
+        self.assertEqual(store.verify_history('r')['events'], events)
+        rt.run_until_wait(Scripted({'lab': lab, 'discovery': none}), RES, max_steps=30)
+        self.assertEqual(len(signals(store)), 2)
+        self.assertEqual(len(signal_discoveries(store)), 2)
+        store.verify_history('r')
+
+    def test_an_unknown_lab_call_defers_judgment_until_reconciled(self):
+        saved = {}
+        def unknown_second(receipt, index):
+            if index == 1:
+                saved['receipt'] = receipt
+                return {'status': 'unknown', 'actual_costs': {}}
+            return receipt
+        store, controller, rt = open_run(self, config=ORCH, adapters=[validating_adapter()])
+        rt.enqueue_lab('lab-1')
+        executor = Scripted({'lab': lambda d: ('request_diagnostic', diag({'wrong': 1})), 'discovery': none},
+                            receipt=unknown_second)
+        rt.run_until_wait(executor, RES, max_steps=5)
+        self.assertEqual(outcomes(rt), [('no_result', 'proposal_rejected'), ('unfinished', None)])
+        self.assertEqual(signals(store), [])
+        effect = by_seq(store.list('r', 'effect', kind='lab'))[1]
+        controller.reconcile('r', effect['id'], {**saved['receipt'], 'reconciliation': {
+            'effect_id': effect['id'], 'provenance': 'operator receipt'}}, 'operator:' + effect['id'])
+        rt.run_until_wait(executor, RES, max_steps=5)
+        self.assertEqual(outcomes(rt), [('no_result', 'proposal_rejected')] * 2)
+        self.assertEqual(json.loads(store.read_blob(signals(store)[0]['content_ref']))['reason'], 'lab_stopped')
+        self.assertEqual(executor.calls[-1], 'discovery')
+        store.verify_history('r')
+
+    def test_signal_is_required_evidence_in_discovery_and_disposition(self):
+        store, controller, rt = open_run(self, config={**ORCH, 'max_input_bytes': 24000},
+                                         adapters=[validating_adapter()])
+        rt.enqueue_lab('lab-1')
+        executor = Scripted({'lab': lambda d: ('request_diagnostic', diag({'wrong': 1})), 'discovery': discover,
+                             'disposition': lambda d: CLOSE})
+        rt.run_until_wait(executor, RES, max_steps=3)
+        fid = signals(store)[0]['id']
+        issue = store.list('r', 'issue')[0]
+        big = []
+        for i in range(6):
+            controller.add_fact('r', 'big%d' % i, 'raw_fact', {'text': 'x' * 6000}, {'source': 'bulk'}, 'big%d' % i)
+            big.append('big%d' % i)
+        controller.open_issue('r', 'again', issue['semantic_key'], ISSUE['hypothesis'], ISSUE['scope'], big,
+                              ISSUE['competing_explanations'], ['c', 'f'], 'again')
+        rt.run_until_wait(executor, RES, max_steps=3)
+        disposition = [d for d in executor.seen if d['mode'] == 'disposition'][-1]
+        self.assertIn(fid, disposition['required_evidence_ids'])
+        pages = {p['evidence_id']: p for p in disposition['delivered_pages']}
+        self.assertTrue(pages[fid]['complete_source'])
+        self.assertTrue(set(big) - set(pages))
+        discovery = [d for d in executor.seen if d['mode'] == 'discovery'][0]
+        self.assertIn(fid, discovery['required_evidence_ids'])
         store.verify_history('r')
 
 

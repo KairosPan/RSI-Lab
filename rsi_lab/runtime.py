@@ -163,6 +163,11 @@ class Runtime:
                 'authorized_source_contracts': self.config.get('authorized_source_contracts', {}),
                 'waiting': self.store.list(self.run_id, 'wait', issue_id=issue_id) if issue_id else []}}
         required = list(work['inputs'].get('required_evidence_ids', []))
+        if self.orchestration and mode != 'lab':
+            # The current signal is never paged or omitted from Meta's packet.
+            signal = self.orchestration.current_signal()
+            if signal in evidence_ids:
+                required.append(signal)
         if self.config.get('research_features'):
             task['constraints']['research_features'] = self.config['research_features']
         if self.research_policy:
@@ -1242,6 +1247,9 @@ class Runtime:
         selected, blocking_ids = set(), set()
         outcome, reason, steps = 'step_limit_reached', None, 0
         while steps < max_steps:
+            if self.orchestration:
+                # Settle and signal before tick, so a settlement wakes Meta.
+                self.orchestration.advance()
             self.controller.tick(self.run_id)
             if self.store.list(self.run_id, 'registration', id='run_lifecycle', status='finalizing'):
                 outcome, reason = 'finalizing', 'New agent turns are stopped; durable recovery remains available'
