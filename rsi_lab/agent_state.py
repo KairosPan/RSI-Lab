@@ -38,8 +38,8 @@ class AgentState:
     def _mutate(self, key, event, fn, payload):
         return self.store.mutate(self.run_id, key, event, fn, payload=payload)
 
-    def ensure_session(self, role, agent_instance_id=None, branch_id='main', runtime_binding=None):
-        """Resolve a trusted owner's current session; never heal unknown by retry."""
+    def _owner(self, role, agent_instance_id, branch_id):
+        """The owner identity and scope of one role's primary session."""
         if role not in {'lab', 'meta'}:
             raise ValueError('Only Lab and Meta own persistent primary sessions')
         agent_instance_id = _nonempty(agent_instance_id or role, 'Agent identity')
@@ -47,12 +47,23 @@ class AgentState:
         owner_scope = {'task_id': self.config.get('task_id', self.run_id),
                        'run_id': self.run_id, 'branch_id': branch_id,
                        'agent_instance_id': agent_instance_id, 'role': role}
-        oid = _id('agent', owner_scope)
+        return _id('agent', owner_scope), owner_scope
+
+    def _current_session(self, oid, runtime_binding):
+        """The owner's session under the same runtime binding, or None when it has none yet."""
         existing = self.store.list(self.run_id, 'agent_owner', id=oid)
-        if existing:
-            session = self.store.get(self.run_id, 'agent_session', existing[0]['session_id'])
-            if runtime_binding is not None and session['runtime_binding'] != runtime_binding:
-                raise ValueError('Runtime binding changed; explicitly rebuild or migrate the session')
+        if not existing:
+            return None
+        session = self.store.get(self.run_id, 'agent_session', existing[0]['session_id'])
+        if runtime_binding is not None and session['runtime_binding'] != runtime_binding:
+            raise ValueError('Runtime binding changed; explicitly rebuild or migrate the session')
+        return session
+
+    def ensure_session(self, role, agent_instance_id=None, branch_id='main', runtime_binding=None):
+        """Resolve a trusted owner's current session; never heal unknown by retry."""
+        oid, owner_scope = self._owner(role, agent_instance_id, branch_id)
+        session = self._current_session(oid, runtime_binding)
+        if session is not None:
             return session
         payload = {'owner': owner_scope, 'runtime_binding': runtime_binding}
         def apply(tx):
@@ -61,6 +72,19 @@ class AgentState:
                 'session_generation': 1, 'memory_revision': 0, 'memory_head_ref': None})
             return tx.insert('agent_session', sid, self._session_document(oid, owner_scope, 1, runtime_binding))
         return self._mutate('agent-owner:' + oid, 'agent_session_created', apply, payload)
+
+    def preview_session(self, role, agent_instance_id=None, branch_id='main', runtime_binding=None):
+        """The session ``ensure_session`` would return and its working memory; creates neither.
+
+        For an owner without a session this is the first session as it would
+        be created, without ledger metadata, and an empty working memory.
+        """
+        oid, owner_scope = self._owner(role, agent_instance_id, branch_id)
+        session = self._current_session(oid, runtime_binding)
+        if session is not None:
+            return session, self.read_working_memory(session['id'], actor_session_id=session['id'])
+        session = {**self._session_document(oid, owner_scope, 1, runtime_binding), 'id': _id('session', oid, 1)}
+        return session, {'owner_id': oid, 'revision': 0, 'head_ref': None, 'content': {}}
 
     @staticmethod
     def _session_document(oid, scope, generation, binding, supersedes=None):
