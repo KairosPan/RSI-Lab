@@ -40,8 +40,9 @@ python3 -m rsi_lab --root runs/tabular-demo --run tabular-portability status
 
 1. 准备输入、方法协议与任务计划，显式指定来源、工具版本和成功条件。
 2. 初始化独立运行目录及预算，注册获准的适配器。
-3. 用 `lab-start` 提交初始 Lab 工作，再用 `run-until-wait` 推进已注册的 Lab/Meta/工具处理器。
-4. 重启后使用相同运行身份执行 `recover`，先核对已登记结果、费用与未知调用，再继续就绪工作。会话重建保留工作记忆，不重做已完成工具动作。
+3. 第一次调用模型之前，在宿主脚本里调用 `runtime.preflight(...)`，或用 `features` 子命令，核对这次运行确实启用了要用的科研功能和工具。做法见[启动前检查](docs/rsi-lab-core.md#启动前检查)。
+4. 用 `lab-start` 提交初始 Lab 工作，再用 `run-until-wait` 推进已注册的 Lab/Meta/工具处理器。
+5. 重启后使用相同运行身份执行 `recover`，先核对已登记结果、费用与未知调用，再继续就绪工作。会话重建保留工作记忆，不重做已完成工具动作。
 
 真实模型运行需要自行配置 Codex CLI 与模型访问。配置模板见[持久 Agent 使用说明](docs/persistent-agents.md)，环境与文件管理见[安装与运行](docs/publication-and-reproduction.md)。
 

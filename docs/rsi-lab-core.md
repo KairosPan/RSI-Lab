@@ -132,6 +132,68 @@ Meta 使用 discovery 与 disposition 模式，共享问题账本。前者从目
 
 设计与理由见 [设计文档](superpowers/specs/2026-11-10-meta-orchestration-policy-design.md)，实现见 [Orchestration](../rsi_lab/orchestration.py)，验收见 [测试](../tests/v2/test_orchestration.py)。
 
+## 启动前检查
+
+科研功能是否生效，取决于运行配置里的键和传给 `Runtime(...)` 的参数。漏掉其中一项时运行照常启动，内核测试照常通过，只是发给模型的请求包里没有对应内容。宿主应该在构造 `Runtime` 之后、第一次模型调用之前调用 `preflight`，把这次运行应有的功能写成期望；不满足时在这里报错，不会带着缺口开始调用模型。
+
+| 功能 | 由什么启用 | 启用后模型能看到什么 |
+| --- | --- | --- |
+| Scientific Memory | 运行配置 `research_features.scientific_memory` 为 `true` | `task.scientific_memory`，响应字段 `scientific_memory_updates` |
+| 领域身份 | `Runtime(..., scientific_identity_provider=...)`，传一个函数。不传时 Scientific Memory 照常工作，但发布的结果没有领域身份 | 不进请求包 |
+| Meta→Lab 反馈闭环 | 运行配置 `research_features.meta_lab` 为 `true` | `task.constraints.research_loop`；Meta 多出动作 `recommend_change` 和响应字段 `improvement_reviews`，Lab 多出响应字段 `recommendation_responses` |
+| 领域指标 | 适配器的 `measure` 回调，并且反馈闭环已启用。没有时闭环的测量只有执行凭据 | 不进请求包 |
+| 推荐类别与复核指引 | 运行配置 `research_policy`，至少一个字段 | `task.constraints.research_policy` |
+| Meta 调整 Lab 编排 | 运行配置里有 `orchestration` 块 | `task.constraints.orchestration`；`max_changes` 大于 0 时处置模式多出动作 `propose_lab_settings` |
+| 工具 | `Runtime(..., adapters=[...])`，命令行用 `--adapter-factory`。`requires_acceptance=True` 的适配器还要有验收记录 | `task.capability_catalog` |
+
+两个 `research_features` 开关只认 JSON 布尔值 `true`，写成 `"true"` 或 `1` 不生效。运行配置在 `init` 时冻结，续跑沿用同一份配置，所以缺的键只能靠新建运行补上；`Runtime(...)` 的参数则每次构造都要传。
+
+```python
+runtime = Runtime(store, run_id, adapters=[make_adapter()], scientific_identity_provider=identities)
+expect = {"scientific_memory": True, "identity_provider": True, "meta_lab": True,
+          "orchestration": True, "capabilities": ["your_domain.tool"]}
+runtime.preflight(expect)                          # 构造之后：核对配置与参数
+runtime.enqueue_lab("start")
+for work in runtime.controller.ready(run_id):      # 第一次模型调用之前：再核对就绪 Lab Work 的实际请求包
+    if work["kind"] == "lab":
+        runtime.preflight(expect, work_id=work["id"])
+```
+
+`make_adapter`、`identities` 和 `your_domain.tool` 是宿主自己的占位符，`capabilities` 里写适配器的 `adapter_id`。两点容易出错：
+
+- 带 `requires_acceptance=True` 的适配器要先完成验收才进能力目录，仓库里的 `tabular.aggregate_energy` 就是这样。验收之前把它写进 `capabilities` 会报错。
+- 续跑时不要拿 `enqueue_lab` 的返回值去核对请求包。同一个触发再次登记时，它返回第一次登记时的记录，那个 Work 可能早已完成。从 `controller.ready(run_id)` 取当前就绪的 Lab Work；没有就绪的，就只做配置层的核对。
+
+| 接口 | 作用 |
+| --- | --- |
+| `runtime.feature_report()` | 报告三项功能各自是否在配置里声明（`declared`）、服务是否已创建（`service`），是否传入了可调用的身份提供者，配置里是否有 `research_policy`，已加载的适配器及其是否进入能力目录，以及 Lab、discovery、disposition 三种模式下模型可用的动作和 `command` 之外的响应字段 |
+| `runtime.preflight(expect, work_id=None)` | 逐项核对期望。全部满足时返回 `feature_report()` 的结果，给了 `work_id` 时结果里多一项 `request`；否则抛 `ValueError`，每条一行，写明缺什么、该改运行配置的哪个键或 `Runtime(...)` 的哪个参数 |
+| `runtime.request_report(work_id)` | 对一个就绪的 Lab 或 Meta Work 按真实路径构建请求包但不准备 Effect，报告请求包里实际有什么 |
+
+`expect` 里没写的键不检查。写了的键含义如下，拼错的键和类型不对的值会被拒绝，不会被当作没写：
+
+| 键 | 取值 | 满足条件 |
+| --- | --- | --- |
+| `scientific_memory`、`meta_lab`、`orchestration` | `True` 或 `False` | `True`：配置已声明且服务已创建；`False`：两者都没有，用于基线或对照运行 |
+| `identity_provider` | `True` 或 `False` | `True`：传入了可调用的身份提供者，并且 Scientific Memory 已启用；`False`：没有传入 |
+| `research_policy` | `True` 或 `False` | 配置里有、或没有非空的 `research_policy` |
+| `capabilities` | 能力标识的列表 | 每一个都在能力目录里，并且它的适配器已加载 |
+| `measure` | 适配器标识的列表 | 每一个都已加载、在能力目录里、带 `measure` 回调，并且反馈闭环已启用。只有反馈闭环会调用这个回调 |
+
+`request_report` 返回的 `status` 为 `ready` 时，请求包可以发出；为 `packet_unrepresentable` 或 `blocked` 时发不出去，`reason` 是原因，`actions`、`extra_fields`、`input_bytes` 和 `packet_sha256` 为 `null`。`present` 给出 `task.scientific_memory`、`task.constraints.research_loop`、`task.constraints.orchestration` 和 `task.constraints.research_policy` 是否在请求包里，`capabilities` 是这个请求的能力目录，`actions` 和 `extra_fields` 取自这个请求的响应 schema。`packet_sha256` 是请求包的 hash；这之后到真实调用之间账本没有变化时，它等于那次调用的 Effect 的 `packet_hash`。
+
+带 `work_id` 的 `preflight` 用同一份期望核对这个请求包：它能发出去；期望为 `True` 的功能在请求包里有对应内容，期望为 `False` 的没有；期望的能力在这个请求的目录里。只看配置发现不了的情况在这里暴露，例如编排设置对 Lab 停用了某个工具，或者这是一次目录为空的最终复核请求。
+
+三个接口都只读账本：不写事件，不创建会话，不登记 Scientific Memory 的根问题，Work 保持就绪。未启用任何功能的运行，调用它们前后发出的请求包字节不变。
+
+局限：
+
+- 检查只说明功能已经接通，不说明模型会用它们，也不说明结果有科研收益。
+- `request_report` 报告的是请求包的内容，不预判这次调用会不会被接纳。持久会话上下文容量、预算、并发容量、会话是否空闲、Issue 版本是否已变、运行是否已进入收尾，都在真正派发时才检查。
+- 命令行的 `features` 子命令只打印 `feature_report()`。命令行传不了身份提供者，所以它的输出里 `identity_provider` 是 `false`；要核对身份提供者和请求包，得在宿主脚本里调用 `preflight`。
+
+实现见 [preflight](../rsi_lab/preflight.py)，验收见 [测试](../tests/v2/test_preflight.py)。
+
 ## 合成 CSV 示例
 
 `rsi_domains.tabular.demo.run_demo` 使用 Wh/kWh 混合读数 CSV。初始输入没有单位映射，演示实际执行以下过程：
@@ -154,16 +216,18 @@ print(report["trial_outcome"])
 
 ## 命令与运行边界
 
-入口为 `python3 -m rsi_lab`。`init` 登记运行配置，`register-plan` 冻结任务计划，`adapter-run` 执行已注册能力，`run-until-wait` 推进就绪工作直到等待、预算或步数边界。只有合法准备态调用能继续派发，未知调用不能因重启而重发。
+入口为 `python3 -m rsi_lab`。`init` 登记运行配置，`register-plan` 冻结任务计划，`adapter-run` 执行已注册能力，`run-until-wait` 推进就绪工作直到等待、预算或步数边界，`features` 打印这次运行启用了哪些科研功能（见[启动前检查](#启动前检查)）。只有合法准备态调用能继续派发，未知调用不能因重启而重发。
 
 ```sh
 python3 -m rsi_lab --help
 python3 -m rsi_lab --root runs/tabular-demo --run tabular-portability status
 python3 -m rsi_lab --root runs/tabular-demo --run tabular-portability \
   --adapter-factory rsi_domains.tabular.plugin:make_adapter status
+python3 -m rsi_lab --root runs/tabular-demo --run tabular-portability \
+  --adapter-factory rsi_domains.tabular.plugin:make_adapter features
 ```
 
-后两条命令读取前述示例已创建的运行。`--adapter-factory` 是受信宿主参数，不是模型命令。真实模型配置与自定义运行步骤见[持久 Agent 说明](persistent-agents.md)。新任务使用新目录；不要把旧格式或其他任务的账本直接当作新任务输入。
+后三条命令读取前述示例已创建的运行。`--adapter-factory` 是受信宿主参数，不是模型命令。真实模型配置与自定义运行步骤见[持久 Agent 说明](persistent-agents.md)。新任务使用新目录；不要把旧格式或其他任务的账本直接当作新任务输入。
 
 相关实现与验收：
 
