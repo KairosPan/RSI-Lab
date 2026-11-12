@@ -246,6 +246,29 @@ class ScientificMemoryTests(unittest.TestCase):
         e, p, r = self.model_call([question, claim])
         self.assertEqual(self.memory.apply_updates(e, p, r)['status'], 'applied')
 
+    def test_read_only_context_is_the_first_real_context_and_registers_nothing(self):
+        e, pub = self.publication()
+        self.memory.observe_publication(e, pub)
+        self.apply(self.update())
+        bundle = self.memory.export_bundle()
+        # A fresh run, a run with imported history, and one whose budget makes the selection order decisive.
+        for imported, budget, omitted in ((False, 100000, False), (True, 100000, False), (True, 1400, True)):
+            with self.subTest(imported=imported, budget=budget):
+                store, target = self.target()
+                if imported:
+                    target.import_bundle(bundle)
+                before = store.verify_history('next')
+                preview = target.prepare_context('lab', [], budget=budget, read_only=True)
+                self.assertEqual(store.verify_history('next'), before)
+                self.assertEqual(preview['status'], 'ready')
+                self.assertEqual(preview['omission_count'] > 0, omitted)
+                self.assertEqual(preview, target.prepare_context('lab', [], budget=budget))
+                # Once the question is registered the two calls read the same history.
+                after = store.verify_history('next')
+                self.assertEqual(target.prepare_context('meta', [], budget=budget, read_only=True),
+                                 target.prepare_context('meta', [], budget=budget))
+                self.assertEqual(store.verify_history('next'), after)
+
     def test_export_import_preserve_revisions_and_source_scope_exactly(self):
         e, pub = self.publication()
         self.memory.observe_publication(e, pub)

@@ -102,6 +102,7 @@ python3 -m rsi_lab --root runs/my-task --run main status
 | `meta-step` | 推进指定 Meta Work；Inspector/Worker 模式使用 Meta 自己的会话 |
 | `run-until-wait --max-steps 20` | 推进就绪的 Lab/Meta/工具工作后返回，保留尚未完成的义务 |
 | `status` | 查看会话、turn、待执行/阻塞工作、预算和需要对账的 Effect |
+| `features` | 只读地打印这次运行启用了哪些科研功能、加载了哪些适配器、各模式下模型可用的动作；见 [启动前检查](rsi-lab-core.md#启动前检查) |
 | `recover` | 摄取持久回执，或从所属调用日志恢复已知终态；补做幂等发布/提议处理，不盲目重发未知调用 |
 | `reconcile --effect EFFECT_ID --receipt PATH` | 用操作者写的、绑定该 Effect 的回执结算一次 `unknown` 调用，随后执行 `recover`；可加 `--key KEY`，同一回执重复执行无副作用 |
 | `agent-checkpoint` | 在当前会话没有活动 turn 的安全边界保存检查点 |
