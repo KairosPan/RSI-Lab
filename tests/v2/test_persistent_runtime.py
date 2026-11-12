@@ -283,14 +283,15 @@ class PersistentRuntimeTests(unittest.TestCase):
     def test_recover_transport_result_before_controller_receipt_without_resending(self):
         self.output('lab', delta={'next_step': 'Resume after outer receipt crash'})
         work = self.rt.enqueue_lab('crash-before-controller-receipt')
-        path_open = Path.open
+        real_replace = os.replace
         class CrashBeforeReceipt(BaseException):
             pass
-        def crash_receipt(path, mode='r', *args, **kwargs):
-            if path.parent == self.store.root and path.name.startswith('receipt_') and mode == 'x':
+        def crash_receipt(source, destination, *args, **kwargs):
+            destination = Path(destination)
+            if destination.parent == self.store.root and destination.name.startswith('receipt_'):
                 raise CrashBeforeReceipt('Synthetic host crash before outer receipt')
-            return path_open(path, mode, *args, **kwargs)
-        with patch.object(Path, 'open', crash_receipt):
+            return real_replace(source, destination, *args, **kwargs)
+        with patch.object(os, 'replace', crash_receipt):
             with self.assertRaises(CrashBeforeReceipt):
                 self.rt.run_lab(work['id'], self.executor, self.reservations)
         effect = self.store.list('run', 'effect')[0]

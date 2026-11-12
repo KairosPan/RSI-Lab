@@ -237,14 +237,13 @@ class AdapterBoundaryTests(unittest.TestCase):
 
     def test_core_runtime_and_adapter_registry_import_no_domain_package(self):
         root=Path(__file__).resolve().parents[2]/'rsi_lab'
-        for path in root.glob('*.py'):
+        for path in root.rglob('*.py'):
             tree=ast.parse(path.read_text())
             for node in ast.walk(tree):
                 modules=([node.module or ''] if isinstance(node,ast.ImportFrom)
                          else [a.name for a in node.names] if isinstance(node,ast.Import) else [])
                 for name in modules:
-                    self.assertFalse(name.startswith(('rsi_domains','docking_rsi','lab_harness','scripts')),(path.name,name))
-        self.assertFalse(hasattr(Runtime,'inspect_docking'))
+                    self.assertFalse(name.startswith(('rsi_domains','tests','scripts')),(path.name,name))
         self.assertIsNotNone(AdapterRegistry([self.adapter]).get('numeric.fixture'))
 
 

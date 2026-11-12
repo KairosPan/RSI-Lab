@@ -14,7 +14,7 @@
 | Agent 工作记忆 | 目标引用、计划、尝试、理由摘要、暂定假设、未决问题、下一步和相关来源引用 | SQLite 中追加不可变修订，按 task/run/branch/agent owner 归属；会话重建保留当前 head。内容标记为 `unverified_working_state` |
 | 执行日志 | 每次调用的原始 stdout/stderr、事件、输入、输出、错误、用量和终态 | `calls/<effect_id>/journal.jsonl` 保存逐条持久事件与 hash 链；模型无权确认水位或改写旧事件 |
 | 共享执行账本 | Work、Effect、Wait、真实回执、来源事实和资源消耗 | `ledger.sqlite3` 与 `objects/`；控制器是唯一写入入口，恢复与去重以这些状态为准 |
-| 共享 Scientific Memory | 科研问题、证据、判断、调查、经验和决定 | 基线模式仅有基础事实存储；启用 `research_features.scientific_memory` 后使用有版本和来源绑定的六对象服务，见 [PABLO 研究入口](pablo-research.md)。工作记忆、Handoff 或日志内容不会自动变成经过支持检查的科研结论 |
+| 共享 Scientific Memory | 科研问题、证据、判断、调查、经验和决定 | 基线模式仅有基础事实存储；启用 `research_features.scientific_memory` 后使用有版本和来源绑定的六对象服务，见[通用核心与 Scientific Memory](rsi-lab-core.md#scientific-memory-与独立工作记忆)。工作记忆、Handoff 或日志内容不会自动变成经过支持检查的科研结论 |
 
 运行根目录中的 `agents/<session_id>/workspace/` 是该会话独立的原生工作目录。默认 Codex 认证和原生会话文件仍由使用者自己的 Codex 配置目录管理；软件不会复制登录凭证到任务目录。调用回执记录原生 thread 身份和已核验的 rollout 路径。
 
@@ -30,7 +30,18 @@
 6. 子 Effect 结算后，由父 turn 的幂等提交推进 session head、接纳合法工作记忆增量并释放会话写入权。空增量保持原 head；非法增量保留旧状态和拒绝原因。
 7. Lab 可以请求已注册的诊断/科学适配器。控制器执行工具、登记来源事实，再创建 Lab continuation。新来源也可触发 Meta 观察工作。
 
-`run-until-wait` 是有步数上限的合作式驱动器：推进当时可运行的 Lab、Meta 和已注册 diagnostic，遇到依赖、资源限制、未知调用或无工作时返回。宿主在新输入、真实结果或 deadline 到达后再次调用；它不是隐藏的后台 daemon，也不会因为等待或 `no_action` 就自动宣布科学任务成功。
+`run-until-wait` 是有步数上限的合作式驱动器：推进当时可运行的 Lab、Meta 和已注册 diagnostic，遇到依赖、资源限制、未知调用或无工作时返回。宿主在新输入、真实结果或 deadline 到达后再次调用；它不是隐藏的后台 daemon，也不会因为等待或 `no_action` 就自动宣布科学任务成功。单个 Work 在派发前被拒绝（例如预算不足）时，驱动器把它记入结果的 `skipped` 并继续处理其他 Work，本次调用不再选它；Work 的 Effect 已经派发之后才出错（例如工具结果发布失败）时，改为记入 `step_errors`（含 `work_id`、`effect_id` 和 `reason`），它不影响返回状态；每次跳过、取消和恢复都计入步数上限。选择新 Work 之前，驱动器先处理所有 `prepared` Effect：Lab/Meta 调用照常派发，本 Runtime 能解析适配器且其能力通过接纳检查的工具调用按已持久保存的输入派发（不再调用 `prepare`）；没有可用适配器或能力未通过接纳检查的记入 `prepared_blocking` 并保持原状，本次调用不再选它，因为接纳失败可能是宿主配置问题，修正后仍可派发；派发本身被拒（例如问题版本已过期）且仍处于 `prepared` 的 Effect 以拒绝原因取消并记入 `cancelled_prepared`；`dispatching` 或 `unknown` 的 Effect 永不重新派发。开头的恢复中单项失败不会中断其余恢复，失败项记入 `recovery_errors`。无事可做时，状态依次取 `finalizing`、`blocked_external`、`blocked_prepared`（存在 `prepared_blocking`）、`blocked_admission`（存在 `skipped`，`reason` 为第一条跳过原因）、`blocked_adapter`、`blocked_recovery`（存在 `recovery_errors`），否则为 `awaiting_producer_or_deadline` 或 `quiescent`。步数上限用尽时状态为 `step_limit_reached`，若此前有 Work 被跳过，`reason` 为第一条跳过原因。Lab 提案在接纳时被拒绝或路由时被阻止，会在同一事务中得到一次修复 Lab Work，其输入带 `routing_error` 和 `repair_of`；修复 Work 自身不再获得修复。工具输入在执行时才被适配器拒绝的 diagnostic 会失败并通知其依赖，Lab 发起的请求同样回到 Lab 并带上拒绝原因。
+
+`run-until-wait` 的结果还带有只读取账本得出的 `report`：
+
+- `settlement_status`：存在 `dispatching`、`unknown` 或用量未结算的 Effect 时为 `blocked_external`；否则本次有 Work 因预算不足被跳过时为 `resource_exhausted`；否则为 `settled`。
+- `work_status`：存在 `prepared`、`dispatching` 或 `unknown` 的 Effect 时为 `unresolved_effects`；否则有就绪 Work 时为 `pending_queued`；否则有未结束的等待时为 `parked_dependencies`；否则为 `empty`。
+- `attention.stalled_issues`：仍为 `open`、却没有就绪或已领取的 Work、没有未结束的等待、也没有未结算 Effect 的问题，并给出最近一个相关 Work 的身份和状态。常见原因是处置调用失败后没有后继。`model_failure_retries` 须在初始化运行时设置，因为运行配置之后不能修改；对已经停滞的运行，宿主通过 `Controller.enqueue` 为该问题加入新的 `meta_disposition` Work（没有对应的 CLI 命令），或用 `finalize` 结束运行；问题因用量未结算而无法关闭时，先用 `reconcile` 结算。
+- `attention.stopped_lab`：没有就绪或已领取的 Lab Work，且最近一个 Lab Work 失败、被阻塞、其已准备的调用被取消，或成功但提议缺失、被拒绝或被阻止。字段给出 Work 身份、状态、提议状态和原因。查看原因后用 `lab-start` 开始新的 Lab Work。
+- `attention.sessions_requiring_recovery`：owner 的当前会话处于 `recovery_required`。存在 `unknown` 调用时先用 `reconcile` 对账，再用 `agent-rebuild` 更换会话。
+- `attention.capacity_blocked_work`：因会话上下文或 packet 超出容量（`blocked_capacity` 或 `packet_unrepresentable`）而阻塞的 Work。用 `agent-rebuild` 换成新会话，Lab 工作再用 `lab-start` 重新开始。
+
+原本会报告 `quiescent` 时，或原本会报告 `awaiting_producer_or_deadline`、但没有处于 `waiting`、`disposition_due` 或 `disposed` 的等待，且每个就绪 Work 都是其 agent 会话不空闲、驱动器因此不会选择的 Lab/Meta Work 时，只要上述 `attention` 中有任何一项非空，状态改为 `stalled`，`reason` 为第一项非空条目的名称（按 `stalled_issues`、`stopped_lab`、`sessions_requiring_recovery`、`capacity_blocked_work` 的顺序）。`quiescent` 因此只表示干净结束：没有待执行的工作，也没有无人负责的义务。其他状态不变。
 
 Lab 和 Meta 的工具权限由本轮命令模式与已注册能力决定，不来自会话里曾出现的文字。当前 Lab 命令为 `request_diagnostic`、`propose_issue` 和 `no_action`。Meta 的 discovery/disposition 模式仍使用明确命令集合。
 
@@ -65,7 +76,14 @@ Lab 和 Meta 的工具权限由本轮命令模式与已注册能力决定，不�
 }
 ```
 
-`model_calls` 和 `tool_calls` 是控制器可执行的调用次数限制；token/时间是显式软预约与实际用量结算，不构成 provider 内部的硬停止保证。模型选择、总预算与既有运行配置不可通过恢复偷偷改变；新任务用新的运行目录。
+可选的 `model_timeout_seconds` 与 `model_reservation` 并列，设定 `meta-step`、`lab-step` 和 `run-until-wait` 中每次模型调用的超时秒数，取值为 1 到 3600 的数字，省略时为 300。超时被终止的调用结算为 `unknown`，处理方法见[未知模型调用的对账](#未知模型调用的对账)。`model_calls` 和 `tool_calls` 是控制器可执行的调用次数限制；token/时间是显式软预约与实际用量结算，不构成 provider 内部的硬停止保证。模型选择、总预算与既有运行配置不可通过恢复偷偷改变；新任务用新的运行目录。
+
+两个可选的失败策略键也写在运行配置顶层，省略时保持原有行为：
+
+- `unknown_usage_policy`：取 `hold`（默认）或 `charge_reservation`。模型调用已得到 `succeeded` 或 `failed_definite` 结果、但回执缺少部分用量（例如没有 token 计数）时，`hold` 保留这些资源的预约和对账义务：该调用的提议不会被应用，所属问题也不能关闭。`charge_reservation` 让 Runtime 按仍持有的完整预约结算这些资源，结算回执的 `estimated_resources` 列出这些资源名，`reconciliation.provenance` 为 `run config unknown_usage_policy=charge_reservation`。计费金额等于预约，是估计值：既不是实测值，也不保证是上限，因为 token 和时间预约不会让 provider 停止。预约为 0 的资源永不按此计费，这样的调用仍保留对账义务。从执行日志恢复、但仍缺少 CLI 进程已退出证明的调用暂不计费，直到该证明到达或操作者完成对账。`dispatching` 或 `unknown` 的调用不受影响，仍需按[未知模型调用的对账](#未知模型调用的对账)处理。
+- `model_failure_retries`：0 到 5 的整数，默认 0。Lab、Meta discovery 或 Meta disposition 调用收到 provider 的明确失败（`failed_definite`，回执确认收到终态且调用确实已派发）时，为同一问题和优先级加入一个新的同类 Work，输入带 `retry_of`（这条链第一个 Work 的身份）和 `retry_attempt`；每条链最多重试该次数。失败的 Effect 本身永不重新派发；问题已关闭时不重试；等待到期后的 `disposition` 仍然每个等待周期只尝试一次，不重试。重复执行 `recover` 不会重复加入重试 Work。
+
+其他取值会使 Runtime 拒绝启动该运行。
 
 ```sh
 python3 -m rsi_lab --root runs/my-task --run main \
@@ -85,6 +103,7 @@ python3 -m rsi_lab --root runs/my-task --run main status
 | `run-until-wait --max-steps 20` | 推进就绪的 Lab/Meta/工具工作后返回，保留尚未完成的义务 |
 | `status` | 查看会话、turn、待执行/阻塞工作、预算和需要对账的 Effect |
 | `recover` | 摄取持久回执，或从所属调用日志恢复已知终态；补做幂等发布/提议处理，不盲目重发未知调用 |
+| `reconcile --effect EFFECT_ID --receipt PATH` | 用操作者写的、绑定该 Effect 的回执结算一次 `unknown` 调用，随后执行 `recover`；可加 `--key KEY`，同一回执重复执行无副作用 |
 | `agent-checkpoint` | 在当前会话没有活动 turn 的安全边界保存检查点 |
 | `agent-rebuild` | 显式隔离可确认已结束的坏 turn 并更换会话，保留同一 owner 的工作记忆与所有共享事实 |
 | `finalize --reason TEXT` | 持久登记停止原因并禁止新的普通模型/工具工作，保留已承诺的恢复责任 |
@@ -111,7 +130,7 @@ python3 -m rsi_lab --root runs/my-task --run main \
 恢复复用已提交的测量，不重新执行工具或重新解释结果。
 
 Scientific Memory 的领域身份及经验解释继续通过 `scientific_identity_provider` 注入。
-内核负责对象修订、来源闭包、交付预算和负结果保留；分子规范化、具体指标、文献主题及
+内核负责对象修订、来源闭包、交付预算和负结果保留；对象身份规范化、具体指标、来源主题及
 结束条件保留在领域模块和任务宿主中。
 
 ## 工作记忆更新
@@ -168,6 +187,35 @@ python3 -m rsi_lab --root runs/my-task --run main recover
 ```
 
 停止后仍可摄取已经发生的结果和完成本地恢复；不会为了生成总结而隐式新增模型调用。存在未知调用、未完成科学目标或待复核结果时，分别保留这些状态。
+
+### 未知模型调用的对账
+
+模型调用超过 `model_timeout_seconds` 被终止，或进程在没有终态的情况下消失时，Effect 结算为 `unknown`：它继续占用预算预约和该 agent 的会话，`run-until-wait` 返回 `blocked_external`，`agent-rebuild` 也会拒绝。系统不会自行判断结果，必须由操作者对账：
+
+1. 用 `status` 找到 `unknown` Effect 的身份，确认对应的 CLI 进程（包括其进程组）确实已经退出。不能确认时不要继续。
+2. 写一份 JSON 回执：`status` 为 `failed_definite`；`actual_costs` 列出每项已预约但尚无已结算用量的资源，即该 Effect 的 `reservations` 中有、而其 `actual_costs` 中没有的每个键（`status` 在 `effects_requiring_reconciliation` 下同时列出这两项）。已有结算用量的资源不能重复列出，即使 `held_reservations` 中它仍有余量；结果确定后余量会被释放。无法确定实际用量时按完整预约计费，没有证据时不能写 0；`native_writer_quiesced` 为 `true`；`reconciliation` 写明该 Effect 身份和一句来源说明。例如：
+
+```json
+{
+  "status": "failed_definite",
+  "actual_costs": {"tokens": 4096},
+  "native_writer_quiesced": true,
+  "error": "killed at the executor timeout",
+  "reconciliation": {"effect_id": "EFFECT_ID", "provenance": "operator: 已确认进程组被终止"}
+}
+```
+
+3. 执行 `reconcile`，再用 `agent-rebuild` 隔离该 turn 并更换会话，最后用 `lab-start` 开始新的工作：
+
+```sh
+python3 -m rsi_lab --root runs/my-task --run main \
+  reconcile --effect EFFECT_ID --receipt runs/my-task/reconcile-EFFECT_ID.json
+python3 -m rsi_lab --root runs/my-task --run main \
+  agent-rebuild --session SESSION_ID --reason "模型调用超时，已对账"
+python3 -m rsi_lab --root runs/my-task --run main lab-start --event after-timeout
+```
+
+`reconcile` 输出结算后的 Effect 和 `recover` 的结果；默认操作键由 Effect 身份和回执内容决定，同一回执重复执行不会重复计费。回执报告了未预约的资源、未绑定该 Effect 或与已结算用量矛盾时，命令拒绝并保持 `unknown`。只有回执同时证明 writer 已退出（`native_writer_quiesced` 为 `true`，且没有 `recovery_requires_fencing`）时，`agent-rebuild` 才会隔离这个没有终态的 turn；该 turn 的提议和工作记忆增量不会被应用，已结算的费用保留。
 
 ## 当前 CLI 上下文边界
 

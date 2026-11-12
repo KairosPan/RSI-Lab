@@ -2,15 +2,47 @@
 from dataclasses import dataclass
 import inspect
 import json
-import marshal
 from pathlib import Path
 from typing import Callable
 
 from .store import digest, encode
 
 
+def code_identity(code):
+    """Hash what a code object does, not where it was compiled or how it is referenced.
+
+    marshal output is unsuitable: it flags every object with more than one
+    reference, so it changes while anything else holds one of the constants.
+    File name, first line and line/position tables are excluded.
+    """
+    return digest({'argcount': code.co_argcount, 'posonlyargcount': code.co_posonlyargcount,
+                   'kwonlyargcount': code.co_kwonlyargcount, 'flags': code.co_flags, 'code': code.co_code.hex(),
+                   'names': list(code.co_names), 'varnames': list(code.co_varnames),
+                   'freevars': list(code.co_freevars), 'cellvars': list(code.co_cellvars), 'name': code.co_name,
+                   'qualname': getattr(code, 'co_qualname', code.co_name),
+                   'exceptiontable': getattr(code, 'co_exceptiontable', b'').hex(),
+                   'consts': [_canonical_constant(value) for value in code.co_consts]})
+
+
+def _canonical_constant(value):
+    if inspect.iscode(value):
+        return {'code': code_identity(value)}
+    if isinstance(value, tuple):
+        return {'tuple': [_canonical_constant(item) for item in value]}
+    if isinstance(value, frozenset):
+        return {'frozenset': sorted(encode(_canonical_constant(item)).decode() for item in value)}
+    return {'type': type(value).__name__, 'repr': repr(value)}
+
+
 @dataclass(frozen=True)
 class Adapter:
+    """A host-registered capability.
+
+    ``prepare`` validates inputs and builds the execution packet. It must be
+    free of side effects: the runtime also calls it as a dry run when it
+    admits a tool request, and raises ValueError/KeyError/TypeError from it
+    reject the request before any Work is queued.
+    """
     adapter_id: str
     version: str
     effect_kind: str
@@ -59,12 +91,12 @@ class Adapter:
                 raise ValueError('Adapter implementation must have inspectable source')
             sources[str(Path(path).resolve())] = digest(Path(path).read_bytes())
             callbacks[name] = {'module':fn.__module__,'qualname':fn.__qualname__,
-                'code_sha256':digest(marshal.dumps(fn.__code__)),
+                'code_sha256':code_identity(fn.__code__),
                 'defaults':json.loads(encode(fn.__defaults__)), 'keyword_defaults':json.loads(encode(fn.__kwdefaults__))}
         for path in self.source_paths:
             path = Path(path).resolve()
             sources[str(path)] = digest(path.read_bytes())
-        return {'schema_version': 'rsi_adapter_descriptor_v1', 'adapter_id': self.adapter_id,
+        return {'schema_version': 'rsi_adapter_descriptor_v2', 'adapter_id': self.adapter_id,
                 'version': self.version, 'effect_kind': self.effect_kind,
                 'manifest': json.loads(encode(self.manifest)), 'implementation_sources': sources,
                 'callbacks':callbacks,'requires_acceptance':self.requires_acceptance}

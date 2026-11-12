@@ -53,6 +53,9 @@ PAYLOADS = {
     'park': WAIT,
     'close_issue': obj({'resolution': {'type': 'string', 'enum': ['resolved', 'declined', 'closed_unresolved']},
                         'reason': TEXT}),
+    # Complete Lab settings, not a delta; the controller checks the bounds.
+    'propose_lab_settings': obj({'guidance': {'type': ['string', 'null']}, 'step_digest': INTEGER,
+                                 'recent_results': INTEGER, 'disabled_tools': TEXTS, 'rationale': TEXT}),
 }
 ACTIONS = {
     'lab': ('request_diagnostic', 'propose_issue', 'no_action'),
@@ -75,12 +78,15 @@ COMMON = (
 )
 
 
-def response_schema(mode, *, working_memory=False, research_features=None, final_review_only=False, research_policy=None):
+def response_schema(mode, *, working_memory=False, research_features=None, final_review_only=False, research_policy=None,
+                    lab_settings=False):
     if mode not in ACTIONS:
         raise ValueError('Unsupported Meta-agent mode')
     config = {'research_features':research_features}
     policy = normalize_research_policy(research_policy)
     actions = ACTIONS[mode] + (('recommend_change',) if enabled(config,'meta_lab') and mode != 'lab' else ())
+    if lab_settings and mode == 'disposition':
+        actions += ('propose_lab_settings',)
     if final_review_only:
         actions = ('close_issue',) if mode == 'disposition' else ('no_action',)
     variants = []
@@ -126,6 +132,11 @@ def response_schema(mode, *, working_memory=False, research_features=None, final
             'Use lists except next_step (text/null) and dependency_versions (object). '
             'This is unverified working state, not shared evidence or execution authority.'}
     return obj(fields)
+
+
+def lab_settings_enabled(orchestration):
+    """The schema switch for propose_lab_settings, read from a packet task or an Effect record."""
+    return isinstance(orchestration, dict) and orchestration.get('lab_settings_action') is True
 
 
 def _validate(value, schema):
@@ -182,7 +193,10 @@ class MetaAgent:
         features = task.get('constraints',{}).get('research_features')
         final_review_only = task.get('constraints',{}).get('final_review_only',False)
         policy = normalize_research_policy(task.get('constraints',{}).get('research_policy'))
-        response_schema(mode,research_features=features,final_review_only=final_review_only,research_policy=policy)
+        orchestration = task.get('constraints',{}).get('orchestration')
+        lab_settings = lab_settings_enabled(orchestration)
+        response_schema(mode,research_features=features,final_review_only=final_review_only,research_policy=policy,
+                        lab_settings=lab_settings)
         if stage not in ('initial', 'challenge'):
             raise ValueError('Unsupported review stage')
         if mode == 'discovery' and stage == 'initial' and (owner_interpretation is not None or prior_review is not None):
@@ -217,6 +231,12 @@ class MetaAgent:
                 'Use only evidence delivered in THIS request for citations; persistent history '
                 'does not grant original-source reading authority. no_action means no further '
                 'admitted action, not proof the scientific goal succeeded. ')
+        if orchestration is not None:
+            from .orchestration import LAB_INSTRUCTION, META_INSTRUCTION, LAB_SETTINGS_INSTRUCTION
+            if mode == 'lab':
+                instructions += LAB_INSTRUCTION
+            else:
+                instructions += META_INSTRUCTION + (LAB_SETTINGS_INSTRUCTION if lab_settings else '')
         if 'agent_state' in task:
             instructions += ('Your persistent session and private working memory are supplied by the '
                 'controller. Set working_memory_delta to a string encoding a JSON object; use "{}" for no changes. Never change owner, '
@@ -276,7 +296,8 @@ class MetaAgent:
                 'specific producer, dependency version, wake condition, deadline and expiry action. '
                 'Closing an unresolved issue must remain explicitly unresolved; the controller checks duties. ')
         return dict(mode=mode, instruction=instructions, schema=response_schema(mode, working_memory='agent_state' in task,
-                    research_features=features,final_review_only=final_review_only,research_policy=policy), task=task,
+                    research_features=features,final_review_only=final_review_only,research_policy=policy,
+                    lab_settings=lab_settings), task=task,
                     evidence_ids=evidence_ids, required_evidence_ids=required_evidence_ids, model=self.model,
                     effort=self.effort, owner_interpretation=owner_interpretation, prior_review=prior_review,
                     page_cursors=page_cursors)
@@ -295,7 +316,8 @@ def validate_command(response, packet, *, current_versions, authorized_sources=(
     features = packet['task'].get('constraints',{}).get('research_features')
     schema = response_schema(mode,research_features=features,
                              final_review_only=packet['task'].get('constraints',{}).get('final_review_only',False),
-                             research_policy=packet['task'].get('constraints',{}).get('research_policy'))
+                             research_policy=packet['task'].get('constraints',{}).get('research_policy'),
+                             lab_settings=lab_settings_enabled(packet['task'].get('constraints',{}).get('orchestration')))
     if not isinstance(response, dict) or set(response) - (set(schema['properties']) | {'working_memory_delta'}):
         raise ValueError('Response contains unregistered fields')
     _validate({key:response.get(key) for key in schema['properties']}, schema)
@@ -425,7 +447,8 @@ class CodexExecutor:
                 or request['mode'] not in ACTIONS or not request['prompt'].startswith(transport.PREAMBLE)
                 or request['response_schema'] != response_schema(request['mode'], working_memory=session is not None,
                     research_features=metadata.get('research_features'),final_review_only=metadata.get('final_review_only',False),
-                    research_policy=metadata.get('research_policy'))):
+                    research_policy=metadata.get('research_policy'),
+                    lab_settings=lab_settings_enabled(metadata.get('orchestration')))):
             raise ValueError('Unsupported exact model request envelope')
         try:
             data = input_view.decode(request['prompt'].rsplit('INPUT_DATA_JSON:\n',1)[1],request['input_view_mode'])

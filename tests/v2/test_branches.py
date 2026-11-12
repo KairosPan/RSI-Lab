@@ -5,11 +5,11 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from docking_rsi.branches import BranchExecutor, branch_reservations, make_branch_packet
-from docking_rsi.capabilities import digest
-from docking_rsi.controller import Controller
-from docking_rsi.store import Store
-from docking_rsi.trials import TrialEngine
+from rsi_lab.branches import BranchExecutor, branch_reservations, make_branch_packet
+from rsi_lab.capabilities import digest
+from rsi_lab.controller import Controller
+from rsi_lab.store import Store
+from rsi_lab.trials import TrialEngine
 
 
 ADAPTER = '''import hashlib,json,sys
@@ -18,7 +18,7 @@ p=json.load(sys.stdin)
 prior=Path("branch-marker.txt").exists()
 Path("branch-marker.txt").write_text(p["identity"]["arm"])
 source=hashlib.sha256(json.dumps(p["input"],sort_keys=True,separators=(",",":"),ensure_ascii=False).encode()).hexdigest()
-r={"schema_version":"docking_trial_output_v2","identity":p["identity"],
+r={"schema_version":"rsi_trial_output_v2","identity":p["identity"],
    "metrics":{"utility":10 if p["identity"]["arm"]=="baseline" else 12,"state_leaks":int(prior)},
    "execution_status":"complete","input_receipt_sha256":source}
 json.dump(r,sys.stdout)
@@ -36,7 +36,7 @@ class BranchTests(unittest.TestCase):
         input_value = {'fixture': True, 'input_numbers': [1, 2, 3]}
         artifact = digest(source.encode())
         versions = {'policy': 'policy1', 'capability': 'fixture-adapter1', 'scientific_protocol': 'synthetic1'}
-        spec = {'schema_version': 'docking_trial_v2', 'intervention_kind': 'policy',
+        spec = {'schema_version': 'rsi_trial_v2', 'intervention_kind': 'policy',
             'baseline_versions': versions, 'candidate_versions': {**versions, 'policy': 'policy2'},
             'study_id': 'synthetic-study1', 'new_study_id': None,
             'applicability': {'scope': 'synthetic process isolation fixture', 'branch_execution': {
@@ -82,7 +82,7 @@ class BranchTests(unittest.TestCase):
 
     def test_input_and_artifact_must_match_pre_result_registration(self):
         store, _, _, _, input_value, path = self.setup_run()
-        with patch('docking_rsi.branches.subprocess.Popen') as process:
+        with patch('rsi_lab.branches.subprocess.Popen') as process:
             with self.assertRaisesRegex(ValueError, 'prospectively pinned'):
                 make_branch_packet(store, 'run', 'trial1', 'pair1', 'baseline', input_value, path,
                                    execution_authorization_sha256='0' * 64)
@@ -132,7 +132,7 @@ class BranchTests(unittest.TestCase):
         effect = controller.prepare_effect('run', work['id'], 'isolated_trial_branch', packet,
             branch_reservations(store, 'run', 'trial1'), 'reserve',
             metadata={key: packet[key] for key in ('trial_id', 'pair_id', 'arm', 'run_id')})
-        with patch('docking_rsi.branches.subprocess.Popen') as process:
+        with patch('rsi_lab.branches.subprocess.Popen') as process:
             with self.assertRaisesRegex(ValueError, 'persisted dispatching'):
                 BranchExecutor(store, 'run')(effect, store.read_blob(effect['packet_ref']))
             process.assert_not_called()

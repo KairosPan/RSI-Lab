@@ -1,4 +1,4 @@
-"""Non-docking portability acceptance using actual CSV calculations.
+"""Domain-neutral portability acceptance using actual CSV calculations.
 
 Meta decisions are explicit fixtures. Capability tests, paired branches and
 the final aggregation really execute. This validates shared orchestration and

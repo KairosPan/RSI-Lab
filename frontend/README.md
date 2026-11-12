@@ -1,6 +1,6 @@
 # RSI-Lab Architecture Workspace
 
-A read-only English interface for **Lab Harness**, **Meta-Harness**, **Scientific Memory**, **Literature Tool Calling** and **Computational Tools**. The controller appears separately as infrastructure. Engineering calls are an on-demand backend within Meta-Harness.
+A read-only English interface for **Lab Harness**, **Meta-Harness**, **Scientific Memory**, **Source Tools** and **Computational Tools**. The controller appears separately as infrastructure. Engineering calls are an on-demand backend within Meta-Harness.
 
 The workspace starts with **No run selected**. It includes no experiment outputs, conversations, screenshots or result snapshots. You can explore the architecture before connecting a source. Component relationships describe responsibilities, not an observed execution sequence.
 
@@ -40,7 +40,7 @@ The reader copies a consistent DB/WAL snapshot to a temporary directory and quer
 - **Lab Harness:** persisted plans, queued work, waits, issues and unknown effects, followed by decisions and linked tools. Missing orchestration fields remain unknown.
 - **Meta-Harness:** review/issue decisions, engineering proposals and explicitly attributed tool calls. A proposal is separate from execution and acceptance.
 - **Scientific Memory:** the fact and issue projection available in the ledger. This is a partial view; an issue hypothesis is not a validated conclusion.
-- **Literature Tool Calling:** the current adapter exposes frozen local-source reads. Search and citation following remain unconnected capabilities.
+- **Source Tools:** source reads explicitly identified by `Effect.metadata.tool_role: "source"`. Providers are supplied by the host; recorded reads do not imply a live connection.
 - **Computational Tools:** recorded tool effects and receipts. A successful process does not establish scientific acceptance.
 
 Unknown costs stay unknown. Shared tool records can appear in multiple component views; do not sum component totals. A fresh read of the ledger does not prove that an execution process is currently alive.
@@ -74,3 +74,5 @@ Set `PLAYWRIGHT_MODULE` to an installed Playwright module path if it is not on N
 ## Optional telemetry endpoint
 
 The independent `/api/runtime` bridge can read a JSON snapshot produced by your own process using `RSI_LAB_RUNTIME_FILE`. `runtime.example.json` documents the schema with explicitly simulated data. The live endpoint rejects simulated or historical sources, and preserves missing/stale state. This bridge is not used to infer liveness from ledger records.
+
+The trace projection is domain-neutral. `diagnostic` Work with a recorded `capability_id` or `adapter_id` is shown as task-tool work; non-model Effects with `metadata.adapter_id` count as registered adapter executions. Names, prompt text and model or engineering readiness do not establish tool execution. The optional telemetry example uses generic analysis and result-validation nodes.

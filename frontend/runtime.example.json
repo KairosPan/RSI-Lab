@@ -38,18 +38,18 @@
       "events": []
     },
     {
-      "id": "gnina",
+      "id": "analysis",
       "status": "idle",
-      "detail": "Example: no current docking job.",
+      "detail": "Example: no current analysis job.",
       "heartbeatAt": "2026-10-20T12:00:00.000Z",
       "task": "Schema example only",
       "metrics": [],
       "events": []
     },
     {
-      "id": "posecheck",
+      "id": "resultcheck",
       "status": "error",
-      "detail": "Example: a pose check failed. This does not establish molecular inactivity.",
+      "detail": "Example: a result check failed. This does not resolve the task hypothesis.",
       "heartbeatAt": "2026-10-20T12:00:00.000Z",
       "task": "Schema example only",
       "metrics": [],

@@ -5,8 +5,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from docking_rsi import roles
-from docking_rsi.packets import PacketBuilder, digest, encoded, make_evidence
+from rsi_lab import roles
+from rsi_lab.packets import PacketBuilder, digest, encoded, make_evidence
 
 
 VERSIONS = {'issue_version': 1, 'evidence_revision': 3, 'scheduling_revision': 5}
@@ -14,10 +14,10 @@ VERSIONS = {'issue_version': 1, 'evidence_revision': 3, 'scheduling_revision': 5
 
 class RoleTests(unittest.TestCase):
     def setUp(self):
-        self.catalog = {'raw': make_evidence('raw', 'A preparation receipt has no state-selection evidence.',
+        self.catalog = {'raw': make_evidence('raw', 'A normalization receipt has no rule-selection evidence.',
                                             kind='raw_fact', source='worker receipt')}
         self.agent = roles.MetaAgent(PacketBuilder(self.catalog))
-        self.task = {'issue_id': 'i1', 'expected_versions': VERSIONS, 'goal': 'Perform docking'}
+        self.task = {'issue_id': 'i1', 'expected_versions': VERSIONS, 'goal': 'Validate supplied records'}
 
     def packet(self, mode='disposition', **kwargs):
         return self.agent.prepare(mode, self.task, evidence_ids=['raw'], required_evidence_ids=['raw'], **kwargs)
@@ -30,9 +30,9 @@ class RoleTests(unittest.TestCase):
         return roles.validate_command(response, self.packet(response['command']['mode']), current_versions=VERSIONS, **kwargs)
 
     def test_one_agent_switches_two_closed_modes(self):
-        issue = {'title': 'Missing preparation evidence', 'problem_kind': 'missing_information', 'scope': 'current ligands',
-                 'hypothesis': 'Preparation was not run', 'competing_explanations': ['It ran but receipt is missing'],
-                 'discriminating_check': 'Retrieve the preparation receipt', 'falsifying_observation': 'A valid receipt with states'}
+        issue = {'title': 'Missing normalization evidence', 'problem_kind': 'missing_information', 'scope': 'current records',
+                 'hypothesis': 'Normalization was not run', 'competing_explanations': ['It ran but receipt is missing'],
+                 'discriminating_check': 'Retrieve the normalization receipt', 'falsifying_observation': 'A valid receipt with applied rules'}
         command = self.validate(self.command('propose_issue', issue, mode='discovery'))
         self.assertEqual(command['action'], 'propose_issue')
         self.assertEqual(self.packet('discovery')['envelope']['model'], self.packet()['envelope']['model'])
@@ -49,18 +49,18 @@ class RoleTests(unittest.TestCase):
                 self.validate(altered)
 
     def test_missing_capability_proposal_does_not_register_capability(self):
-        response = self.command('request_capability', {'capability_id': 'prepare_states', 'purpose': 'Prepare state inputs',
-            'input_contract': 'canonical parent structure', 'output_contract': 'states and provenance',
-            'applicability': 'supported small molecules', 'acceptance_checks': ['normal and failed inputs', 'identity and resource receipts'],
+        response = self.command('request_capability', {'capability_id': 'normalize_records', 'purpose': 'Normalize input records',
+            'input_contract': 'structured input records', 'output_contract': 'normalized records and provenance',
+            'applicability': 'supported structured records', 'acceptance_checks': ['normal and failed inputs', 'identity and resource receipts'],
             'affects_scientific_results': True})
         result = self.validate(response)
         self.assertEqual(result['action'], 'request_capability')
         with self.assertRaises(ValueError):
-            self.validate(self.command('request_diagnostic', {'capability_id': 'prepare_states', 'capability_version': 'v1', 'inputs_json': '{}'}), capabilities={})
+            self.validate(self.command('request_diagnostic', {'capability_id': 'normalize_records', 'capability_version': 'v1', 'inputs_json': '{}'}), capabilities={})
 
     def test_diagnostic_requires_registered_version_and_parameter_object(self):
         caps = {'inspect': {'status': 'accepted', 'version': 'v2'}}
-        response = self.command('request_diagnostic', {'capability_id': 'inspect', 'capability_version': 'v2', 'inputs_json': '{"compound":"c1"}'})
+        response = self.command('request_diagnostic', {'capability_id': 'inspect', 'capability_version': 'v2', 'inputs_json': '{"record":"r1"}'})
         self.validate(response, capabilities=caps)
         for field, value in [('capability_version', 'v1'), ('inputs_json', '[]'), ('inputs_json', 'not JSON')]:
             bad = copy.deepcopy(response); bad['command']['payload'][field] = value
@@ -68,7 +68,7 @@ class RoleTests(unittest.TestCase):
                 self.validate(bad, capabilities=caps)
 
     def test_narrow_request_cannot_expand_source_scope_or_budget(self):
-        old = {'source_id': 'authorized', 'source_version': 2, 'object_ids': ['c1', 'c2'], 'fields': ['structure', 'assay'],
+        old = {'source_id': 'authorized', 'source_version': 2, 'object_ids': ['c1', 'c2'], 'fields': ['structure', 'procedure'],
                'query': 'Retrieve evidence', 'max_pages': 3, 'max_bytes': 4000}
         request = {'id': 'r1', 'version': 3, 'query_spec': old}
         narrowed = {**old, 'object_ids': ['c1'], 'fields': ['structure'], 'max_pages': 1, 'max_bytes': 2000}
@@ -81,10 +81,10 @@ class RoleTests(unittest.TestCase):
 
     def test_narrowing_requires_a_strict_scope_or_resource_reduction(self):
         old = {'source_id': 'authorized', 'source_version': 2, 'object_ids': ['c1', 'c2'],
-               'fields': ['structure', 'assay'], 'query': 'Retrieve evidence', 'max_pages': 3, 'max_bytes': 4000}
+               'fields': ['structure', 'procedure'], 'query': 'Retrieve evidence', 'max_pages': 3, 'max_bytes': 4000}
         request = {'id': 'r1', 'version': 3, 'query_spec': old}
         for changes in ({}, {'query': 'Please retrieve evidence'}, {'object_ids': ['c2', 'c1']},
-                        {'fields': ['assay', 'structure']}, {'object_ids': ['c1', 'c2', 'c1']}):
+                        {'fields': ['procedure', 'structure']}, {'object_ids': ['c1', 'c2', 'c1']}):
             response = self.command('narrow_request', {'request_id': 'r1', 'request_version': 3,
                                                        'replacement': {**old, **changes}})
             with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, 'strict reduction'):

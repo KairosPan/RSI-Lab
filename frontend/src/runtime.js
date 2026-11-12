@@ -2,8 +2,8 @@ const NODE_IDS = [
   "controller",
   "lab",
   "executor",
-  "gnina",
-  "posecheck",
+  "analysis",
+  "resultcheck",
   "memory",
   "meta",
   "validator",
@@ -55,29 +55,29 @@ export const runtimeNodes = [
     group: "campaign",
   },
   {
-    id: "gnina",
-    name: "GNINA",
-    role: "Docking and rescoring",
-    icon: "molecule",
+    id: "analysis",
+    name: "Analysis Tool",
+    role: "Task analysis",
+    icon: "cpu",
     description:
-      "Produces docking energy and CNN scores under the fixed computational protocol. These are computational signals, not wet-lab confirmation.",
-    input: ["Prepared ligands", "Receptor and frozen protocol"],
+      "Runs a registered task adapter under the frozen computational protocol. Outputs remain evidence until reviewed against task requirements.",
+    input: ["Prepared task inputs", "Frozen protocol and tool configuration"],
     output: [
-      "Docked poses",
-      "CNN scores and docking energy",
+      "Computed outputs",
+      "Metrics and analysis results",
       "Execution records",
     ],
     group: "campaign",
   },
   {
-    id: "posecheck",
-    name: "PoseBusters",
-    role: "Pose validation",
+    id: "resultcheck",
+    name: "Result Validator",
+    role: "Result validation",
     icon: "checkCircle",
     description:
-      "Checks the validity of generated poses. A failed pose check is not a conclusion about biological activity.",
-    input: ["Generated poses", "Frozen validity checks"],
-    output: ["Pose validity flags", "Check results", "Failure records"],
+      "Checks generated outputs against the task contract. A failed check identifies invalid output, not a conclusion about the task hypothesis.",
+    input: ["Generated outputs", "Frozen validity checks"],
+    output: ["Output validity flags", "Check results", "Failure records"],
     group: "campaign",
   },
   {
@@ -137,26 +137,26 @@ export const runtimeEdges = [
   },
   {
     from: "executor",
-    to: "gnina",
-    label: "Docking and rescoring jobs",
+    to: "analysis",
+    label: "Task analysis jobs",
     kind: "campaign",
   },
   {
-    from: "gnina",
-    to: "posecheck",
-    label: "Generated poses",
+    from: "analysis",
+    to: "resultcheck",
+    label: "Generated outputs",
     kind: "campaign",
   },
   {
-    from: "gnina",
+    from: "analysis",
     to: "memory",
     label: "Scores and execution records",
     kind: "campaign",
   },
   {
-    from: "posecheck",
+    from: "resultcheck",
     to: "memory",
-    label: "Pose validity evidence",
+    label: "Output validity evidence",
     kind: "campaign",
   },
   { from: "memory", to: "lab", label: "Evidence feedback", kind: "campaign" },
@@ -373,8 +373,8 @@ export function demoRuntime(tick = 0) {
     controller: "running",
     lab: stage === 0 ? "running" : "idle",
     executor: stage === 1 ? "running" : "queued",
-    gnina: stage === 1 ? "running" : stage === 2 ? "completed" : "queued",
-    posecheck: "error",
+    analysis: stage === 1 ? "running" : stage === 2 ? "completed" : "queued",
+    resultcheck: "error",
     memory: stage === 2 ? "running" : "idle",
     meta: "queued",
     validator: "idle",
@@ -387,16 +387,16 @@ export function demoRuntime(tick = 0) {
         : "Waiting for simulated evidence.",
     executor:
       stage === 1
-        ? "Simulating an authorized GNINA job."
+        ? "Simulating an authorized analysis job."
         : "Waiting for a simulated authorized request.",
-    gnina:
+    analysis:
       stage === 1
-        ? "Simulated docking is in progress."
+        ? "Simulated analysis is in progress."
         : stage === 2
-          ? "Simulated docking output returned."
-          : "Simulated docking job is queued.",
-    posecheck:
-      "Simulated pose check failed. This does not establish molecular inactivity.",
+          ? "Simulated analysis output returned."
+          : "Simulated analysis job is queued.",
+    resultcheck:
+      "Simulated result check failed. This does not resolve the task hypothesis.",
     memory:
       stage === 2
         ? "Linking simulated evidence and open questions."
@@ -405,11 +405,11 @@ export function demoRuntime(tick = 0) {
     validator: "No simulated release has been authorized.",
   };
   const ages = {
-    posecheck: 2000,
+    resultcheck: 2000,
     lab: 5000,
     controller: 8000,
     executor: 12000,
-    gnina: 16000,
+    analysis: 16000,
     memory: 20000,
     meta: 24000,
     validator: 28000,
@@ -430,7 +430,7 @@ export function demoRuntime(tick = 0) {
         {
           time: new Date(now - ages[id]).toISOString(),
           message: details[id],
-          level: id === "posecheck" ? "error" : "info",
+          level: id === "resultcheck" ? "error" : "info",
         },
       ],
     })),

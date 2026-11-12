@@ -1,16 +1,16 @@
-"""Trial mechanics fixtures; no new model or docking observations."""
+"""Trial mechanics fixtures; no live model or scientific observations."""
 import copy
 import json
 import tempfile
 import unittest
 
-from docking_rsi.store import Store
-from docking_rsi.controller import Controller
-from docking_rsi.trials import TrialEngine, settle_trial, validate_trial_spec
+from rsi_lab.store import Store
+from rsi_lab.controller import Controller
+from rsi_lab.trials import TrialEngine, settle_trial, validate_trial_spec
 
 
 def specification(mode='isolated_branch'):
-    return {'schema_version': 'docking_trial_v2', 'intervention_kind': 'policy',
+    return {'schema_version': 'rsi_trial_v2', 'intervention_kind': 'policy',
         'baseline_versions': {'policy': 'h0', 'capability': 'tool1', 'scientific_protocol': 'science1'},
         'candidate_versions': {'policy': 'h1', 'capability': 'tool1', 'scientific_protocol': 'science1'},
         'study_id': 'study1', 'new_study_id': None, 'applicability': {'target': 'fixture_only'},
