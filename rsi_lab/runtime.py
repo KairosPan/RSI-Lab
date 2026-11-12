@@ -24,6 +24,7 @@ from .improvements import ImprovementLoop, enabled
 from .research_policy import normalize_research_policy
 from .driver_report import build_report
 from .orchestration import Orchestration, orchestration_config
+from .preflight import feature_report, preflight, request_report
 
 
 def recovery_error(stage, item_id, exc):
@@ -65,6 +66,8 @@ class Runtime:
         self.research_policy = normalize_research_policy(self.config.get('research_policy'))
         self.agents = AgentState(store, run_id)
         self.improvements = ImprovementLoop(self) if enabled(self.config,'meta_lab') else None
+        # Kept even when Scientific Memory is off, so a report can say it was passed.
+        self.scientific_identity_provider = scientific_identity_provider
         self.scientific_memory = None
         if enabled(self.config,'scientific_memory'):
             from .scientific_memory import ScientificMemory
@@ -73,6 +76,21 @@ class Runtime:
 
     def _mutate(self, key, event, fn, payload):
         return self.store.mutate(self.run_id, key, event, fn, payload=payload)
+
+    def feature_report(self):
+        """Which research features this run declares, has built and offers to the model; writes nothing."""
+        return feature_report(self)
+
+    def preflight(self, expect, *, work_id=None):
+        """Raise ValueError naming every host expectation this run does not meet; else the feature report.
+
+        With ``work_id`` the request that ready Lab or Meta Work would send is held to them too.
+        """
+        return preflight(self, expect, work_id)
+
+    def request_report(self, work_id):
+        """What the model request for a ready Lab or Meta Work carries; prepares no Effect."""
+        return request_report(self, work_id)
 
     def versions(self, issue_id):
         if issue_id is None:
