@@ -37,6 +37,7 @@ class PolicyTests(unittest.TestCase):
             'expected_versions':VERSIONS,'evidence_ids':['raw'],'payload':{'change_kind':kind,
             'instruction':'Use the stable discretization on the same input','capability_id':'solver',
             'capability_version':'v1','expected_outcome':'A finite residual','measurement':'Reported residual',
+            'execution_contract_json': '{"version":1,"kind":"exact_inputs","inputs":{"solver":"stable"}}',
             'falsifier':'The residual remains nonfinite'}},'improvement_reviews':[]}
 
     def test_policy_is_closed_bounded_json_and_copied(self):
@@ -171,6 +172,31 @@ class PolicyTransportTests(unittest.TestCase):
             self.assertEqual(result['sent_packet_sha256'],packet['packet_sha256'])
             self.assertEqual(invoke.call_args.args[1],packet['envelope']['response_schema'])
             self.assertEqual((Path(directory)/'policy-effect'/'prompt.txt').read_text(),packet['envelope']['prompt'])
+
+    def test_transport_binds_recommendation_admission_to_exact_prompt_and_schema(self):
+        task = copy.deepcopy(self.task)
+        admission = {'allowed': False, 'reason': 'recommendation_pending', 'remaining': 7,
+                     'pending': [{'id': 'prior', 'status': 'adopted'}]}
+        task['constraints']['research_loop'] = {'recommendation_admission': admission}
+        packet = self.packet(task)
+        self.assertNotIn('recommend_change', json.dumps(packet['envelope']['response_schema']))
+        effect = {'id': 'admission-effect', 'status': 'dispatching', 'packet_hash': packet['packet_sha256'],
+                  'metadata': {'research_features': FEATURES, 'research_policy': copy.deepcopy(POLICY),
+                               'recommendation_admission': copy.deepcopy(admission)}}
+        response = self.response()
+        response['command'].update(action='no_action', payload={'reason': 'A recommendation is pending'})
+        with tempfile.TemporaryDirectory() as directory, patch.object(self, 'response', return_value=response), \
+                patch.object(roles.transport, 'invoke', side_effect=self.invoke_fixture) as invoke:
+            result = roles.CodexExecutor(directory)(effect, packet['envelope_bytes'])
+            self.assertEqual(result['status'], 'succeeded')
+            self.assertEqual(invoke.call_args.args[1], packet['envelope']['response_schema'])
+        for changed in (None, {**admission, 'allowed': True}, {**admission, 'remaining': 0}):
+            with self.subTest(changed=changed), tempfile.TemporaryDirectory() as directory, \
+                    patch.object(roles.transport, 'invoke') as invoke:
+                altered = {**effect, 'metadata': {**effect['metadata'], 'recommendation_admission': changed}}
+                with self.assertRaises(ValueError):
+                    roles.CodexExecutor(directory)(altered, packet['envelope_bytes'])
+                invoke.assert_not_called()
 
     def test_guidance_marker_transports_exact_envelope(self):
         # Exercise the production CodexExecutor preflight and receipt checks;

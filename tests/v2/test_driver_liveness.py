@@ -164,7 +164,8 @@ class ToolRequestTests(unittest.TestCase):
         diagnostic = store.list('r', 'work', kind='diagnostic')[0]
         self.assertEqual(first['skipped'], [{'work_id': diagnostic['id'], 'reason': 'Budget admission denied: tool_calls'}])
         self.assertEqual(first['status'], 'blocked_admission')
-        second_lab = rt.enqueue_lab('lab-2')
+        # A separate branch can progress while the first branch awaits its tool.
+        second_lab = controller.enqueue('r', 'lab', 'lab-2', 'lab-2', inputs={'branch_id': 'independent'})
         second = rt.run_until_wait(executor, RES, max_steps=6)
         self.assertEqual(store.get('r', 'work', second_lab['id'])['status'], 'succeeded')
         self.assertEqual(second['status'], 'blocked_admission')
