@@ -20,6 +20,22 @@ UPDATE_FIELDS = {'kind', 'id', 'expected_revision', 'question_ids', 'content',
                  'source_evidence_ids', 'object_refs'}
 REVISION = 'scientific_memory_revision'
 HEAD = 'scientific_memory_head'
+EXPERIENCE_KINDS = {'claim', 'method_experience', 'decision'}
+# Function words should not make a recent, unrelated receipt look relevant to
+# a specific method or failure mode. Values, rather than JSON field names, are
+# searched below; this remains a deterministic lexical aid, not entailment.
+QUERY_STOP_WORDS = {'a', 'an', 'and', 'are', 'as', 'at', 'be', 'by', 'for', 'from',
+                    'in', 'is', 'it', 'of', 'on', 'or', 'that', 'the', 'these',
+                    'this', 'to', 'was', 'were', 'with'}
+
+
+def _terms(value):
+    if isinstance(value, dict):
+        return set().union(*(_terms(item) for item in value.values())) if value else set()
+    if isinstance(value, list):
+        return set().union(*(_terms(item) for item in value)) if value else set()
+    return (set(re.findall(r'[^\W_]+', value.lower())) - QUERY_STOP_WORDS
+            if isinstance(value, str) else set())
 
 
 def _copy(value):
@@ -413,7 +429,11 @@ class ScientificMemory:
 
         The first call registers the root question. With ``read_only`` nothing
         is written: a root question still missing is selected as if it had
-        just been appended.
+        just been appended. During ordinary decisions, current results and
+        accumulated interpretations have separate, borrowable byte allowances.
+        Explicit object IDs override those allowances; final review prioritizes
+        current pending investigations. ``related_evidence_ids`` affects rank
+        only: its source bytes remain charged and must be delivered in full.
         """
         if role not in {'lab', 'meta'}:
             raise ValueError('Scientific context requires an authorized run role')
@@ -429,8 +449,15 @@ class ScientificMemory:
         query = {} if query is None else {'text': query} if isinstance(query, str) else query
         if not isinstance(query, dict):
             raise ValueError('Scientific query must be structured')
+        # Preserve the existing blocked-context report for malformed explicit
+        # object identities; preflight presents that diagnostic to the caller.
         wanted = set(query.get('object_ids', [])); questions = set(query.get('question_ids', []))
-        words = set(re.findall(r'\w+', str(query.get('text', '')).lower()))
+        related_sources = set(_strings(query.get('related_evidence_ids', []), 'related_evidence_ids'))
+        if len(related_sources) > 128:
+            raise ValueError('related_evidence_ids permits at most 128 ranking hints')
+        if 'text' in query and not isinstance(query['text'], str):
+            raise ValueError('Scientific query text must be a string')
+        words = _terms(query.get('text', ''))
         changes = {digest(r['source_ref']) for r in self._rows('scientific_memory_source_change')}
         pending_reviews = self._rows('scientific_memory_review_pending')
         interpretation_rows = self._rows('scientific_memory_interpretation')
@@ -455,7 +482,7 @@ class ScientificMemory:
             if questions and record['id'] not in questions and not questions.intersection(record['question_ids']):
                 continue
             freshness = self._freshness(record, changes=changes, pending_reviews=pending_reviews)
-            related = bool(words.intersection(re.findall(r'\w+', encode(record['content']).decode().lower())))
+            relevance = len(words.intersection(_terms(record['content'])))
             interpretation = self._interpretation(record, interpretation_rows, changes=changes,
                 pending_reviews=pending_reviews) if record['kind'] == 'investigation' else None
             pending = interpretation is not None and interpretation['status'] == 'awaiting_interpretation'
@@ -465,30 +492,80 @@ class ScientificMemory:
                 direct_sources = set()
             priority = (record['id'] in wanted, bool(query.get('final_review_only')) and pending and not self._historical(record),
                         bool(direct_sources & baseline),
-                        pending and not self._historical(record), freshness != 'current', related,
+                        pending and not self._historical(record), freshness != 'current', relevance,
                         negative, recency[(record['id'], record['revision'])], record['kind'] == 'question')
+            experience_priority = (bool(direct_sources & (baseline | related_sources)),
+                                   relevance, negative, current, freshness == 'current',
+                                   recency[(record['id'], record['revision'])])
             if interpretation is not None:
                 record = {**record, 'interpretation': interpretation}
-            candidates.append((priority, record, freshness))
+            candidates.append((priority, record, freshness, experience_priority))
         candidates.sort(key=lambda row: (row[0], row[1]['id']), reverse=True)
-        selected, required, omissions = [], [], []
+        selected, required, omissions, available_cards = [], [], [], []
         additional_source_bytes = 0
         # Reserve a bounded manifest budget; raw sources are charged by PacketBuilder.
         available = max(0, limit - min(2048, limit // 2))
-        for _, record, freshness in candidates:
+        source_sizes = {}
+        for candidate in candidates:
+            _, record, freshness, _ = candidate
             try:
                 sources = self._sources_for(record)
+                for fid in sources:
+                    if fid not in baseline and fid not in source_sizes:
+                        source_sizes[fid] = len(self.store.read_blob(self.store.get(self.run_id, 'fact', fid)['content_ref']))
             except (KeyError, ValueError, FileNotFoundError):
                 omissions.append({'id': record['id'], 'revision': record['revision'], 'reason': 'source_unavailable'})
                 continue
             card = {**record, 'freshness': freshness, 'required_evidence_ids': sources}
-            proposed = list(dict.fromkeys(required + sources))
-            source_bytes = sum(len(self.store.read_blob(self.store.get(self.run_id, 'fact', fid)['content_ref']))
-                               for fid in proposed if fid not in baseline)
-            if len(encode({'objects': selected + [card], 'required_evidence_ids': proposed})) + source_bytes > available:
-                omissions.append({'id': record['id'], 'revision': record['revision'], 'reason': 'byte_budget'})
-            else:
-                selected.append(card); required = proposed; additional_source_bytes = source_bytes
+            available_cards.append((candidate, card))
+
+        selected_tokens = set()
+
+        def cost(cards, sources):
+            return (len(encode({'objects': cards, 'required_evidence_ids': sources}))
+                    + sum(source_sizes.get(fid, 0) for fid in sources))
+
+        def take(item, ceiling):
+            nonlocal required, additional_source_bytes
+            _, card = item
+            token = (card['id'], card['revision'])
+            if token in selected_tokens:
+                return
+            proposed = list(dict.fromkeys(required + card['required_evidence_ids']))
+            if cost(selected + [card], proposed) <= ceiling:
+                selected.append(card); selected_tokens.add(token); required = proposed
+                additional_source_bytes = sum(source_sizes.get(fid, 0) for fid in required)
+
+        if query.get('final_review_only'):
+            for item in available_cards:
+                take(item, available)
+        else:
+            # Mandatory records may use either share. Then reserve capacity for
+            # interpretations before an arbitrarily long pending queue can use
+            # it. Unused shares are borrowed in the final pass, so a small or
+            # empty lane does not waste the context budget.
+            for item in available_cards:
+                if item[1]['id'] in wanted:
+                    take(item, available)
+            used = cost(selected, required)
+            experience_allowance = max(0, available - used) // 2
+            result_allowance = max(0, available - used) - experience_allowance
+            experiences = sorted((item for item in available_cards if item[1]['kind'] in EXPERIENCE_KINDS),
+                                 key=lambda item: (item[0][3], item[1]['id']), reverse=True)
+            for item in experiences:
+                take(item, used + experience_allowance)
+            result_ceiling = cost(selected, required) + result_allowance
+            for item in available_cards:
+                if item[1]['kind'] not in EXPERIENCE_KINDS:
+                    take(item, result_ceiling)
+            for item in available_cards:
+                take(item, available)
+        # Presentation keeps the current result first even though experience
+        # capacity was reserved first. Ranking and source closure stay stable.
+        selected = [card for _, card in available_cards if (card['id'], card['revision']) in selected_tokens]
+        for _, card in available_cards:
+            if (card['id'], card['revision']) not in selected_tokens:
+                omissions.append({'id': card['id'], 'revision': card['revision'], 'reason': 'byte_budget'})
         mandatory_missing = sorted(wanted - {r['id'] for r in selected})
         updates = self.store.list(self.run_id, 'registration', kind='scientific_memory_update_result', role=role)
         last_update = max(updates, key=lambda r: r['created_seq']) if updates else None
@@ -499,13 +576,16 @@ class ScientificMemory:
             'objects': selected, 'required_evidence_ids': required, 'omissions': omissions[:8],
             'last_update_result': update_feedback,
             'additional_source_bytes': additional_source_bytes,
+            'retrieval': {'policy': 'pending_review_first' if query.get('final_review_only') else 'balanced_results_and_experience',
+                'experience_objects': sum(r['kind'] in EXPERIENCE_KINDS for r in selected),
+                'result_objects': sum(r['kind'] not in EXPERIENCE_KINDS for r in selected)},
             'omission_count': len(omissions), 'omissions_truncated': max(0, len(omissions) - 8),
             'omissions_sha256': digest(omissions), 'missing_required_objects': mandatory_missing,
             'needs_review': [{'id': r['id'], 'revision': r['revision']} for r in selected if r['freshness'] != 'current'],
             'selection_hash': digest({'role': role, 'query': query, 'selected': selected, 'omissions': omissions})}
-        while len(encode({**result, 'bytes': limit})) > limit and result['omissions']:
+        while len(encode({**result, 'bytes': limit})) + additional_source_bytes > limit and result['omissions']:
             result['omissions'].pop(); result['omissions_truncated'] += 1
-        if len(encode({**result, 'bytes': limit})) > limit:
+        if len(encode({**result, 'bytes': limit})) + additional_source_bytes > limit:
             # Very small budgets return an explicit blocked report, never truncated objects.
             result = {'schema_version': SCHEMA, 'status': 'blocked', 'objects': [], 'required_evidence_ids': [],
                 'omissions': [], 'omission_count': len(candidates), 'omissions_truncated': len(candidates),

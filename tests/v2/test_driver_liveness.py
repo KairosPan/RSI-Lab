@@ -164,7 +164,8 @@ class ToolRequestTests(unittest.TestCase):
         diagnostic = store.list('r', 'work', kind='diagnostic')[0]
         self.assertEqual(first['skipped'], [{'work_id': diagnostic['id'], 'reason': 'Budget admission denied: tool_calls'}])
         self.assertEqual(first['status'], 'blocked_admission')
-        second_lab = rt.enqueue_lab('lab-2')
+        # A separate branch can progress while the first branch awaits its tool.
+        second_lab = controller.enqueue('r', 'lab', 'lab-2', 'lab-2', inputs={'branch_id': 'independent'})
         second = rt.run_until_wait(executor, RES, max_steps=6)
         self.assertEqual(store.get('r', 'work', second_lab['id'])['status'], 'succeeded')
         self.assertEqual(second['status'], 'blocked_admission')
@@ -213,10 +214,10 @@ class PreparedEffectTests(unittest.TestCase):
         executor = Scripted({'lab': in_order(('request_diagnostic', diag({'record_id': 'a'})), none(None)),
                              'discovery': none})
         original = rt.controller.dispatch_effect
-        def dies_before_tool_dispatch(run_id, effect_id, fn):
+        def dies_before_tool_dispatch(run_id, effect_id, fn, **kwargs):
             if store.get(run_id, 'effect', effect_id)['kind'] == 'probe_tool':
                 raise KeyboardInterrupt('simulated process death after prepare, before dispatch')
-            return original(run_id, effect_id, fn)
+            return original(run_id, effect_id, fn, **kwargs)
         rt.controller.dispatch_effect = dies_before_tool_dispatch
         with self.assertRaises(KeyboardInterrupt):
             rt.run_until_wait(executor, RES, max_steps=6)
@@ -237,10 +238,10 @@ class PreparedEffectTests(unittest.TestCase):
         executor = Scripted({'lab': in_order(('request_diagnostic', diag({'record_id': 'a'})), none(None)),
                              'discovery': none})
         original = rt.controller.dispatch_effect
-        def dies_before_tool_dispatch(run_id, effect_id, fn):
+        def dies_before_tool_dispatch(run_id, effect_id, fn, **kwargs):
             if store.get(run_id, 'effect', effect_id)['kind'] == 'probe_tool':
                 raise KeyboardInterrupt('simulated process death after prepare, before dispatch')
-            return original(run_id, effect_id, fn)
+            return original(run_id, effect_id, fn, **kwargs)
         rt.controller.dispatch_effect = dies_before_tool_dispatch
         with self.assertRaises(KeyboardInterrupt):
             rt.run_until_wait(executor, RES, max_steps=6)

@@ -1,6 +1,8 @@
 """Transactional projections, append-only events and immutable content-addressed blobs."""
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 import hashlib
 import json
 import os
@@ -145,6 +147,33 @@ class Store:
         rows = [json.loads(row[0]) for row in self.db.execute(query, parameters)]
         return [row for row in rows if all(row.get(k) == v for k, v in filters.items())]
 
+    @contextmanager
+    def read_snapshot(self):
+        """Bind a compound read to one SQLite snapshot, without inventing writes."""
+        owned = not self.db.in_transaction
+        if owned:
+            self.db.execute('BEGIN')
+        try:
+            yield
+        finally:
+            if owned:
+                self.db.execute('ROLLBACK')
+
+    @contextmanager
+    def guard_mutations(self, run_id, guard):
+        """Check a trusted precondition inside each new write transaction.
+
+        A guard may return a finalizer to persist its acceptance in the same
+        transaction after the operation succeeds. Stable-key replays bypass
+        guards: they return a committed result, never authorize new work.
+        """
+        guards = getattr(self, '_mutation_guards', ())
+        self._mutation_guards = guards + ((run_id, guard),)
+        try:
+            yield
+        finally:
+            self._mutation_guards = guards
+
     def mutate(self, run_id, key, event_type, fn, payload=None, *, run_config=None):
         """Commit event, all projection changes and outbox intent in one transaction.
 
@@ -177,7 +206,13 @@ class Store:
             last = self.db.execute('SELECT seq,event_hash FROM events WHERE run_id=? ORDER BY seq DESC LIMIT 1', (run_id,)).fetchone()
             seq, previous_hash = (last['seq'] + 1, last['event_hash']) if last else (1, config['config_hash'])
             tx = Transaction(self, run_id, seq)
+            finalizers = [guard(tx, key, event_type)
+                          for guarded_run, guard in getattr(self, '_mutation_guards', ())
+                          if guarded_run == run_id]
             result = fn(tx)
+            for finalize in finalizers:
+                if finalize is not None:
+                    finalize(tx)
             payload_ref, result_ref, changes_ref = map(self.put_blob, (payload, result, tx.changes))
             body = {'run_id': run_id, 'seq': seq, 'operation_key': key, 'event_type': event_type,
                     'input_hash': fingerprint, 'payload_ref': payload_ref, 'result_ref': result_ref,
