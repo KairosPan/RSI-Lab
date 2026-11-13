@@ -204,8 +204,9 @@ class ResearchDomainBoundaryTests(unittest.TestCase):
     def recommend_and_execute(self, rt, category='parameter_trial'):
         advice = {'change_kind': category, 'instruction': 'Measure slopes 1, 2 and 3 on the fixed regression observations.',
             'capability_id': CAPABILITY, 'capability_version': '1.0', 'expected_outcome': 'A lower measured squared loss',
+            'execution_contract_json': json.dumps({'version': 1, 'kind': 'exact_inputs', 'inputs': {'slopes': [1, 2, 3]}}),
             'measurement': 'Minimum mean squared loss among the executed slopes', 'falsifier': 'Every tested loss is at least eight'}
-        trigger = rt.observe('baseline-review', 'new_evidence', 0, ['baseline'])
+        trigger = rt.observe('baseline-review', 'input_changed', 0, ['baseline'])
         meta = Decision('recommend_change', advice)
         proposed = rt.run_meta(trigger['work_id'], meta, self.reservation)
         self.assertEqual(proposed['proposal']['status'], 'applied', proposed['proposal'])
@@ -328,9 +329,10 @@ class ResearchDomainBoundaryTests(unittest.TestCase):
 
     def test_policy_rejects_unsupported_category_before_lab_or_tool_work(self):
         rt = self.runtime()
-        trigger = rt.observe('policy-test', 'new_evidence', 0, ['baseline'])
+        trigger = rt.observe('policy-test', 'input_changed', 0, ['baseline'])
         model = Decision('recommend_change', {'change_kind': 'unsupported_strategy',
             'instruction': 'This domain policy does not authorize this category.', 'capability_id': CAPABILITY,
+            'execution_contract_json': json.dumps({'version': 1, 'kind': 'exact_inputs', 'inputs': {'slopes': [1, 2, 3]}}),
             'capability_version': '1.0', 'expected_outcome': 'A test', 'measurement': 'Loss', 'falsifier': 'No change'})
         out = rt.run_meta(trigger['work_id'], model, self.reservation)
         self.assertEqual(out['proposal']['status'], 'rejected')
@@ -346,7 +348,7 @@ class ResearchDomainBoundaryTests(unittest.TestCase):
     def test_external_adapter_fixture_delivers_grouped_untrusted_sources_to_next_lab(self):
         rt = self.runtime(external=True)
         query = {'topic': 'least_squares'}
-        meta_work = rt.observe('source-review', 'new_evidence', 0, ['baseline'])
+        meta_work = rt.observe('source-review', 'input_changed', 0, ['baseline'])
         lab_work = rt.enqueue_lab('source-owner', ['baseline'])
         payload = {'capability_id': SOURCE_CAPABILITY, 'capability_version': '1.0', 'inputs_json': json.dumps(query)}
         proposals = [rt.run_meta(meta_work['work_id'], Decision('request_diagnostic', payload), self.reservation),

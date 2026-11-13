@@ -20,7 +20,7 @@ class AgentRuntimeTests(unittest.TestCase):
         self.controller.initialize('r', max_external=2,
             budgets={k: {'limit': v, 'hard': k.endswith('calls')} for k, v in
                      {'model_calls': 20, 'tool_calls': 10, 'tokens': 10000, 'wall_seconds': 100}.items()},
-            config={'execution_mode': 'replay'})
+            config={'execution_mode': 'replay', 'open_review_interval_batches': 1})
         self.runtime = Runtime(self.store, 'r', adapters=[fixture_adapter()])
         self.reservations = {'model_calls': 1, 'tokens': 100, 'wall_seconds': 1}
         self.seen = []
