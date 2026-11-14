@@ -28,6 +28,13 @@ from .preflight import feature_report, preflight, request_report
 from . import work_claims, decision_dependencies
 
 
+COMPLETION_KIND = 'runtime_effect_completion'
+# Bump whenever recovery acquires an additional mandatory postprocessing step.
+COMPLETION_VERSION = 1
+TERMINAL_PROPOSALS = {'applied', 'rejected', 'blocked_stale', 'blocked_action'}
+TERMINAL_TURNS = {'committed', 'rejected', 'cancelled'}
+
+
 class ExistingWork(ValueError):
     def __init__(self, disposition):
         self.disposition = disposition
@@ -87,6 +94,129 @@ class Runtime:
 
     def _mutate(self, key, event, fn, payload):
         return self.store.mutate(self.run_id, key, event, fn, payload=payload)
+
+    def _completion_index(self):
+        """One read of each projection used to select recovery candidates.
+
+        Callers must verify history first. These are per-call snapshots, never
+        a verification cache or authority retained across recovery calls.
+        """
+        registrations = self.store.list(self.run_id, 'registration')
+        return {'registration': {r['id']: r for r in registrations
+                if r.get('kind') in {COMPLETION_KIND, 'adapter_publication'}},
+            'proposal': {r['id']: r for r in self.store.list(self.run_id, 'proposal')},
+            'agent_turn': {r['id']: r for r in self.store.list(self.run_id, 'agent_turn')},
+            'fact': {r['id']: r for r in self.store.list(self.run_id, 'fact')}}
+
+    def _verify_completion_blobs(self, effect, phase, index=None, verified=None):
+        """Verify frozen payloads that full event/projection verification does not traverse.
+
+        The optional byte cache lives for one recovery call only. Completed
+        Effects avoid replaying postprocessing, never their source integrity.
+        """
+        verified = {} if verified is None else verified
+        def read(ref):
+            if ref not in verified:
+                verified[ref] = self.store.read_blob(ref)
+            return verified[ref]
+        def row(kind, rid):
+            return index[kind][rid] if index is not None else self.store.get(self.run_id, kind, rid)
+        for name in ('packet_ref', 'result_ref', 'receipt_ref'):
+            if effect.get(name):
+                read(effect[name])
+        if digest(read(effect['packet_ref'])) != effect['packet_hash']:
+            raise ValueError('Completed Effect input differs from its reserved packet')
+        for name in ('plan_ref', 'context_ref', 'adapter_descriptor_ref'):
+            if effect.get('metadata', {}).get(name):
+                read(effect['metadata'][name])
+        if phase == 'model':
+            if effect['status'] == 'succeeded':
+                proposal = row('proposal', identity('proposal', effect['id']))
+                for name in ('delivery_ref', 'result_ref', 'initial_review_ref'):
+                    if proposal.get(name):
+                        read(proposal[name])
+            turn_id = effect.get('metadata', {}).get('agent_turn_id')
+            if turn_id:
+                turn = row('agent_turn', turn_id)
+                if turn.get('terminal_ref'):
+                    read(turn['terminal_ref'])
+        elif phase == 'adapter':
+            registration = row('registration', identity('publication', effect['id']))
+            publication = json.loads(read(registration['publication_ref']))
+            for source in publication['facts'] + publication['conclusions']:
+                fact = row('fact', source['id'])
+                if (digest(read(fact['content_ref'])) != digest(source['content'])
+                        or fact['kind'] != source['kind'] or fact['provenance'] != source['provenance']):
+                    raise ValueError('Completed publication differs from immutable source evidence')
+        else:
+            raise ValueError('Unsupported runtime completion phase')
+
+    def _completion_basis(self, effect, phase, index=None):
+        if effect.get('accounting_unknown') or effect['status'] not in {'succeeded', 'failed_definite'}:
+            return None
+        def row(kind, rid):
+            if index is not None:
+                return index[kind].get(rid)
+            values = self.store.list(self.run_id, kind, id=rid)
+            return values[0] if values else None
+        basis = {'processor_version': COMPLETION_VERSION, 'effect_sha256': digest(effect)}
+        if phase == 'model':
+            proposal = row('proposal', identity('proposal', effect['id']))
+            if effect['status'] == 'succeeded' and (not proposal or proposal['status'] not in TERMINAL_PROPOSALS):
+                return None
+            turn_id = effect.get('metadata', {}).get('agent_turn_id')
+            turn = row('agent_turn', turn_id) if turn_id else None
+            if turn_id and (not turn or turn['status'] not in TERMINAL_TURNS):
+                return None
+            basis.update(proposal_sha256=digest(proposal) if proposal else None,
+                         agent_turn_sha256=digest(turn) if turn else None)
+        elif phase == 'adapter':
+            publication = row('registration', identity('publication', effect['id']))
+            if effect['status'] != 'succeeded' or not publication or publication['status'] != 'complete':
+                return None
+            basis['publication_sha256'] = digest(publication)
+        else:
+            raise ValueError('Unsupported runtime completion phase')
+        return basis
+
+    def _completion_recorded(self, effect, phase, index=None):
+        basis = self._completion_basis(effect, phase, index)
+        if basis is None:
+            return False
+        rid = identity('runtime_completion', phase, effect['id'], digest(basis))
+        if index is None:
+            rows = self.store.list(self.run_id, 'registration', id=rid)
+            record = rows[0] if rows else None
+        else:
+            record = index['registration'].get(rid)
+        return bool(record and record.get('kind') == COMPLETION_KIND
+                    and record.get('phase') == phase and record.get('effect_id') == effect['id']
+                    and record.get('basis') == basis)
+
+    def _record_completion(self, effect, phase):
+        """Append only after every phase-specific durable postprocessing step.
+
+        Binding terminal projections prevents a receipt/accounting correction
+        or an unfinished native turn from hiding behind an old completion.
+        A legacy effect without this record is conservatively replayed once.
+        """
+        effect = self.store.get(self.run_id, 'effect', effect['id'])
+        if phase == 'model' and effect.get('result_ref'):
+            receipt = json.loads(self.store.read_blob(effect['result_ref']))
+            if receipt.get('recovery_requires_fencing') or receipt.get('native_writer_quiesced') is False:
+                return None
+        basis = self._completion_basis(effect, phase)
+        if basis is None:
+            return None
+        rid = identity('runtime_completion', phase, effect['id'], digest(basis))
+        def finish(tx):
+            current = tx.get('effect', effect['id'])
+            if self._completion_basis(current, phase) != basis:
+                raise ValueError('Runtime completion dependencies changed before commit')
+            return tx.insert('registration', rid, {'kind': COMPLETION_KIND,
+                'phase': phase, 'effect_id': effect['id'], 'basis': basis})
+        return self._mutate('runtime-completion:' + rid, 'runtime_effect_completed', finish,
+                            {'effect_id': effect['id'], 'phase': phase, 'basis': basis})
 
     def feature_report(self):
         """Which research features this run declares, has built and offers to the model; writes nothing."""
@@ -459,6 +589,7 @@ class Runtime:
                 self._block_agent_turn(effect, receipt.get('error') or 'Known failure has no native turn terminal')
         self._schedule_retry(effect)
         proposal = self.apply_meta(effect['id']) if effect['status'] == 'succeeded' and not effect.get('accounting_unknown') else None
+        self._record_completion(effect, 'model')
         return {'effect': effect, 'proposal': proposal}
 
     def _apply_usage_policy(self, effect):
@@ -593,7 +724,8 @@ class Runtime:
         self.store.verify_history(self.run_id)
         pid = identity('proposal', effect_id)
         existing = self.store.list(self.run_id, 'proposal', id=pid)
-        if existing and existing[0]['status'] in {'applied', 'rejected', 'blocked_stale', 'blocked_action'}:
+        if existing and existing[0]['status'] in TERMINAL_PROPOSALS:
+            self._record_completion(self.store.get(self.run_id, 'effect', effect_id), 'model')
             return existing[0]
         effect = self.store.get(self.run_id, 'effect', effect_id)
         if effect['kind'] not in {'lab', 'meta'} or effect['status'] != 'succeeded' or effect.get('accounting_unknown'):
@@ -708,9 +840,11 @@ class Runtime:
             return self._blocked_proposal(proposal,
                 'blocked_stale' if isinstance(exc, decision_dependencies.StaleDecision) else 'blocked_action', str(exc),
                 disposition=exc.disposition if isinstance(exc, ExistingWork) else None)
-        return self._mutate('applied:' + pid, 'meta_proposal_applied',
+        applied = self._mutate('applied:' + pid, 'meta_proposal_applied',
             lambda tx: tx.update('proposal', pid, {'status': 'applied', 'result_ref': tx.blob(result)}),
             {'proposal_id': pid})
+        self._record_completion(effect, 'model')
+        return applied
 
     def _blocked_proposal(self, proposal, status, reason, *, disposition=None):
         def apply(tx):
@@ -1036,16 +1170,32 @@ class Runtime:
         self.controller.tick(self.run_id)
 
     def recover(self):
+        # Controller.recover performs a real event-chain/projection verification
+        # on every call, before any completion record may suppress replay.
         effects = self.controller.recover(self.run_id)
         agent_recovery, errors = [], []
+        completion_index = self._completion_index()
+        model_complete = {e['id'] for e in self.store.list(self.run_id, 'effect')
+                          if e['kind'] in {'lab', 'meta'} and self._completion_recorded(e, 'model', completion_index)}
         # One failing item must not abort the whole recovery. Its stored state
         # is left untouched and the failure is reported for the operator.
         def failed(stage, item_id, exc):
             errors.append(recovery_error(stage, item_id, exc))
+        verified_blobs, invalid_complete = {}, set()
+        for effect in self.store.list(self.run_id, 'effect'):
+            if effect['id'] not in model_complete:
+                continue
+            try:
+                self._verify_completion_blobs(effect, 'model', completion_index, verified_blobs)
+            except Exception as exc:
+                invalid_complete.add(effect['id'])
+                failed('agent_effect', effect['id'], exc)
         # The outer receipt may be absent even though the CLI already completed.
         # Recover only this attempt's owned durable journal; never resend input.
         for effect in self.store.list(self.run_id, 'effect'):
             if effect['kind'] not in {'lab', 'meta'} or not effect.get('metadata', {}).get('agent_session_id'):
+                continue
+            if effect['id'] in model_complete:
                 continue
             try:
                 prior = json.loads(self.store.read_blob(effect['result_ref'])) if effect.get('result_ref') else {}
@@ -1065,12 +1215,16 @@ class Runtime:
             except Exception as exc:
                 failed('agent_effect', effect['id'], exc)
         # Opt-in failure policies also cover calls settled before a restart.
+        policy_failed = set()
         for effect in self.store.list(self.run_id, 'effect'):
             if effect['kind'] not in {'lab', 'meta'} or effect['status'] not in {'succeeded', 'failed_definite'}:
+                continue
+            if effect['id'] in model_complete:
                 continue
             try:
                 self._schedule_retry(self._apply_usage_policy(effect))
             except Exception as exc:
+                policy_failed.add(effect['id'])
                 failed('agent_effect', effect['id'], exc)
         proposals = []
         for delivery in self.store.list(self.run_id, 'delivery', status='materialized'):
@@ -1088,7 +1242,8 @@ class Runtime:
                     self.resume_capability(effect['id'])
                 except Exception as exc:
                     failed('capability', effect['id'], exc)
-        adapter_results = self.recover_adapters(errors=errors)
+        adapter_results = self._recover_adapters(errors=errors, completion_index=completion_index,
+                                                 verified_blobs=verified_blobs)
         if self.improvements:
             for effect in self.store.list(self.run_id,'effect',status='failed_definite'):
                 try:
@@ -1103,6 +1258,14 @@ class Runtime:
                     failed('trial', trial['id'], exc)
         for effect in [e for e in self.store.list(self.run_id, 'effect')
                        if e['kind'] in {'meta', 'lab'} and e['status'] in {'succeeded', 'failed_definite'}]:
+            if effect['id'] in model_complete:
+                # Preserve the existing report shape without re-entering a
+                # public API that repeats full history verification.
+                proposal = completion_index['proposal'].get(identity('proposal', effect['id']))
+                if (proposal is not None and effect['status'] == 'succeeded'
+                        and effect['id'] not in invalid_complete):
+                    proposals.append(proposal)
+                continue
             try:
                 receipt = json.loads(self.store.read_blob(effect['result_ref']))
                 try:
@@ -1112,6 +1275,8 @@ class Runtime:
                         self._block_agent_turn(effect, receipt.get('error') or 'Known failure has no native turn terminal')
                     if effect['status'] == 'succeeded' and not effect.get('accounting_unknown'):
                         proposals.append(self.apply_meta(effect['id']))
+                    if effect['id'] not in policy_failed:
+                        self._record_completion(effect, 'model')
                 except ValueError as exc:
                     self._block_agent_turn(effect, str(exc))
                     agent_recovery.append({'effect_id': effect['id'], 'status': 'blocked', 'reason': str(exc)})
@@ -1299,6 +1464,9 @@ class Runtime:
             if effect['metadata'].get('adapter_id',adapter_id) != adapter_id:
                 raise ValueError('Published evidence belongs to a different adapter')
             if existing[0]['status']=='complete':
+                if self._completion_recorded(effect, 'adapter'):
+                    self._verify_completion_blobs(effect, 'adapter')
+                    return publication['data']
                 semantic = self.result_signals.record_frozen(effect, publication, adapter_id,
                     existing[0].get('adapter_version'), existing[0].get('semantic_description'))
                 if self.scientific_memory and (semantic is None or semantic['reason_code'] != 'repeated_result'
@@ -1309,6 +1477,7 @@ class Runtime:
                     self.improvements.publication(effect,publication)
                 self._mutate('claims-publication:' + effect['id'], 'work_claims_reconciled',
                     work_claims.reconcile_all, {'effect_id': effect['id']})
+                self._record_completion(effect, 'adapter')
                 return publication['data']
         else:
             adapter = self.adapters.resolve(effect)
@@ -1388,6 +1557,7 @@ class Runtime:
             lambda tx:tx.update('registration',publication_id,{'status':'complete'}),{'effect_id':effect['id']})
         self._mutate('claims-publication:' + effect['id'], 'work_claims_reconciled',
             work_claims.reconcile_all, {'effect_id': effect['id']})
+        self._record_completion(effect, 'adapter')
         return publication['data']
 
     def pending_improvements(self):
@@ -1401,6 +1571,12 @@ class Runtime:
         propagates as before; with one, a recovery error row (stage ``adapter``)
         is appended and the remaining Effects are still recovered.
         """
+        self.store.verify_history(self.run_id)
+        return self._recover_adapters(errors=errors, completion_index=self._completion_index())
+
+    def _recover_adapters(self, *, errors=None, completion_index, verified_blobs=None):
+        """Internal recovery after this invocation has verified the full history."""
+        verified_blobs = {} if verified_blobs is None else verified_blobs
         results = []
         for effect in self.store.list(self.run_id, 'effect', status='succeeded'):
             if not (effect.get('metadata',{}).get('adapter_id') or effect['kind'] in self.adapters.legacy):
@@ -1408,7 +1584,10 @@ class Runtime:
             if effect.get('accounting_unknown'):
                 continue
             try:
-                self.publish_adapter_effect(effect)
+                if self._completion_recorded(effect, 'adapter', completion_index):
+                    self._verify_completion_blobs(effect, 'adapter', completion_index, verified_blobs)
+                else:
+                    self.publish_adapter_effect(effect)
                 results.append({'effect_id':effect['id'],'status':'published'})
             except (ValueError,KeyError) as exc:
                 results.append({'effect_id':effect['id'],'status':'blocked_adapter','reason':str(exc)})
