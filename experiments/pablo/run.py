@@ -212,25 +212,39 @@ def startup_preflight(runtime):
     return result
 
 
-def continuation_checkpoint(parent, new_evaluations):
-    """Retain the original research target across a paused, versioned segment."""
+def continuation_checkpoint(parent, new_evaluations, *, new_campaign=False):
+    """Retain an unfinished target, or explicitly start after its verified completion."""
+    if type(new_campaign) is not bool:
+        raise ValueError('new_campaign must be an explicit boolean')
     count = len(parent['progress']['candidates'])
     previous = parent['config'].get('research_campaign')
     if previous is not None:
-        baseline, target = previous['baseline_observations'], previous['target_new_evaluations']
+        if not isinstance(previous, dict):
+            raise ValueError('Parent research campaign must contain explicit counts')
+        baseline, target = previous.get('baseline_observations'), previous.get('target_new_evaluations')
     elif parent.get('boundary', {}).get('status') == 'paused':
         baseline, target = parent['progress']['initial_count'], parent['config']['pablo_max_new_evaluations']
     else:
         baseline, target = count, new_evaluations
     if any(type(value) is not int or value < 0 for value in (count, baseline, target, new_evaluations)):
         raise ValueError('Checkpoint counts must be explicit nonnegative integers')
+    transition = {}
+    if new_campaign:
+        if (previous is None or parent.get('boundary', {}).get('status') != 'completed'
+                or type(parent['progress'].get('remaining_evaluations')) is not int
+                or parent['progress']['remaining_evaluations'] != 0
+                or target < 1 or count - baseline != target):
+            raise ValueError('A new campaign requires a completed research campaign with its full target reached')
+        transition = {'start_mode': 'new_campaign', 'parent_campaign_sha256': digest(previous)}
+        baseline, target = count, new_evaluations
     completed = count - baseline
     if not 0 <= completed < target or not 1 <= new_evaluations <= target - completed:
         raise ValueError('Continuation checkpoint exceeds the outstanding research target')
     return {'baseline_observations': baseline, 'target_new_evaluations': target,
             'completed_before_segment': completed, 'checkpoint_new_evaluations': completed + new_evaluations,
             'segment_new_evaluations': new_evaluations,
-            'scope': 'Checkpoint within the original research target; segment completion is not full campaign completion'}
+            'scope': 'Checkpoint within the original research target; segment completion is not full campaign completion',
+            **transition}
 
 
 def resource_additions(additional_model_calls=0, additional_tokens=0, additional_tool_calls=0):
@@ -309,7 +323,8 @@ def prepare(args):
     if args.run_id == args.parent_run_id:
         raise ValueError('New continuation needs a distinct run ID')
     parent = load_parent(args.parent_root, args.parent_run_id, args.parent_source_root)
-    campaign = continuation_checkpoint(parent, args.new_evaluations)
+    new_campaign = getattr(args, 'new_campaign', False)
+    campaign = continuation_checkpoint(parent, args.new_evaluations, new_campaign=new_campaign)
     additions = resource_additions(getattr(args, 'additional_model_calls', 0),
         getattr(args, 'additional_tokens', 0), getattr(args, 'additional_tool_calls', 0))
     budgets = continuation_budgets(parent, args.max_model_calls,
@@ -352,6 +367,8 @@ def prepare(args):
     lineage['research_architecture'] = ARCHITECTURE
     lineage['parent_validated_source_root'] = parent.get('validated_source_root', str(REPO))
     lineage['research_campaign'] = campaign
+    if new_campaign:
+        lineage['parent_research_campaign'] = copy.deepcopy(parent['config']['research_campaign'])
     lineage['resource_budget_provenance'] = budget_provenance
     if parent.get('boundary'):
         lineage['parent_boundary'] = parent['boundary']
@@ -405,7 +422,11 @@ def prepare(args):
              'using its effect_id, plan_id, proposal_role and anchor_parent. Never replace its candidates or fabricate '
              'a plan. The controller requires a separate source-bound batch interpretation before the next candidate '
              'decision; the next decision receives that interpretation and the original result.')
-    goal += (f' This segment resumes at {campaign["completed_before_segment"]} of the original '
+    if new_campaign:
+        goal += (f' This explicitly requested new campaign starts from {count} inherited observations '
+                 f'and targets {campaign["target_new_evaluations"]} additional valid new scores. '
+                 'The prior campaign is complete; its observations and costs remain in lineage.')
+    goal += (f' This segment starts at {campaign["completed_before_segment"]} of the campaign\'s '
              f'{campaign["target_new_evaluations"]} requested new scores and stops at checkpoint '
              f'{campaign["checkpoint_new_evaluations"]}/{campaign["target_new_evaluations"]}. '
              'Complete the checkpoint reviews, then stop; do not continue beyond this segment quota.')
@@ -667,6 +688,8 @@ def main():
     parser.add_argument('--parent-run-id', default='pablo-200-continuation5')
     parser.add_argument('--parent-source-root', type=Path)
     parser.add_argument('--new-evaluations', type=int, default=200)
+    parser.add_argument('--new-campaign', action='store_true',
+                        help='Start an explicitly requested target after the entire parent research campaign is complete; keep historical costs and remaining resources')
     parser.add_argument('--max-model-calls', type=int,
                         help='This segment model-call limit, within carried allowance plus explicit addition (default: 600)')
     parser.add_argument('--additional-model-calls', type=int,
@@ -695,6 +718,8 @@ def main():
             parser.error(option + ' must be between 0 and 1000')
     if args.max_input_bytes is not None and not 262144 <= args.max_input_bytes <= 1048576:
         parser.error('--max-input-bytes must be between 262144 and 1048576')
+    if args.resume and args.new_campaign:
+        parser.error('--new-campaign requires a fresh run; frozen campaigns cannot be changed on resume')
     if args.resume and any(v is not None for v in (args.effort, args.max_input_bytes, args.prior_attempt_root,
                                                 args.max_recommendations, args.max_pending_recommendations,
                                                 args.max_model_calls, args.additional_model_calls, args.additional_tokens,

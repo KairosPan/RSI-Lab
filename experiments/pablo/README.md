@@ -16,7 +16,10 @@ local/challenge policy, a score-plateau adjustment, numerical literature-method
 selection, and mandatory interpretation before the next scoring decision.
 [FEEDBACK_V3.md](FEEDBACK_V3.md) separates kernel changes from host/domain changes,
 describes the exact execution path and records the offline verification scope.
-This code revision has **not** restarted the experiment.
+The code-only repair verification did not restart the experiment. A separately
+authorized follow-up now starts from 1,700 observations and targets 400 additional
+scores with `gpt-6.1-sol / high`; its frozen setup is recorded in the local
+artifact `reports/pr4-research-verification/from1700-v3-run-plan.md`.
 
 `pablo_task/oracle.py` is byte-identical to the earlier PABLO implementation;
 [`SOURCE_ORIGIN.json`](pablo_task/SOURCE_ORIGIN.json) records its origin and hashes.
@@ -81,6 +84,22 @@ The local artifact `reports/pr4-research-verification/analysis400-conclusions.md
 contains the results and limitations; campaign artifacts are not shipped with
 the source tree.
 Those runs retain their frozen v2 execution sources; v3 requires a new segment.
+
+After an entire research campaign has completed, pass `--new-campaign` with a
+fresh root and run ID to request another scoring target. For example, inheriting
+the completed 1,700 observations with `--new-campaign --new-evaluations 400`
+sets the new baseline to 1,700 and the target to 400 additional scores, ending
+at 2,100 observations. The flag requires a verified completed parent boundary,
+zero remaining segment scores, and an observation count exactly matching the
+old campaign's full target. It cannot bypass a paused or unfinished campaign,
+and it is rejected with `--resume`. Without the flag, preparation retains the
+existing campaign and refuses to extend an already completed target.
+
+The previous campaign is preserved as `parent_research_campaign` in the new
+`lineage.json`, with its hash in the new frozen campaign configuration. Previous
+segments and their costs remain in cumulative lineage. This flag changes only
+the scoring target: research-parent resource balances are still carried after
+subtracting actual spending; it does not refill any resource allowance.
 
 ## Carry and explicitly extend resources
 

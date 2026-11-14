@@ -183,6 +183,9 @@ class HostPreflightTests(unittest.TestCase):
                                      'session': {'id': role + '-session'}, 'checkpoint': {'id': role + '-checkpoint'}}
                                for role in ('lab', 'meta')}}
         parent_store.close()
+        parent_transform = overrides.pop('parent_transform', None)
+        if parent_transform is not None:
+            parent_transform(parent)
         args = argparse.Namespace(root=self.base / 'child', run_id='child', parent_root=self.base / 'parent',
                                   parent_run_id='parent', parent_source_root=self.base / 'source',
                                   new_evaluations=2, max_model_calls=24, literature_max_calls=3,
