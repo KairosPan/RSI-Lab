@@ -7,6 +7,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from dataclasses import replace
 
 from rsi_lab.adapters import Adapter
 from rsi_lab.orchestration import orchestration_config
@@ -35,6 +36,22 @@ def second_execution(effect, packet_bytes):
 def second_adapter():
     return Adapter(adapter_id='probe2', version='1', effect_kind='probe2_tool', manifest={'scope': 'probe'},
                    prepare=strict_prepare, reservations=one_tool_call, execute=second_execution, publication=one_fact)
+
+
+def receipt_identified_publication(effect, receipt):
+    result = one_fact(effect, receipt)
+    result['facts'][0]['content'] = {**receipt['result'], 'effect_id': effect['id']}
+    return result
+
+
+def stable_probe_progress(effect, publication):
+    return {'query': publication['data']['record_id'], 'state': 'fixed-input',
+            'result': publication['data'], 'new_scores': 0, 'information_units': 1}
+
+
+def zero_score_progress(effect, publication):
+    return {'query': publication['data']['record_id'], 'state': 'already-scored',
+            'result': {'accepted': 0}, 'new_scores': 0, 'information_units': 0}
 
 
 def in_order(*answers):
@@ -121,6 +138,32 @@ class StepOutcomeTests(unittest.TestCase):
         period = rt.orchestration.period(steps)
         self.assertEqual([s['effect_id'] for s in period['steps']], [steps[1]['effect_id']])
         store.verify_history('r')
+
+    def test_semantic_progress_overrides_unique_receipt_content(self):
+        adapter = replace(validating_adapter(), publication=receipt_identified_publication,
+                          progress=stable_probe_progress)
+        store, _, rt = open_run(self, config=ORCH, adapters=[adapter])
+        self.lab(rt, Scripted({'lab': lambda d: record('a')}), 4)
+        for effect in sorted(store.list('r', 'effect', kind=adapter.effect_kind), key=lambda e: e['created_seq']):
+            publication = next(p for p in store.list('r', 'registration', kind='adapter_publication')
+                               if p['effect_id'] == effect['id'])
+            rt.result_signals.record(effect, json.loads(store.read_blob(publication['publication_ref'])), adapter)
+        self.assertEqual(outcomes(rt), [('new_result', 'new_result'), ('no_result', 'repeated_result')])
+        self.assertEqual(len({f['content_ref'] for f in store.list('r', 'fact')
+                              if f['provenance'].get('effect_id')}), 2)
+
+    def test_zero_accepted_scoring_does_not_reset_no_result_period(self):
+        adapter = replace(validating_adapter(), publication=receipt_identified_publication,
+                          progress=zero_score_progress)
+        store, _, rt = open_run(self, config=ORCH, adapters=[adapter])
+        self.lab(rt, Scripted({'lab': in_order(record('a'), record('b'))}), 4)
+        for effect in sorted(store.list('r', 'effect', kind=adapter.effect_kind), key=lambda e: e['created_seq']):
+            publication = next(p for p in store.list('r', 'registration', kind='adapter_publication')
+                               if p['effect_id'] == effect['id'])
+            rt.result_signals.record(effect, json.loads(store.read_blob(publication['publication_ref'])), adapter)
+        steps = rt.orchestration.steps()
+        self.assertEqual([step['outcome'] for step in steps], ['no_result', 'no_result'])
+        self.assertEqual(len(rt.orchestration.period(steps)['steps']), 2)
 
     def test_a_new_result_resets_the_period(self):
         store, controller, rt = open_run(self, config=ORCH, adapters=[validating_adapter()])
@@ -354,7 +397,9 @@ class SignalTests(unittest.TestCase):
         store.verify_history('r')
 
     def test_signal_is_required_evidence_in_discovery_and_disposition(self):
-        store, controller, rt = open_run(self, config={**ORCH, 'max_input_bytes': 24000},
+        # Keep the required signal plus the explicit dependency manifest in
+        # budget, while the six large optional sources still require paging.
+        store, controller, rt = open_run(self, config={**ORCH, 'max_input_bytes': 30000},
                                          adapters=[validating_adapter()])
         rt.enqueue_lab('lab-1')
         executor = Scripted({'lab': lambda d: ('request_diagnostic', diag({'wrong': 1})), 'discovery': discover,
@@ -409,10 +454,10 @@ class UnchangedWithoutOrchestrationTests(unittest.TestCase):
                              'disposition': lambda d: CLOSE})
         rt.run_until_wait(executor, RES, max_steps=12)
         effects = by_seq(store.list('r', 'effect'))
-        # Identities computed on the baseline commit before this feature.
+        # Baseline now includes research dependency manifests in every request.
         self.assertEqual([e['packet_hash'] for e in effects],
-                         ['9a35bfbd5afd8f2726a8e7889e081c4c4bb3e7a28f2419c404c7d9b8fc336f1d',
-                          'c2a56d33a9d971086c6194d69e6a91fb2f525c0b3eca6c94463a858b5b17230e'])
+                         ['6a92b964b7d817973c1e34f98c471e06137358fe34d1562957f184760528527f',
+                          '889273ceb15ca270fe5d7f4ad8abc4deeb3e6515d8a1d2be4fc4f32b8634b365'])
         for effect in effects:
             self.assertNotIn('orchestration', effect['metadata'])
         for data in executor.seen:
@@ -531,14 +576,18 @@ class LabSettingsTests(unittest.TestCase):
         self.assertEqual([p['status'] for p in disposition], ['applied', 'applied'])
         store.verify_history('r')
 
-    def test_a_lab_proposal_is_checked_against_the_settings_its_effect_recorded(self):
+    def test_a_lab_packet_is_cancelled_if_its_recorded_settings_change_before_dispatch(self):
         store, controller, rt = open_run(self, config=ORCH, adapters=[validating_adapter()])
         install(store, {'disabled_tools': ['probe']}, status='trial')
         lab = rt.enqueue_lab('lab-1')
         rt.prepare_meta(lab['id'], RES)
         set_status(store, 'change-1', 'reverted')
-        result = rt.run_lab(lab['id'], Scripted({'lab': lambda d: record('a')}), RES)
-        self.assertEqual(result['proposal']['status'], 'rejected')
+        executor = Scripted({'lab': lambda d: record('a')})
+        result = rt.run_lab(lab['id'], executor, RES)
+        self.assertIsNone(result['proposal'])
+        self.assertTrue(result['effect']['never_dispatched'])
+        self.assertEqual(executor.calls, [])
+        self.assertIn('stale_decision', result)
         self.assertEqual(store.list('r', 'effect', kind='lab')[0]['metadata']['orchestration']['change_id'], 'change-1')
         self.assertIn('probe', rt.orchestration.lab_catalog(rt.capability_catalog(),
                                                             rt.orchestration.snapshot()['settings']))
@@ -1009,7 +1058,9 @@ class ReviewTests(unittest.TestCase):
         stuck = ('request_diagnostic', diag({'record_id': 'x'}, 'probe_malformed'))
         rt.run_until_wait(Scripted({'lab': lambda d: stuck}), RES, max_steps=2)
         self.assertEqual(outcomes(rt), [('unfinished', None)])
-        rt.enqueue_lab('lab-2')
+        # This is explicitly independent research work. A same-branch wakeup
+        # must now wait for the old chain's publication boundary.
+        controller.enqueue('r', 'lab', 'lab-2', 'independent-lab-2', inputs={'branch_id': 'independent'})
         executor = Scripted({'lab': in_order(record('a'), reject(None), reject(None), record('b'), none(None)),
                              'discovery': discover, 'disposition': in_order(('propose_lab_settings', GUIDE), CLOSE)})
         rt.run_until_wait(executor, RES, max_steps=30)
@@ -1064,10 +1115,10 @@ class ReviewTests(unittest.TestCase):
     def test_a_cancelled_tool_call_is_a_stop(self):
         store, controller, rt = open_run(self, config=ORCH, adapters=[validating_adapter()])
         dispatch = rt.controller.dispatch_effect
-        def refuse(run_id, effect_id, executor):
+        def refuse(run_id, effect_id, executor, **kwargs):
             if store.get(run_id, 'effect', effect_id)['kind'] == 'probe_tool':
                 raise ValueError('simulated dispatch refusal')
-            return dispatch(run_id, effect_id, executor)
+            return dispatch(run_id, effect_id, executor, **kwargs)
         rt.controller.dispatch_effect = refuse
         rt.enqueue_lab('lab-1')
         executor = Scripted({'lab': lambda d: record('a'), 'discovery': none})

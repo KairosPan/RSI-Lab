@@ -25,6 +25,20 @@ from .research_policy import normalize_research_policy
 from .driver_report import build_report
 from .orchestration import Orchestration, orchestration_config
 from .preflight import feature_report, preflight, request_report
+from . import work_claims, decision_dependencies
+
+
+COMPLETION_KIND = 'runtime_effect_completion'
+# Bump whenever recovery acquires an additional mandatory postprocessing step.
+COMPLETION_VERSION = 1
+TERMINAL_PROPOSALS = {'applied', 'rejected', 'blocked_stale', 'blocked_action'}
+TERMINAL_TURNS = {'committed', 'rejected', 'cancelled'}
+
+
+class ExistingWork(ValueError):
+    def __init__(self, disposition):
+        self.disposition = disposition
+        super().__init__(disposition['status'] + ': ' + ', '.join(disposition['owner_work_ids']))
 
 
 def recovery_error(stage, item_id, exc):
@@ -72,10 +86,137 @@ class Runtime:
         if enabled(self.config,'scientific_memory'):
             from .scientific_memory import ScientificMemory
             self.scientific_memory = ScientificMemory(store, run_id, identity_provider=scientific_identity_provider)
+        from .batch_interpretations import BatchInterpretations
+        self.batch_interpretations = BatchInterpretations(self)
         self.orchestration = Orchestration(self, orchestration) if orchestration else None
+        from .result_signals import ResultSignals
+        self.result_signals = ResultSignals(self)
 
     def _mutate(self, key, event, fn, payload):
         return self.store.mutate(self.run_id, key, event, fn, payload=payload)
+
+    def _completion_index(self):
+        """One read of each projection used to select recovery candidates.
+
+        Callers must verify history first. These are per-call snapshots, never
+        a verification cache or authority retained across recovery calls.
+        """
+        registrations = self.store.list(self.run_id, 'registration')
+        return {'registration': {r['id']: r for r in registrations
+                if r.get('kind') in {COMPLETION_KIND, 'adapter_publication'}},
+            'proposal': {r['id']: r for r in self.store.list(self.run_id, 'proposal')},
+            'agent_turn': {r['id']: r for r in self.store.list(self.run_id, 'agent_turn')},
+            'fact': {r['id']: r for r in self.store.list(self.run_id, 'fact')}}
+
+    def _verify_completion_blobs(self, effect, phase, index=None, verified=None):
+        """Verify frozen payloads that full event/projection verification does not traverse.
+
+        The optional byte cache lives for one recovery call only. Completed
+        Effects avoid replaying postprocessing, never their source integrity.
+        """
+        verified = {} if verified is None else verified
+        def read(ref):
+            if ref not in verified:
+                verified[ref] = self.store.read_blob(ref)
+            return verified[ref]
+        def row(kind, rid):
+            return index[kind][rid] if index is not None else self.store.get(self.run_id, kind, rid)
+        for name in ('packet_ref', 'result_ref', 'receipt_ref'):
+            if effect.get(name):
+                read(effect[name])
+        if digest(read(effect['packet_ref'])) != effect['packet_hash']:
+            raise ValueError('Completed Effect input differs from its reserved packet')
+        for name in ('plan_ref', 'context_ref', 'adapter_descriptor_ref'):
+            if effect.get('metadata', {}).get(name):
+                read(effect['metadata'][name])
+        if phase == 'model':
+            if effect['status'] == 'succeeded':
+                proposal = row('proposal', identity('proposal', effect['id']))
+                for name in ('delivery_ref', 'result_ref', 'initial_review_ref'):
+                    if proposal.get(name):
+                        read(proposal[name])
+            turn_id = effect.get('metadata', {}).get('agent_turn_id')
+            if turn_id:
+                turn = row('agent_turn', turn_id)
+                if turn.get('terminal_ref'):
+                    read(turn['terminal_ref'])
+        elif phase == 'adapter':
+            registration = row('registration', identity('publication', effect['id']))
+            publication = json.loads(read(registration['publication_ref']))
+            for source in publication['facts'] + publication['conclusions']:
+                fact = row('fact', source['id'])
+                if (digest(read(fact['content_ref'])) != digest(source['content'])
+                        or fact['kind'] != source['kind'] or fact['provenance'] != source['provenance']):
+                    raise ValueError('Completed publication differs from immutable source evidence')
+        else:
+            raise ValueError('Unsupported runtime completion phase')
+
+    def _completion_basis(self, effect, phase, index=None):
+        if effect.get('accounting_unknown') or effect['status'] not in {'succeeded', 'failed_definite'}:
+            return None
+        def row(kind, rid):
+            if index is not None:
+                return index[kind].get(rid)
+            values = self.store.list(self.run_id, kind, id=rid)
+            return values[0] if values else None
+        basis = {'processor_version': COMPLETION_VERSION, 'effect_sha256': digest(effect)}
+        if phase == 'model':
+            proposal = row('proposal', identity('proposal', effect['id']))
+            if effect['status'] == 'succeeded' and (not proposal or proposal['status'] not in TERMINAL_PROPOSALS):
+                return None
+            turn_id = effect.get('metadata', {}).get('agent_turn_id')
+            turn = row('agent_turn', turn_id) if turn_id else None
+            if turn_id and (not turn or turn['status'] not in TERMINAL_TURNS):
+                return None
+            basis.update(proposal_sha256=digest(proposal) if proposal else None,
+                         agent_turn_sha256=digest(turn) if turn else None)
+        elif phase == 'adapter':
+            publication = row('registration', identity('publication', effect['id']))
+            if effect['status'] != 'succeeded' or not publication or publication['status'] != 'complete':
+                return None
+            basis['publication_sha256'] = digest(publication)
+        else:
+            raise ValueError('Unsupported runtime completion phase')
+        return basis
+
+    def _completion_recorded(self, effect, phase, index=None):
+        basis = self._completion_basis(effect, phase, index)
+        if basis is None:
+            return False
+        rid = identity('runtime_completion', phase, effect['id'], digest(basis))
+        if index is None:
+            rows = self.store.list(self.run_id, 'registration', id=rid)
+            record = rows[0] if rows else None
+        else:
+            record = index['registration'].get(rid)
+        return bool(record and record.get('kind') == COMPLETION_KIND
+                    and record.get('phase') == phase and record.get('effect_id') == effect['id']
+                    and record.get('basis') == basis)
+
+    def _record_completion(self, effect, phase):
+        """Append only after every phase-specific durable postprocessing step.
+
+        Binding terminal projections prevents a receipt/accounting correction
+        or an unfinished native turn from hiding behind an old completion.
+        A legacy effect without this record is conservatively replayed once.
+        """
+        effect = self.store.get(self.run_id, 'effect', effect['id'])
+        if phase == 'model' and effect.get('result_ref'):
+            receipt = json.loads(self.store.read_blob(effect['result_ref']))
+            if receipt.get('recovery_requires_fencing') or receipt.get('native_writer_quiesced') is False:
+                return None
+        basis = self._completion_basis(effect, phase)
+        if basis is None:
+            return None
+        rid = identity('runtime_completion', phase, effect['id'], digest(basis))
+        def finish(tx):
+            current = tx.get('effect', effect['id'])
+            if self._completion_basis(current, phase) != basis:
+                raise ValueError('Runtime completion dependencies changed before commit')
+            return tx.insert('registration', rid, {'kind': COMPLETION_KIND,
+                'phase': phase, 'effect_id': effect['id'], 'basis': basis})
+        return self._mutate('runtime-completion:' + rid, 'runtime_effect_completed', finish,
+                            {'effect_id': effect['id'], 'phase': phase, 'basis': basis})
 
     def feature_report(self):
         """Which research features this run declares, has built and offers to the model; writes nothing."""
@@ -93,6 +234,8 @@ class Runtime:
         return request_report(self, work_id)
 
     def versions(self, issue_id):
+        # These are issue-local counters only. Research freshness, including
+        # issue-less decisions, is bound separately by decision_dependencies.
         if issue_id is None:
             return dict(issue_version=0, evidence_revision=0, scheduling_revision=0)
         issue = self.store.get(self.run_id, 'issue', issue_id)
@@ -160,6 +303,30 @@ class Runtime:
         return self._mutate('observe:' + event_id, 'discovery_admission', apply, payload)
 
     def _context(self, work, orchestration=None, *, read_only=False):
+        """Build the visible context and its dependency manifest in one snapshot."""
+        if not read_only:
+            role = 'lab' if work['kind'] == 'lab' else 'meta'
+            self.agents.ensure_session(role,
+                agent_instance_id=work['inputs'].get('agent_instance_id'),
+                branch_id=work['inputs'].get('branch_id', self.config.get('branch_id', 'main')),
+                runtime_binding={'model': self.config.get('model', 'gpt-6-astra'),
+                    'effort': self.config.get('effort', 'medium'), 'transport': 'codex_exec_text_v1'})
+            if self.scientific_memory:
+                self.scientific_memory.ensure_question()
+        with self.store.read_snapshot():
+            if orchestration is not None and digest(orchestration) != digest(self.orchestration.snapshot()):
+                raise decision_dependencies.StaleDecision('Orchestration changed while building the decision context')
+            agent, mode, task, options = self._build_context(work, orchestration, read_only=True)
+            selectors = list(work['inputs'].get('decision_dependency_selectors', []))
+            selectors.extend(self.batch_interpretations.dependencies(work))
+            for adapter in self.adapters.by_id.values():
+                if adapter.decision_dependencies is not None:
+                    selectors.extend(adapter.decision_dependencies(self.store, self.run_id))
+            task['decision_dependencies'] = decision_dependencies.capture(self.store, self.run_id, task,
+                list(dict.fromkeys(options['evidence_ids'] + options['required_evidence_ids'])), selectors=selectors)
+            return agent, mode, task, options
+
+    def _build_context(self, work, orchestration=None, *, read_only=False):
         """The agent, mode, task and evidence options of one Lab or Meta request.
 
         Building a request creates the role's session and the root scientific
@@ -193,6 +360,18 @@ class Runtime:
                 'authorized_source_contracts': self.config.get('authorized_source_contracts', {}),
                 'waiting': self.store.list(self.run_id, 'wait', issue_id=issue_id) if issue_id else []}}
         required = list(work['inputs'].get('required_evidence_ids', []))
+        adapter_context = {}
+        for aid, adapter in sorted(self.adapters.by_id.items()):
+            if adapter.context is not None:
+                value = adapter.context(self.store, self.run_id)
+                if not isinstance(value, dict):
+                    raise ValueError('Adapter context must be a JSON object')
+                adapter_context[aid] = value
+        if adapter_context:
+            raw_context = encode(adapter_context)
+            if len(raw_context) > 65536:
+                raise ValueError('Adapter context exceeds its 64 KiB bound')
+            task['constraints']['adapter_context'] = json.loads(raw_context)
         if self.orchestration and mode == 'lab':
             task['capability_catalog'] = self.orchestration.lab_catalog(task['capability_catalog'],
                                                                         orchestration['settings'])
@@ -212,6 +391,17 @@ class Runtime:
             loop_context, loop_required = self.improvements.context(work,mode)
             task['constraints']['research_loop'] = loop_context
             required.extend(loop_required)
+        batch_context = self.batch_interpretations.context(work)
+        if batch_context:
+            task['constraints']['batch_interpretation'] = batch_context
+            required.extend(batch_context['required_evidence_ids'])
+            if batch_context['phase'] == 'interpretation':
+                task['constraints']['interpretation_only'] = True
+                task['capability_catalog'] = {}
+                # An interpretation turn must not consume pending advice by
+                # declining/defering it merely because execution is disabled.
+                if self.improvements:
+                    task['constraints']['research_loop']['recommendations'] = []
         if work['inputs'].get('final_review_only'):
             task['constraints']['final_review_only'] = True
             task['capability_catalog'] = {}
@@ -257,6 +447,11 @@ class Runtime:
                 elif isinstance(value,list):
                     hints.extend(item for item in value if isinstance(item,str))
             query['text'] = '\n'.join(hint for hint in hints if isinstance(hint,str) and hint.strip())[:8192]
+            if batch_context:
+                query['object_ids'] = list(dict.fromkeys(query.get('object_ids', []) +
+                    batch_context['required_object_ids']))
+                query['related_evidence_ids'] = list(dict.fromkeys(query.get('related_evidence_ids', []) +
+                    batch_context['required_evidence_ids']))
             if mode == 'discovery':
                 query['exclude_interpretations'] = True
             if work['inputs'].get('final_review_only'):
@@ -291,6 +486,8 @@ class Runtime:
         work = self.store.get(self.run_id, 'work', work_id)
         if work['kind'] not in {'lab', 'meta_discovery', 'meta_disposition', 'disposition'} or work['status'] != 'ready':
             raise ValueError('An eligible Lab or Meta Work is required')
+        if self.controller.lab_blockers(self.run_id, work):
+            raise ValueError('Lab awaits its queued tool execution and publication')
         orchestration = self.orchestration.snapshot() if self.orchestration else None
         agent, mode, task, options = self._context(work, orchestration)
         if task.get('scientific_memory',{}).get('status') == 'blocked':
@@ -340,12 +537,17 @@ class Runtime:
         kind = 'lab' if mode == 'lab' else 'meta'
         return self.controller.prepare_effect(self.run_id, work_id, kind, packet['envelope_bytes'], reservations,
             'prepare-agent:' + work_id, metadata={'mode': mode, 'plan_ref': plan_ref, 'issue_id': work['issue_id'],
+                'expected_work_version': work['version'],
+                'decision_dependencies': task['decision_dependencies'],
                 'agent_session_id': session['id'], 'agent_session': session,
                 'expected_session_head': session['committed_turn'],
                 'expected_memory_revision': task['agent_state']['memory_revision'],
                 **({'research_features': self.config['research_features']} if self.config.get('research_features') else {}),
                 **({'research_policy': self.research_policy} if self.research_policy else {}),
+                **({'recommendation_admission': task['constraints']['research_loop']['recommendation_admission']}
+                   if 'recommendation_admission' in task['constraints'].get('research_loop', {}) else {}),
                 **({'final_review_only':True} if task['constraints'].get('final_review_only') else {}),
+                **({'interpretation_only': True} if task['constraints'].get('interpretation_only') else {}),
                 # The executor recomputes the response schema from this record.
                 **({'orchestration': self.orchestration.metadata(mode, orchestration)} if orchestration else {}),
                 'context_ref': self.store.put_blob(context), 'effective_context_hash': context['effective_context_hash'],
@@ -363,7 +565,17 @@ class Runtime:
             effect = self.prepare_meta(work_id, reservations)
         if effect.get('status') == 'blocked':
             return {'work': effect, 'proposal': None}
-        effect = self.controller.dispatch_effect(self.run_id, effect['id'], executor)
+        try:
+            effect = self.controller.dispatch_effect(self.run_id, effect['id'], executor)
+        except decision_dependencies.StaleDecision as exc:
+            reason = 'stale_decision: ' + str(exc)
+            cancelled = self.controller.cancel_prepared(self.run_id, effect['id'], reason,
+                                                       'stale-decision-cancel:' + effect['id'])
+            refreshed = self.controller.enqueue(self.run_id, work['kind'], 'refresh:' + effect['id'],
+                'refresh-decision:' + effect['id'], issue_id=work['issue_id'],
+                inputs={**work['inputs'], 'stale_decision_of': effect['id'], 'routing_error': reason},
+                priority=work['priority'])
+            return {'effect': cancelled, 'proposal': None, 'work': refreshed, 'stale_decision': reason}
         effect = self._apply_usage_policy(effect)
         if effect['status'] in {'succeeded', 'failed_definite'}:
             receipt = json.loads(self.store.read_blob(effect['result_ref']))
@@ -377,6 +589,7 @@ class Runtime:
                 self._block_agent_turn(effect, receipt.get('error') or 'Known failure has no native turn terminal')
         self._schedule_retry(effect)
         proposal = self.apply_meta(effect['id']) if effect['status'] == 'succeeded' and not effect.get('accounting_unknown') else None
+        self._record_completion(effect, 'model')
         return {'effect': effect, 'proposal': proposal}
 
     def _apply_usage_policy(self, effect):
@@ -511,7 +724,8 @@ class Runtime:
         self.store.verify_history(self.run_id)
         pid = identity('proposal', effect_id)
         existing = self.store.list(self.run_id, 'proposal', id=pid)
-        if existing and existing[0]['status'] in {'applied', 'rejected', 'blocked_stale', 'blocked_action'}:
+        if existing and existing[0]['status'] in TERMINAL_PROPOSALS:
+            self._record_completion(self.store.get(self.run_id, 'effect', effect_id), 'model')
             return existing[0]
         effect = self.store.get(self.run_id, 'effect', effect_id)
         if effect['kind'] not in {'lab', 'meta'} or effect['status'] != 'succeeded' or effect.get('accounting_unknown'):
@@ -535,13 +749,16 @@ class Runtime:
             sent_packet_sha256=receipt.get('sent_packet_sha256'), sent_prompt_sha256=receipt.get('sent_prompt_sha256'),
             receipt_ref=effect['receipt_ref'])
         self._commit_agent_turn(effect, receipt)
-        if self.scientific_memory:
-            self.scientific_memory.apply_updates(effect,packet,receipt.get('response'))
         if not existing:
             response = receipt.get('response')
             request = None
             command = response.get('command', {}) if isinstance(response, dict) else {}
+            stale_error = False
             try:
+                manifest = decision_dependencies.validate_binding(effect, packet['task'])
+                if manifest is None:
+                    raise decision_dependencies.StaleDecision('legacy_unversioned: a new research decision is required')
+                decision_dependencies.validate(self.store, self.run_id, manifest)
                 if not isinstance(command, dict):
                     raise ValueError('Meta command must be a closed JSON object')
                 if command.get('action') in {'narrow_request', 'replan_request'}:
@@ -556,7 +773,7 @@ class Runtime:
                     authorized_sources=self.config.get('authorized_sources', []),
                     capabilities=capabilities, request=request)
                 if validated['action'] == 'request_diagnostic':
-                    self._admit_tool_inputs(validated['payload'])
+                    self._admit_tool_inputs(validated['payload'], packet=packet, cited=validated['evidence_ids'])
                 if validated['action'] == 'propose_lab_settings':
                     self.orchestration.admit(validated)
                 research_response = self.improvements.validate(response,packet) if self.improvements else {}
@@ -571,26 +788,34 @@ class Runtime:
                 error = None
             except (ValueError, TypeError, KeyError) as exc:
                 validated, error, research_response = None, str(exc), {}
+                stale_error = isinstance(exc, decision_dependencies.StaleDecision)
             def admit(tx):
+                current_error, stale = error, stale_error
+                if current_error is None:
+                    try:
+                        decision_dependencies.validate(self.store, self.run_id, manifest)
+                    except decision_dependencies.StaleDecision as exc:
+                        current_error, stale = str(exc), True
                 result = tx.insert('proposal', pid, {'effect_id': effect_id, 'issue_id': effect['issue_id'],
-                    'status': 'rejected' if error else 'admitted', 'command': validated, 'error': error,
+                    'status': 'blocked_stale' if stale else 'rejected' if current_error else 'admitted',
+                    'command': validated, 'error': current_error,
                     **({'research_response':research_response} if self.improvements else {}),
                     'delivery_ref': tx.blob(pages), 'result_ref': None,
                     'initial_review_ref': tx.blob(initial_review_receipt(packet, response, effect_id=effect_id,
-                        response_ref=effect['receipt_ref'])) if not error and effect['metadata']['mode'] == 'discovery' and not effect['metadata'].get('agent_session_id') else None})
-                if error:
-                    self._repair(tx, effect['issue_id'], pid, error, effect_id)
+                        response_ref=effect['receipt_ref'])) if not current_error and effect['metadata']['mode'] == 'discovery' and not effect['metadata'].get('agent_session_id') else None})
+                if current_error:
+                    self._repair(tx, effect['issue_id'], pid, current_error, effect_id)
                 return result
             proposal = self._mutate('admit:' + pid, 'meta_proposal_admitted', admit,
                                    {'effect_id': effect_id, 'receipt_ref': effect['receipt_ref']})
-            if error:
+            if proposal['status'] != 'admitted':
                 return proposal
         else:
             proposal = existing[0]
         # Re-entering our own partially committed route is safe. Intervening
         # independent issue changes invalidate the still-unapplied proposal.
         iid = proposal['issue_id']
-        if iid:
+        if iid and not self.store.list(self.run_id, 'registration', id=identity('decision_commit', pid)):
             stale = False
             for event in self.store.db.execute('SELECT operation_key,changes_ref FROM events WHERE run_id=? AND seq>?',
                     (self.run_id, proposal['created_seq'])):
@@ -606,30 +831,49 @@ class Runtime:
             result = self._route(proposal)
             if self.improvements:
                 self.improvements.apply_responses(proposal,result)
+            if self.scientific_memory:
+                self.scientific_memory.apply_updates(effect,packet,receipt.get('response'))
+            self.batch_interpretations.settle_review(effect, packet)
         except (ValueError, KeyError, TypeError) as exc:
             # Data-shaped routing errors end the proposal; storage failures
             # (sqlite3.Error, unrelated OSError) propagate and leave it admitted.
-            return self._blocked_proposal(proposal, 'blocked_action', str(exc))
-        return self._mutate('applied:' + pid, 'meta_proposal_applied',
+            return self._blocked_proposal(proposal,
+                'blocked_stale' if isinstance(exc, decision_dependencies.StaleDecision) else 'blocked_action', str(exc),
+                disposition=exc.disposition if isinstance(exc, ExistingWork) else None)
+        applied = self._mutate('applied:' + pid, 'meta_proposal_applied',
             lambda tx: tx.update('proposal', pid, {'status': 'applied', 'result_ref': tx.blob(result)}),
             {'proposal_id': pid})
+        self._record_completion(effect, 'model')
+        return applied
 
-    def _blocked_proposal(self, proposal, status, reason):
+    def _blocked_proposal(self, proposal, status, reason, *, disposition=None):
         def apply(tx):
-            result = tx.update('proposal', proposal['id'], {'status': status, 'error': reason})
+            result = tx.update('proposal', proposal['id'], {'status': status, 'error': reason,
+                **({'queue_disposition': disposition} if disposition is not None else {})})
             self._repair(tx, proposal['issue_id'], proposal['id'], reason, proposal['effect_id'])
             return result
         return self._mutate('blocked:' + proposal['id'], 'proposal_blocked', apply,
-                            {'proposal_id': proposal['id'], 'status': status, 'reason': reason})
+                            {'proposal_id': proposal['id'], 'status': status, 'reason': reason,
+                             **({'queue_disposition': disposition} if disposition is not None else {})})
 
-    def _admit_tool_inputs(self, payload):
+    def _admit_tool_inputs(self, payload, *, packet=None, cited=()):
         # Dry-run the loaded adapter's side-effect-free prepare so that inputs
         # it can never accept are refused here instead of poisoning the queue.
         adapter = self.adapters.by_id.get(payload['capability_id'])
         if adapter is None:
             return
         try:
-            adapter.prepare(json.loads(payload['inputs_json']))
+            inputs = json.loads(payload['inputs_json'])
+            adapter.prepare(inputs)
+            if adapter.required_evidence is not None:
+                required = adapter.required_evidence(self.store, self.run_id, inputs)
+                if (not isinstance(required, list) or len(required) > 128
+                        or any(not isinstance(fid, str) or not fid for fid in required)):
+                    raise ValueError('Adapter required_evidence must return a bounded original fact list')
+                delivered = {p['evidence_id'] for p in (packet or {}).get('delivery_pages', [])
+                             if p.get('complete_source') and p.get('source_kind') in {'raw_fact', 'source_statement'}}
+                if not set(required).issubset(delivered.intersection(cited)):
+                    raise ValueError('Tool inputs require complete delivered and explicitly cited original evidence')
         except (ValueError, KeyError, TypeError) as exc:
             raise ValueError('Tool inputs rejected by ' + payload['capability_id'] + ': ' + str(exc)) from exc
 
@@ -640,11 +884,11 @@ class Runtime:
             self.controller._work(tx, iid, 'meta_disposition', 'repair:' + pid,
                                   inputs={'routing_error': reason}, priority=0)
         if iid is None:
-            # A Lab proposal has no issue; it gets one repair turn, and a
-            # repair turn (inputs carry repair_of) never gets another.
+            # Issue-less Lab and Meta calls each get one explicit feedback turn.
+            # A repair turn never recursively schedules another repair.
             source = tx.get('work', tx.get('effect', effect_id)['work_id'])
-            if source['kind'] == 'lab' and 'repair_of' not in source['inputs']:
-                self.controller._work(tx, None, 'lab', 'repair:' + pid,
+            if source['kind'] in {'lab', 'meta_discovery'} and 'repair_of' not in source['inputs']:
+                self.controller._work(tx, None, source['kind'], 'repair:' + pid,
                                       inputs={**source['inputs'], 'routing_error': reason, 'repair_of': pid})
 
     def _park(self, iid, dep, key, *, deadline=None, expiry='replan'):
@@ -653,6 +897,55 @@ class Runtime:
             {'kind': 'version_changed'}, deadline, expiry, key)
 
     def _route(self, proposal):
+        """Seal this exact decision with its first durable action, atomically.
+
+        Subsequent transactions only finish that already committed intent.
+        They must not reinterpret the response or compare its own writes with
+        an older dependency snapshot on crash recovery.
+        """
+        effect = self.store.get(self.run_id, 'effect', proposal['effect_id'])
+        packet = json.loads(self.store.read_blob(effect['metadata']['plan_ref']))
+        manifest = decision_dependencies.validate_binding(effect, packet['task'])
+        seal_id = identity('decision_commit', proposal['id'])
+        command_hash = digest({'command': proposal['command'],
+                               'research_response': proposal.get('research_response', {}),
+                               'response_ref': effect['result_ref']})
+        prefix = 'route:' + proposal['id']
+        legacy_committed = manifest is None and any(
+            row[0] == prefix or row[0].startswith(prefix + ':')
+            for row in self.store.db.execute('SELECT operation_key FROM events WHERE run_id=?', (self.run_id,)))
+
+        def guard(tx, key, event):
+            sealed = tx.find('registration', id=seal_id)
+            if sealed:
+                if (sealed[0]['command_sha256'] != command_hash
+                        or sealed[0]['dependency_token'] != (manifest['token'] if manifest else None)):
+                    raise ValueError('Committed decision identity differs from its frozen response')
+                return None
+            if manifest is None:
+                if not legacy_committed:
+                    raise decision_dependencies.StaleDecision('legacy_unversioned: a new research decision is required')
+            else:
+                decision_dependencies.validate(self.store, self.run_id, manifest)
+            def seal(tx):
+                tx.insert('registration', seal_id, {'kind': 'decision_commit', 'proposal_id': proposal['id'],
+                    'effect_id': effect['id'], 'command_sha256': command_hash,
+                    'dependency_token': manifest['token'] if manifest else None,
+                    'status': 'validated' if manifest else 'legacy_committed_intent',
+                    'decision_freshness': 'validated' if manifest else 'legacy_unversioned',
+                    'response_ref': effect['result_ref'],
+                    'first_operation_key': key})
+            return seal
+
+        with self.store.guard_mutations(self.run_id, guard):
+            result = self._route_command(proposal)
+            # no_action has no outbox; it still commits a checked decision and
+            # permits its same-response memory updates to follow that intent.
+            self._mutate(prefix + ':decision', 'decision_completed', lambda tx: {'proposal_id': proposal['id']},
+                         {'proposal_id': proposal['id'], 'command_sha256': command_hash})
+            return result
+
+    def _route_command(self, proposal):
         command, key = proposal['command'], 'route:' + proposal['id']
         action, p, iid = command['action'], command['payload'], command['issue_id']
         base = identity('object', proposal['id'])
@@ -699,20 +992,41 @@ class Runtime:
             wait = self._park(iid, dep, key + ':park', deadline=deadline, expiry='ask_user')
             return {'build_intent_id': intent['id'], 'work_id': work['id'], 'wait_id': wait['id']}
         if action == 'request_diagnostic':
+            source_work = self.store.get(run, 'work', self.store.get(run, 'effect', proposal['effect_id'])['work_id'])
             inputs = {**p, 'issue_id': iid, 'dependency_id': base,
-                **({'lab_continuation': True, 'source_proposal_id': proposal['id']}
+                **({'lab_continuation': True, 'source_proposal_id': proposal['id'],
+                    'lab_scope': c.lab_scope(run, source_work['inputs'])}
                    if command['mode'] == 'lab' else {})}
+            def create_diagnostic(tx):
+                wid = identity('work', None, 'diagnostic', base)
+                adapter = self.adapters.by_id.get(p['capability_id'])
+                # Existing outboxes already passed admission. Replaying them
+                # must not conflict with their own queued or completed work.
+                if not tx.find('work', id=wid) and adapter is not None:
+                    values = json.loads(p['inputs_json'])
+                    refusal = None
+                    if adapter.admit_work is not None:
+                        try:
+                            adapter.admit_work(self.store, run, values)
+                        except ValueError as exc:
+                            refusal = exc
+                    if adapter.claim_identities is not None:
+                        ids = adapter.claim_identities(self.store, run, values)
+                        claim = work_claims.acquire(tx, adapter.adapter_id, wid, ids)
+                        if claim['status'] != 'acquired':
+                            raise ExistingWork(claim)
+                    if refusal is not None:
+                        raise refusal
+                previous = tx.find('dependency', id=base)
+                if previous:
+                    if previous[0]['producer'] != p['capability_id']:
+                        raise ValueError('Diagnostic dependency producer changed')
+                else:
+                    value = {'status': 'pending'}
+                    tx.insert('dependency', base, {'producer': p['capability_id'], 'value': value,
+                        'content_hash': digest(value), 'revision': 1})
+                return c._work(tx, None, 'diagnostic', base, inputs=inputs)
             if self.improvements and proposal.get('research_response', {}).get('recommendation_responses'):
-                def create_diagnostic(tx):
-                    previous = tx.find('dependency', id=base)
-                    if previous:
-                        if previous[0]['producer'] != p['capability_id']:
-                            raise ValueError('Diagnostic dependency producer changed')
-                    else:
-                        value = {'status': 'pending'}
-                        tx.insert('dependency', base, {'producer': p['capability_id'], 'value': value,
-                            'content_hash': digest(value), 'revision': 1})
-                    return c._work(tx, None, 'diagnostic', base, inputs=inputs)
                 # A stale recommendation must roll back both the dependency
                 # and the runnable Work, not merely reject the adoption label.
                 self.improvements.apply_responses(proposal, None, create_result=create_diagnostic)
@@ -721,8 +1035,9 @@ class Runtime:
                 work = self.store.get(run, 'work', identity('work', None, 'diagnostic', base))
                 dep = self.store.get(run, 'dependency', base)
             else:
-                dep = c.dependency(run, base, p['capability_id'], {'status': 'pending'}, key + ':dependency')
-                work = c.enqueue(run, 'diagnostic', base, key + ':work', inputs=inputs)
+                work = self._mutate(key + ':diagnostic', 'diagnostic_work_admitted', create_diagnostic,
+                                    {'proposal_id': proposal['id'], 'inputs': inputs})
+                dep = self.store.get(run, 'dependency', base)
             if iid:
                 self._park(iid, dep, key + ':park', deadline=deadline)
             return work
@@ -855,16 +1170,32 @@ class Runtime:
         self.controller.tick(self.run_id)
 
     def recover(self):
+        # Controller.recover performs a real event-chain/projection verification
+        # on every call, before any completion record may suppress replay.
         effects = self.controller.recover(self.run_id)
         agent_recovery, errors = [], []
+        completion_index = self._completion_index()
+        model_complete = {e['id'] for e in self.store.list(self.run_id, 'effect')
+                          if e['kind'] in {'lab', 'meta'} and self._completion_recorded(e, 'model', completion_index)}
         # One failing item must not abort the whole recovery. Its stored state
         # is left untouched and the failure is reported for the operator.
         def failed(stage, item_id, exc):
             errors.append(recovery_error(stage, item_id, exc))
+        verified_blobs, invalid_complete = {}, set()
+        for effect in self.store.list(self.run_id, 'effect'):
+            if effect['id'] not in model_complete:
+                continue
+            try:
+                self._verify_completion_blobs(effect, 'model', completion_index, verified_blobs)
+            except Exception as exc:
+                invalid_complete.add(effect['id'])
+                failed('agent_effect', effect['id'], exc)
         # The outer receipt may be absent even though the CLI already completed.
         # Recover only this attempt's owned durable journal; never resend input.
         for effect in self.store.list(self.run_id, 'effect'):
             if effect['kind'] not in {'lab', 'meta'} or not effect.get('metadata', {}).get('agent_session_id'):
+                continue
+            if effect['id'] in model_complete:
                 continue
             try:
                 prior = json.loads(self.store.read_blob(effect['result_ref'])) if effect.get('result_ref') else {}
@@ -884,12 +1215,16 @@ class Runtime:
             except Exception as exc:
                 failed('agent_effect', effect['id'], exc)
         # Opt-in failure policies also cover calls settled before a restart.
+        policy_failed = set()
         for effect in self.store.list(self.run_id, 'effect'):
             if effect['kind'] not in {'lab', 'meta'} or effect['status'] not in {'succeeded', 'failed_definite'}:
+                continue
+            if effect['id'] in model_complete:
                 continue
             try:
                 self._schedule_retry(self._apply_usage_policy(effect))
             except Exception as exc:
+                policy_failed.add(effect['id'])
                 failed('agent_effect', effect['id'], exc)
         proposals = []
         for delivery in self.store.list(self.run_id, 'delivery', status='materialized'):
@@ -907,7 +1242,8 @@ class Runtime:
                     self.resume_capability(effect['id'])
                 except Exception as exc:
                     failed('capability', effect['id'], exc)
-        adapter_results = self.recover_adapters(errors=errors)
+        adapter_results = self._recover_adapters(errors=errors, completion_index=completion_index,
+                                                 verified_blobs=verified_blobs)
         if self.improvements:
             for effect in self.store.list(self.run_id,'effect',status='failed_definite'):
                 try:
@@ -922,6 +1258,14 @@ class Runtime:
                     failed('trial', trial['id'], exc)
         for effect in [e for e in self.store.list(self.run_id, 'effect')
                        if e['kind'] in {'meta', 'lab'} and e['status'] in {'succeeded', 'failed_definite'}]:
+            if effect['id'] in model_complete:
+                # Preserve the existing report shape without re-entering a
+                # public API that repeats full history verification.
+                proposal = completion_index['proposal'].get(identity('proposal', effect['id']))
+                if (proposal is not None and effect['status'] == 'succeeded'
+                        and effect['id'] not in invalid_complete):
+                    proposals.append(proposal)
+                continue
             try:
                 receipt = json.loads(self.store.read_blob(effect['result_ref']))
                 try:
@@ -931,6 +1275,8 @@ class Runtime:
                         self._block_agent_turn(effect, receipt.get('error') or 'Known failure has no native turn terminal')
                     if effect['status'] == 'succeeded' and not effect.get('accounting_unknown'):
                         proposals.append(self.apply_meta(effect['id']))
+                    if effect['id'] not in policy_failed:
+                        self._record_completion(effect, 'model')
                 except ValueError as exc:
                     self._block_agent_turn(effect, str(exc))
                     agent_recovery.append({'effect_id': effect['id'], 'status': 'blocked', 'reason': str(exc)})
@@ -943,6 +1289,12 @@ class Runtime:
     def execute_adapter(self, adapter_id, inputs, *, trigger_id, work_id=None):
         adapter = self.adapters.get(adapter_id)
         self._require_admitted_adapter(adapter_id)
+        direct = work_id is None
+        if direct:
+            prior = self.store.list(self.run_id, 'work',
+                id=identity('work', None, 'diagnostic', 'adapter:' + adapter_id + ':' + trigger_id))
+            if prior:
+                work_id = prior[0]['id']
         descriptor = adapter.descriptor()
         from pathlib import Path
         for path,expected_hash in descriptor['implementation_sources'].items():
@@ -950,11 +1302,23 @@ class Runtime:
                 raise ValueError('Adapter source changed while freezing the executable artifact')
         if work_id is not None:
             work = self.store.get(self.run_id, 'work', work_id)
-            if (work['kind'] != 'diagnostic' or work['inputs'].get('capability_id') != adapter_id
-                    or work['inputs'].get('capability_version') != adapter.version
-                    or json.loads(work['inputs']['inputs_json']) != inputs):
+            legacy = direct and work['inputs'] == {'adapter_id': adapter_id, 'input': inputs}
+            standard = (work['inputs'].get('capability_id') == adapter_id
+                and work['inputs'].get('capability_version') == adapter.version
+                and json.loads(work['inputs']['inputs_json']) == inputs)
+            if work['kind'] != 'diagnostic' or not (legacy or standard):
                 raise ValueError('Diagnostic invocation differs from its admitted Work')
+            if self.improvements and not work.get('effect_id'):
+                self.improvements.verify_work_contract(work)
+            if work.get('effect_id'):
+                current = self.store.get(self.run_id, 'effect', work['effect_id'])
+                self.adapters.resolve(current)
+                if current['status'] == 'prepared':
+                    return self.resume_adapter_effect(current)
+                return self._settled_adapter_effect(current)
         try:
+            self.batch_interpretations.admit_execution(adapter_id,
+                self.store.get(self.run_id, 'work', work_id) if work_id else None)
             packet = adapter.prepare(inputs)
             reservations = adapter.reservations(packet)
         except (ValueError, KeyError, TypeError) as exc:
@@ -962,8 +1326,28 @@ class Runtime:
                 raise
             return self._reject_diagnostic(work, str(exc))
         if work_id is None:
-            work = self.controller.enqueue(self.run_id, 'diagnostic', 'adapter:' + adapter_id + ':' + trigger_id,
-                'adapter-work:' + adapter_id + ':' + trigger_id, inputs={'adapter_id': adapter_id, 'input': inputs})
+            trigger = 'adapter:' + adapter_id + ':' + trigger_id
+            def enqueue(tx):
+                wid = identity('work', None, 'diagnostic', trigger)
+                if not tx.find('work', id=wid):
+                    refusal = None
+                    if adapter.admit_work is not None:
+                        try:
+                            adapter.admit_work(self.store, self.run_id, inputs)
+                        except ValueError as exc:
+                            refusal = exc
+                    if adapter.claim_identities is not None:
+                        claim = work_claims.acquire(tx, adapter_id, wid,
+                            adapter.claim_identities(self.store, self.run_id, inputs))
+                        if claim['status'] != 'acquired':
+                            raise ExistingWork(claim)
+                    if refusal is not None:
+                        raise refusal
+                return self.controller._work(tx, None, 'diagnostic', trigger,
+                    inputs={'capability_id': adapter_id, 'capability_version': adapter.version,
+                            'inputs_json': encode(inputs).decode('utf-8')})
+            work = self._mutate('adapter-work:' + adapter_id + ':' + trigger_id,
+                'diagnostic_work_admitted', enqueue, {'adapter_id': adapter_id, 'inputs': inputs})
         metadata = {'adapter_id': adapter_id, 'adapter_version': adapter.version,
             'adapter_descriptor_sha256': digest(descriptor), 'adapter_descriptor_ref': self.store.put_blob(descriptor),
             'issue_id': work['inputs'].get('issue_id'), 'dependency_id': work['inputs'].get('dependency_id'),
@@ -978,15 +1362,37 @@ class Runtime:
         current = self.store.get(self.run_id, 'effect', effect['id'])
         self.adapters.resolve(current)
         if current['status'] == 'prepared':
-            current = self.controller.dispatch_effect(self.run_id, current['id'], adapter.execute)
+            current = self._dispatch_adapter_effect(current, adapter)
         return self._settled_adapter_effect(current)
+
+    def _dispatch_adapter_effect(self, effect, adapter):
+        """Check interpretation freshness inside dispatch, before any execution."""
+        from .batch_interpretations import InterpretationBlocked
+
+        def check(current, work):
+            try:
+                self.batch_interpretations.admit_execution(adapter.adapter_id, work)
+            except ValueError as exc:
+                raise InterpretationBlocked(str(exc)) from exc
+
+        try:
+            return self.controller.dispatch_effect(self.run_id, effect['id'], adapter.execute,
+                pre_dispatch_check=check)
+        except InterpretationBlocked as exc:
+            current = self.store.get(self.run_id, 'effect', effect['id'])
+            if current['status'] != 'prepared':
+                raise
+            return self.controller.cancel_prepared(self.run_id, effect['id'], str(exc),
+                'interpretation-cancel:' + effect['id'])
 
     def resume_adapter_effect(self, effect):
         """Dispatch a persisted prepared adapter Effect; prepare is never called again."""
         adapter = self.adapters.resolve(effect)
+        if self.improvements:
+            self.improvements.verify_work_contract(self.store.get(self.run_id, 'work', effect['work_id']))
         # The capability may have lost its accepted standing since prepare.
         self._require_admitted_adapter(adapter.adapter_id)
-        current = self.controller.dispatch_effect(self.run_id, effect['id'], adapter.execute)
+        current = self._dispatch_adapter_effect(effect, adapter)
         return self._settled_adapter_effect(current)
 
     def _require_admitted_adapter(self, adapter_id):
@@ -1033,6 +1439,7 @@ class Runtime:
                 raise ValueError('Rejected diagnostic Work is no longer ready')
             failed = tx.update('work', work_id, {'status': 'failed',
                 'outcome_ref': tx.blob({'reason': reason, 'stage': 'adapter_prepare'})})
+            work_claims.reconcile_all(tx)
             if lab_inputs is not None:
                 self.controller._work(tx, None, 'lab', 'tool-rejected:' + work_id, inputs=lab_inputs)
             return failed
@@ -1057,10 +1464,20 @@ class Runtime:
             if effect['metadata'].get('adapter_id',adapter_id) != adapter_id:
                 raise ValueError('Published evidence belongs to a different adapter')
             if existing[0]['status']=='complete':
-                if self.scientific_memory:
+                if self._completion_recorded(effect, 'adapter'):
+                    self._verify_completion_blobs(effect, 'adapter')
+                    return publication['data']
+                semantic = self.result_signals.record_frozen(effect, publication, adapter_id,
+                    existing[0].get('adapter_version'), existing[0].get('semantic_description'))
+                if self.scientific_memory and (semantic is None or semantic['reason_code'] != 'repeated_result'
+                        or adapter_id in self.batch_interpretations.capabilities):
                     self.scientific_memory.observe_publication(effect,publication)
+                self.batch_interpretations.publication(effect, publication)
                 if self.improvements:
                     self.improvements.publication(effect,publication)
+                self._mutate('claims-publication:' + effect['id'], 'work_claims_reconciled',
+                    work_claims.reconcile_all, {'effect_id': effect['id']})
+                self._record_completion(effect, 'adapter')
                 return publication['data']
         else:
             adapter = self.adapters.resolve(effect)
@@ -1086,6 +1503,8 @@ class Runtime:
                 raise ValueError('Adapter conclusions must retain their interpretive identity')
             if len({r['id'] for r in rows}) != len(rows):
                 raise ValueError('Duplicate evidence identities in adapter publication')
+            covered = work_claims.normalize(adapter.completed_identities(effect, publication)) if adapter.completed_identities else []
+            semantic_description = adapter.progress(json.loads(encode(effect)), json.loads(encode(publication))) if adapter.progress else None
             def publish(tx):
                 for row in rows:
                     old = tx.find('fact', id=row['id'])
@@ -1102,12 +1521,19 @@ class Runtime:
                         tx.update('issue',iid,{'evidence_ids':sorted(set(issue['evidence_ids'])|fresh),
                                               'evidence_revision':issue['evidence_revision']+1})
                 return tx.insert('registration', publication_id, {'kind':'adapter_publication','effect_id':effect['id'],
-                    'adapter_id':adapter.adapter_id, 'status':'published', 'publication_ref':tx.blob(publication)})
+                    'adapter_id':adapter.adapter_id, 'status':'published', 'publication_ref':tx.blob(publication),
+                    'adapter_version': adapter.version, 'semantic_description': semantic_description,
+                    'covered_claim_identities': covered})
             self._mutate('adapter-publication:' + effect['id'], 'adapter_evidence_published', publish,
                          {'effect_id':effect['id'],'publication_sha256':digest(publication)})
         dep_id = effect.get('metadata',{}).get('dependency_id')
-        if self.scientific_memory:
+        published = self.store.get(self.run_id, 'registration', publication_id)
+        semantic = self.result_signals.record_frozen(effect, publication, adapter_id,
+            published.get('adapter_version'), published.get('semantic_description'))
+        if self.scientific_memory and (semantic is None or semantic['reason_code'] != 'repeated_result'
+                or adapter_id in self.batch_interpretations.capabilities):
             self.scientific_memory.observe_publication(effect,publication)
+        interpretation = self.batch_interpretations.publication(effect, publication)
         if self.improvements:
             self.improvements.publication(effect,publication)
         if dep_id:
@@ -1115,16 +1541,23 @@ class Runtime:
                 {'status':'completed','effect_id':effect['id']}, 'adapter-dependency:' + effect['id'])
             self.controller.tick(self.run_id)
         source_work = self.store.get(self.run_id, 'work', effect['work_id'])
-        if source_work['inputs'].get('lab_continuation'):
-            ids = [r['id'] for r in publication['facts'] + publication['conclusions']]
-            self.controller.enqueue(self.run_id, 'lab', 'result:' + effect['id'],
-                'lab-continuation:' + effect['id'], inputs={'evidence_ids': ids,
-                    'required_evidence_ids': [r['id'] for r in publication['facts']],
-                    'source_effect_id': effect['id']})
-        if publication['facts']:
-            self.observe('adapter:' + effect['id'], 'new_evidence', 0, [r['id'] for r in publication['facts']])
+        if source_work['inputs'].get('lab_continuation') and interpretation is None:
+            ids = semantic['canonical_evidence_ids'] if semantic else [r['id'] for r in publication['facts'] + publication['conclusions']]
+            inputs = {'evidence_ids': ids, 'required_evidence_ids': ids, 'source_effect_id': effect['id'],
+                      **self.controller.diagnostic_lab_scope(self.run_id, source_work)}
+            self._mutate('lab-continuation:' + effect['id'], 'lab_notification',
+                lambda tx: self.controller.wake_lab(tx, 'result:' + effect['id'], inputs=inputs),
+                {'effect_id': effect['id'], 'inputs': inputs})
+        if publication['facts'] and (semantic is None or semantic['is_new_result']):
+            batch = semantic['batch_index'] if semantic else len(self.store.list(self.run_id, 'registration', kind='adapter_publication'))
+            event = 'semantic:' + semantic['semantic_key'] if semantic else 'adapter:' + effect['id']
+            ids = semantic['canonical_evidence_ids'] if semantic else [r['id'] for r in publication['facts']]
+            self.observe(event, 'new_evidence', batch, ids)
         self._mutate('adapter-publication-complete:'+effect['id'],'adapter_notifications_completed',
             lambda tx:tx.update('registration',publication_id,{'status':'complete'}),{'effect_id':effect['id']})
+        self._mutate('claims-publication:' + effect['id'], 'work_claims_reconciled',
+            work_claims.reconcile_all, {'effect_id': effect['id']})
+        self._record_completion(effect, 'adapter')
         return publication['data']
 
     def pending_improvements(self):
@@ -1138,6 +1571,12 @@ class Runtime:
         propagates as before; with one, a recovery error row (stage ``adapter``)
         is appended and the remaining Effects are still recovered.
         """
+        self.store.verify_history(self.run_id)
+        return self._recover_adapters(errors=errors, completion_index=self._completion_index())
+
+    def _recover_adapters(self, *, errors=None, completion_index, verified_blobs=None):
+        """Internal recovery after this invocation has verified the full history."""
+        verified_blobs = {} if verified_blobs is None else verified_blobs
         results = []
         for effect in self.store.list(self.run_id, 'effect', status='succeeded'):
             if not (effect.get('metadata',{}).get('adapter_id') or effect['kind'] in self.adapters.legacy):
@@ -1145,7 +1584,10 @@ class Runtime:
             if effect.get('accounting_unknown'):
                 continue
             try:
-                self.publish_adapter_effect(effect)
+                if self._completion_recorded(effect, 'adapter', completion_index):
+                    self._verify_completion_blobs(effect, 'adapter', completion_index, verified_blobs)
+                else:
+                    self.publish_adapter_effect(effect)
                 results.append({'effect_id':effect['id'],'status':'published'})
             except (ValueError,KeyError) as exc:
                 results.append({'effect_id':effect['id'],'status':'blocked_adapter','reason':str(exc)})
@@ -1193,6 +1635,8 @@ class Runtime:
                 'waits': self.store.list(self.run_id, 'wait'), 'questions': self.store.list(self.run_id, 'question', status='pending'),
                 'prepared_effects': self.store.list(self.run_id, 'effect', status='prepared'),
                 'blocked_work': self.store.list(self.run_id, 'work', status='blocked'),
+                'batch_interpretations_pending': [b for b in self.batch_interpretations.rows()
+                                                  if b['status'] != 'interpreted'],
                 'blocked_proposals': [p for p in self.store.list(self.run_id, 'proposal') if p['status'].startswith('blocked') or p['status']=='rejected'],
                 'adapter_publications_pending':self.pending_adapter_publications(),
                 'effects_requiring_reconciliation': [e for e in self.store.list(self.run_id, 'effect')
@@ -1289,6 +1733,13 @@ class Runtime:
             return 'blocked_adapter', None
         if recovery_errors:
             return 'blocked_recovery', recovery_errors[0]['reason']
+        if status['batch_interpretations_pending'] and not any(
+                w['inputs'].get('batch_interpretation_id') for w in status['ready']):
+            return 'blocked_interpretation', 'A batch interpretation remains unresolved without an eligible review turn'
+        waiting_labs = [w for w in self.store.list(self.run_id, 'work', kind='lab', status='ready')
+                        if self.controller.lab_blockers(self.run_id, w)]
+        if waiting_labs:
+            return 'awaiting_producer_or_deadline', 'Lab awaits queued tool execution or publication'
         if status['ready'] or any(w['status'] in {'waiting','disposition_due','disposed'} for w in status['waits']):
             return 'awaiting_producer_or_deadline', None
         return 'quiescent', None
@@ -1374,6 +1825,8 @@ class Runtime:
                 else:
                     skipped.append({'work_id': work['id'], 'reason': str(exc)})
                 continue
+            if result.get('stale_decision'):
+                cancelled.append({'effect_id': result['effect']['id'], 'reason': result['stale_decision']})
             actions.append({'work_id': work['id'], 'effect_id': (result.get('effect') or {}).get('id'),
                 'proposal_status': (result.get('proposal') or {}).get('status'),
                 'work_status': (result.get('work') or {}).get('status')})
@@ -1385,9 +1838,10 @@ class Runtime:
                                       and self._only_unselectable_agent_work()):
             # Nothing runs, yet an obligation is left without a scheduled owner.
             attention = report['attention']
-            reason = next((name for name in ('stalled_issues', 'stopped_lab', 'sessions_requiring_recovery',
+            stalled_reason = next((name for name in ('stalled_issues', 'stopped_lab', 'sessions_requiring_recovery',
                                              'capacity_blocked_work') if attention[name]), None)
-            if reason:
+            if stalled_reason:
+                reason = stalled_reason
                 outcome = 'stalled'
         result = {'status': outcome, 'reason': reason, 'steps': actions, 'state': self.status(),
                   'recovery_errors': recovery_errors, 'skipped': skipped, 'step_errors': step_errors,
