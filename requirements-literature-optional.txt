@@ -1,0 +1,4 @@
+# Optional review backends. Install only when these providers are enabled.
+-r requirements-literature.txt
+paper-qa==2026.8.12
+edison-client==0.17.0

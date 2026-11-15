@@ -9,6 +9,7 @@ RSI-Lab 是用于研究 Lab 执行、Meta 调查与受控机制修改的代码�
 | 目录 | 职责 |
 | --- | --- |
 | `rsi_lab/` | SQLite 账本、Lab/Meta 调度、各自持久会话与工作记忆、逐事件日志、上下文交付、能力验收和恢复 |
+| `rsi_literature/` | Lab 的 Literature 子 agent 使用的文献检索、原文存储/分段交付及可选研究工具桥 |
 | `rsi_domains/tabular/` | 使用合成 CSV 的可替换领域能力与离线演示 |
 | `rsi_domains/docking/` | Docking 输入契约、领域检查、能力适配和结果核验 |
 | `docking_rsi/` | Docking 控制面的兼容 CLI 与离线演示 |
@@ -24,6 +25,10 @@ RSI-Lab 是用于研究 Lab 执行、Meta 调查与受控机制修改的代码�
 通用核心已有执行账本、证据事实、依赖、交付回执与恢复机制。SQLite 中的 `fact`、`question` 等实体按当前代码语义使用：例如 `question` 保存向用户提问的记录，并非完整的科研问题模型。
 
 通用运行器现在可调度 Lab、Meta 和已注册工具。Lab 与 Meta 各自拥有持久 Codex 会话及版本化工作记忆；新调用通过精确 thread 身份续接，原始事件逐条落盘。模型只提出受控命令，工具由 Controller 执行；工具结果登记后可安排 Lab 的下一步。运行器以明确的工作、预算和等待条件推进，不把 `no_action` 或队列暂时为空视为科学任务达标。入口、恢复和存储边界见[持久 Agent 使用说明](docs/persistent-agents.md)。
+
+Lab 现在也可通过 `request_literature` 委托具有独立持久会话的 Literature 子 agent。子 agent 在任务额度内循环调用文献工具，阶段性或最终结果连同实际交付的原文证据返回所属 Lab。文献包定义 13 个能力，包含 9 个主线与 6 个可选来源、解析器或研究项目的接口/部署桥；默认启用 6 个主线，包括无需模型凭证的 Poppler 文本提取与页面渲染。PDF 阅读沿文本定位、单页渲染、图像实际交付和视觉核对进行；模型不获得全局 shell。需凭证、模型或尚未部署的项目保持关闭，配置通过不表示已经联网验收。原生元数据接口使用标准库；SDK、模型、托管凭证与研究项目部署另行配置。用法、实测范围及内部调用成本的可见性见[文献工具使用说明](docs/literature-tools.md)。
+
+普通 Lab 轮次按外部知识缺口、当前已交付原文、所属子任务与剩余额度自主决定是否委托，任务不必明确要求检索。启用文献能力时，每轮记录可审计的 `literature_decision`；已有充分原文或只需本地观测的任务直接推进。机制与真实正反例、持续 200 次评分验证见[自主决策报告](docs/literature-autonomy-validation.md)。
 
 [系统设计 v2.1](docs/system-design.html) 仍是完整目标规格。六类 Scientific Memory 对象、全自动工程修复发布，以及可逐请求拦截 Codex 内部工具/压缩/重试的 runtime 尚未全部实现。当前 CLI 后端禁用原生工具，容量检查覆盖可观察的会话历史与本轮输入；它不声称已证明完整 provider 输入或取得模型的全部内部推理。旧 `lab_harness/` 保留为兼容执行器，不与新核心的会话或工作记忆混用。
 
@@ -52,6 +57,14 @@ python3 -m docking_rsi --root runs/docking-demo --run demo status
 
 真实模型运行需要用户自行配置 Codex CLI 和模型访问。Docking 的化学准备与计算工具另需 RDKit、Meeko 等依赖以及明确配置的 Vina 可执行文件；具体依赖和输入见 [使用说明](docs/publication-and-reproduction.md)。本仓库不附带凭证、模型权重、受体或实验数据集。
 
+文献阅读可使用 [运行配置](examples/literature-reading-run.json) 与 [工具配置](examples/literature-tools.json)。前者分别限制单次文本输入、持久会话历史和图片容量，适用于连续的请求页面、看图与回传结果；先按任务修改目标并在工具配置登记本地论文。初始化本身不调用模型：
+
+```sh
+python3 -m rsi_lab --root runs/literature-reading --run reading \
+  --literature-config examples/literature-tools.json \
+  init --config examples/literature-reading-run.json
+```
+
 ## 架构画布
 
 前端使用 Node.js 20 或更新版本，无需安装第三方运行依赖。
@@ -68,6 +81,7 @@ npm run dev
 ```sh
 python3 -m unittest discover -s tests/generic -v
 python3 -m unittest discover -s tests/v2 -v
+python3 -m unittest discover -s tests/literature -v
 python3 -m unittest discover -s tests -v
 
 cd frontend
@@ -81,6 +95,10 @@ npm run build
 ## 文档
 
 - [持久会话、工作记忆与逐事件日志](docs/persistent-agents.md)
+- [文献工具、9 个主线与 6 个可选接入](docs/literature-tools.md)
+- [Literature 子 agent：已实现协议与后续设计](docs/literature-agent-design.md)
+- [真实论文：检索、全文、看图与引用追踪验收](docs/literature-real-paper-validation.md)
+- [Lab 自主文献决策：正反例与新 200 次评估验证](docs/literature-autonomy-validation.md)
 - [通用核心与领域接口](docs/rsi-lab-core.md)
 - [Docking 控制面](docs/docking-rsi-v2.md)
 - [独立 Lab harness](docs/lab-harness-v1.md)

@@ -1,0 +1,46 @@
+{
+  "default_provider": "europe_pmc",
+  "enabled_providers": [
+    "europe_pmc",
+    "pubmed",
+    "openalex",
+    "asta",
+    "paper2skill",
+    "poppler"
+  ],
+  "timeout": 20,
+  "max_response_bytes": 2097152,
+  "max_download_bytes": 33554432,
+  "local_sources": {},
+  "connectors": {
+    "europe_pmc": {},
+    "pubmed": {},
+    "openalex": {},
+    "asta": {},
+    "unpaywall": {},
+    "paper2skill": {
+      "repository": ".tools/Paper2Agent",
+      "python": ".tools/paper2skill-venv/bin/python",
+      "timeout": 120
+    },
+    "grobid": {},
+    "langextract": {
+      "python": ".venv/bin/python",
+      "env_names": [
+        "OPENAI_API_KEY",
+        "GOOGLE_API_KEY",
+        "LANGEXTRACT_API_KEY"
+      ],
+      "timeout": 120
+    },
+    "poppler": {
+      "pdftotext_path": "pdftotext",
+      "pdfinfo_path": "pdfinfo",
+      "pdftoppm_path": "pdftoppm",
+      "timeout": 120,
+      "max_pages": 200,
+      "max_image_bytes": 524288,
+      "max_dimension": 1600
+    }
+  }
+}

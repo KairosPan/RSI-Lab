@@ -7,7 +7,7 @@ import time
 
 from .store import Store, digest, encode
 
-WORK_KINDS = {'lab', 'meta_discovery', 'meta_disposition', 'disposition', 'evidence_retrieve',
+WORK_KINDS = {'lab', 'literature', 'meta_discovery', 'meta_disposition', 'disposition', 'evidence_retrieve',
               'diagnostic', 'capability_build', 'effect_reconcile', 'trial_prepare', 'trial_settle'}
 FACT_KINDS = {'raw_fact', 'source_statement', 'hypothesis', 'validation'}
 UNSETTLED = {'prepared', 'dispatching', 'unknown'}
@@ -333,6 +333,33 @@ class Controller:
             work = tx.get('work', work_id)
             if work['status'] != 'ready':
                 raise ValueError('Work is not eligible for dispatch')
+            task_id = work['inputs'].get('literature_task_id')
+            if kind == 'literature' or task_id or metadata.get('literature_task_id'):
+                if not task_id or metadata.get('literature_task_id') != task_id:
+                    raise ValueError('Literature effects require an authentic delegated task binding')
+                task = tx.get('registration', task_id)
+                if (task.get('kind') != 'literature_task' or task['status'] != 'active'
+                        or task['task_revision'] != work['inputs'].get('task_revision')
+                        or metadata.get('task_revision') != task['task_revision']):
+                    raise ValueError('Literature task is inactive or its revision is stale')
+                if kind == 'literature':
+                    session = tx.get('agent_session', metadata['agent_session_id'])
+                    if (session['role'] != 'literature' or session['agent_instance_id'] != task['agent_instance_id']
+                            or session['branch_id'] != task['branch_id']):
+                        raise ValueError('Literature model turn does not belong to its delegated child')
+                    if reservations.get('model_calls') != 1:
+                        raise ValueError('A Literature step reserves exactly one model call')
+                elif (metadata.get('adapter_id') not in task['capability_versions'] or
+                      metadata.get('adapter_version') != task['capability_versions'][metadata['adapter_id']]):
+                    raise ValueError('Tool is outside the delegated Literature capabilities')
+                effects = [e for e in tx.find('effect') if e['metadata'].get('literature_task_id') == task_id]
+                if len(effects) >= task['max_steps']:
+                    raise ValueError('Literature task step allowance exhausted')
+                for resource in ('model_calls', 'tool_calls'):
+                    used = sum(e.get('actual_costs', {}).get(resource, 0) +
+                               e.get('held_reservations', {}).get(resource, 0) for e in effects)
+                    if used + reservations.get(resource, 0) > task['max_' + resource]:
+                        raise ValueError('Literature task budget admission denied: ' + resource)
             if tx.find('registration', id='run_lifecycle', status='finalizing') and work['kind'] not in {'effect_reconcile', 'trial_settle'}:
                 raise ValueError('Finalizing run does not admit new external work')
             if work['issue_id']:
@@ -411,6 +438,10 @@ class Controller:
             work = tx.get('work', effect['work_id'])
             if work['status'] != 'leased' or work['effect_id'] != effect_id:
                 raise ValueError('Prepared Effect no longer owns its eligible Work lease')
+            if effect['metadata'].get('literature_task_id'):
+                task = tx.get('registration', effect['metadata']['literature_task_id'])
+                if task['status'] != 'active' or task['task_revision'] != effect['metadata']['task_revision']:
+                    raise ValueError('Prepared Literature Effect belongs to an inactive or stale task')
             if work['issue_id']:
                 issue = tx.get('issue', work['issue_id'])
                 if issue['status'] != 'open' or any(issue[k] != v for k, v in work['expected_versions'].items()):
@@ -503,7 +534,8 @@ class Controller:
                 previous_result = json.loads(self.store.read_blob(effect['result_ref']))
                 if previous_result.get('recovered_from_journal') is True:
                     binding_fields = ('response', 'sent_packet_sha256', 'sent_prompt_sha256',
-                                      'provider_thread_id', 'status')
+                                      'provider_thread_id', 'status', 'sent_image_manifest',
+                                      'sent_image_manifest_sha256', 'image_delivery_verified')
                     if any(previous_result.get(field) != receipt.get(field) for field in binding_fields):
                         raise ValueError('Journal reconciliation contradicts the known execution result')
                     if (previous_result.get('protocol_valid') is False

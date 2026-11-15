@@ -40,8 +40,8 @@ class AgentState:
 
     def ensure_session(self, role, agent_instance_id=None, branch_id='main', runtime_binding=None):
         """Resolve a trusted owner's current session; never heal unknown by retry."""
-        if role not in {'lab', 'meta'}:
-            raise ValueError('Only Lab and Meta own persistent primary sessions')
+        if role not in {'lab', 'meta', 'literature'}:
+            raise ValueError('Unknown persistent agent role')
         agent_instance_id = _nonempty(agent_instance_id or role, 'Agent identity')
         branch_id = _nonempty(branch_id, 'Branch')
         owner_scope = {'task_id': self.config.get('task_id', self.run_id),
@@ -372,6 +372,8 @@ class AgentState:
                 return handoff
             if handoff['status'] != 'proposed':
                 raise ValueError('Handoff is not available')
+            if session['role'] == 'literature':
+                raise ValueError('Literature work must be delegated by Lab through its bound task')
             wid = _id('work', 'agent_handoff', handoff_id)
             tx.insert('work', wid, {'issue_id': None, 'kind': 'lab' if session['role'] == 'lab' else 'meta_discovery',
                 'trigger': 'handoff:' + handoff_id, 'expected_versions': {}, 'status': 'ready',

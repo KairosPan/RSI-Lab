@@ -1,6 +1,6 @@
-# Lab / Meta 持久会话、工作记忆与执行日志
+# Lab / Meta / Literature 持久会话、工作记忆与执行日志
 
-通用 `rsi_lab.Runtime` 把 Lab 与 Meta 接到同一 Work/Effect 控制面，同时为两者保存独立的持久 Codex 会话和工作记忆。模型输出受控命令，Controller 校验后执行已注册工具；模型不能直接修改账本、执行工具或认证科学结论。
+通用 `rsi_lab.Runtime` 把 Lab、Meta 与 Lab 委托的 Literature 子 agent 接到同一 Work/Effect 控制面，为各自保存独立的持久 Codex 会话和工作记忆。模型输出受控命令，Controller 校验后执行已注册工具；模型不能直接修改账本、执行工具或认证科学结论。文献工具配置与子任务协议见 [Literature 工具使用说明](literature-tools.md)。
 
 本页描述当前实现。完整目标契约、长期科研记忆和后续验收见[系统设计 §9](system-design.html#persistent-agent-sessions)。系统设计中的 PS01–PS12 是验收要求，不代表当前 CLI 后端已满足所有底层能力。
 
@@ -10,7 +10,7 @@
 
 | 层 | 保存内容 | 权威与共享范围 |
 | --- | --- | --- |
-| 原生 Codex 会话 | 对话消息、原生历史和可观察运行信息 | Lab 与 Meta 各用精确的 `provider_thread_id`，不使用 `--last`，也不续接对方 thread。原生文件由 Codex 保存，不作为预算或已执行状态的权威 |
+| 原生 Codex 会话 | 对话消息、原生历史和可观察运行信息 | 每个 Lab、Meta 和 Literature 实例各用精确的 `provider_thread_id`，不使用 `--last`，也不续接对方 thread。原生文件由 Codex 保存，不作为预算或已执行状态的权威 |
 | Agent 工作记忆 | 目标引用、计划、尝试、理由摘要、暂定假设、未决问题、下一步和相关来源引用 | SQLite 中追加不可变修订，按 task/run/branch/agent owner 归属；会话重建保留当前 head。内容标记为 `unverified_working_state` |
 | 执行日志 | 每次调用的原始 stdout/stderr、事件、输入、输出、错误、用量和终态 | `calls/<effect_id>/journal.jsonl` 保存逐条持久事件与 hash 链；模型无权确认水位或改写旧事件 |
 | 共享执行账本 | Work、Effect、Wait、真实回执、来源事实和资源消耗 | `ledger.sqlite3` 与 `objects/`；控制器是唯一写入入口，恢复与去重以这些状态为准 |
@@ -25,14 +25,14 @@
 1. `enqueue_lab(...)` 或 `lab-start` 创建初始 Lab Work。Meta 在已登记观察事件、问题和等待处置边界获得自己的 Work。
 2. 准备模型调用时，Runtime 读取所属 agent 的当前工作记忆，构造本轮 packet，核对原生历史前缀和容量，并预约资源。
 3. Controller 领取唯一 session turn。并发或过期调用不能越过 session head、fence 或工作记忆 revision 检查。
-4. Codex 初次调用创建持久会话；以后使用同一精确 thread 续接。正常 Lab/Meta 调用不使用 `--ephemeral`。
+4. Codex 初次调用创建持久会话；以后使用同一精确 thread 续接。正常 Lab/Meta/Literature 调用不使用 `--ephemeral`。
 5. 调用原始事件逐条落盘。已完成执行、JSON/命令是否合法、工作记忆增量是否合法分别处理。
 6. 子 Effect 结算后，由父 turn 的幂等提交推进 session head、接纳合法工作记忆增量并释放会话写入权。空增量保持原 head；非法增量保留旧状态和拒绝原因。
-7. Lab 可以请求已注册的诊断/科学适配器。控制器执行工具、登记来源事实，再创建 Lab continuation。新来源也可触发 Meta 观察工作。
+7. Lab 可以请求已注册的诊断/科学适配器。控制器执行工具、登记来源事实，再创建 Lab continuation。新来源也可触发 Meta 观察工作。Lab 委托的 Literature 任务则先在子 agent 内接收工具结果，向父 Lab 交付阶段或完成结果；子任务的每次读取不自动触发 Meta。
 
-`run-until-wait` 是有步数上限的合作式驱动器：推进当时可运行的 Lab、Meta 和已注册 diagnostic，遇到依赖、资源限制、未知调用或无工作时返回。宿主在新输入、真实结果或 deadline 到达后再次调用；它不是隐藏的后台 daemon，也不会因为等待或 `no_action` 就自动宣布科学任务成功。
+`run-until-wait` 是有步数上限的合作式驱动器：推进当时可运行的 Lab、Meta、Literature 和已注册 diagnostic，遇到依赖、资源限制、未知调用或无工作时返回。宿主在新输入、真实结果或 deadline 到达后再次调用；它不是隐藏的后台 daemon，也不会因为等待或 `no_action` 就自动宣布科学任务成功。
 
-Lab 和 Meta 的工具权限由本轮命令模式与已注册能力决定，不来自会话里曾出现的文字。当前 Lab 命令为 `request_diagnostic`、`propose_issue` 和 `no_action`。Meta 的 discovery/disposition 模式仍使用明确命令集合。
+各角色的工具权限由本轮命令模式与已注册能力决定，不来自会话里曾出现的文字。当前 Lab 命令为 `request_literature`、`request_diagnostic`、`propose_issue` 和 `no_action`。Literature 仅调用委托中固定的文献能力，并向父 Lab 发布阶段结果或完成结果。Meta 的 discovery/disposition 模式仍使用明确命令集合。
 
 ## 运行入口
 
@@ -48,7 +48,7 @@ Lab 和 Meta 的工具权限由本轮命令模式与已注册能力决定，不�
   "model": "YOUR_MODEL_ID",
   "effort": "medium",
   "max_external": 1,
-  "max_input_bytes": 65536,
+  "max_input_bytes": 131072,
   "max_effective_context_bytes": 262144,
   "max_working_memory_bytes": 16384,
   "model_reservation": {
@@ -82,7 +82,7 @@ python3 -m rsi_lab --root runs/my-task --run main status
 | `lab-start` | 为一次明确触发创建 Lab Work，可指定本轮所需的已登记证据 |
 | `lab-step` | 只推进指定 Lab Work 的一次模型决策 |
 | `meta-step` | 推进指定 Meta Work；Inspector/Worker 模式使用 Meta 自己的会话 |
-| `run-until-wait --max-steps 20` | 推进就绪的 Lab/Meta/工具工作后返回，保留尚未完成的义务 |
+| `run-until-wait --max-steps 20` | 推进就绪的 Lab/Meta/Literature/工具工作后返回，保留尚未完成的义务 |
 | `status` | 查看会话、turn、待执行/阻塞工作、预算和需要对账的 Effect |
 | `recover` | 摄取持久回执，或从所属调用日志恢复已知终态；补做幂等发布/提议处理，不盲目重发未知调用 |
 | `agent-checkpoint` | 在当前会话没有活动 turn 的安全边界保存检查点 |

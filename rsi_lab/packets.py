@@ -12,7 +12,7 @@ import hashlib
 import json
 import re
 
-from . import input_view, transport
+from . import images, input_view, transport
 
 KINDS = {'raw_fact', 'source_statement', 'hypothesis', 'validation', 'summary'}
 ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.:/-]{0,159}\Z')
@@ -26,7 +26,7 @@ def digest(value):
     return hashlib.sha256(value if isinstance(value, bytes) else value.encode('utf-8')).hexdigest()
 
 
-def make_evidence(evidence_id, content, *, kind, source, version=1, dependencies=(), summary_of=()):
+def make_evidence(evidence_id, content, *, kind, source, version=1, dependencies=(), summary_of=(), image=None):
     if not isinstance(evidence_id, str) or not ID.fullmatch(evidence_id):
         raise ValueError('Evidence needs a stable safe identifier')
     if kind not in KINDS or not isinstance(content, str) or not isinstance(source, str) or not source.strip():
@@ -42,14 +42,20 @@ def make_evidence(evidence_id, content, *, kind, source, version=1, dependencies
         raise ValueError('Only explicitly labelled summaries may claim summary sources')
     if kind == 'summary' and not summary_of:
         raise ValueError('A summary must identify its original evidence without claiming delivery')
+    if image is not None:
+        if kind not in {'raw_fact', 'source_statement'}:
+            raise ValueError('Image originals cannot be interpretations or summaries')
+        image = images.validate_image_reference(image)
     return {'evidence_id': evidence_id, 'version': version, 'kind': kind, 'source': source,
             'content': content, 'content_sha256': digest(content), 'content_bytes': len(content.encode()),
-            'dependencies': list(dependencies), 'summary_of': list(summary_of)}
+            'dependencies': list(dependencies), 'summary_of': list(summary_of),
+            **({'image': image} if image is not None else {})}
 
 
 def validate_evidence(row):
     expected = make_evidence(row['evidence_id'], row['content'], kind=row['kind'], source=row['source'],
-                            version=row['version'], dependencies=row['dependencies'], summary_of=row['summary_of'])
+                            version=row['version'], dependencies=row['dependencies'], summary_of=row['summary_of'],
+                            image=row.get('image'))
     if row != expected:
         raise ValueError('Evidence content or immutable provenance differs from its identity')
     return row
@@ -59,6 +65,8 @@ def page_evidence(evidence, *, cursor=0, max_content_bytes=4096):
     """Page exact UTF-8 text. Cursors are byte offsets, never summary substitutes."""
     validate_evidence(evidence)
     raw = evidence['content'].encode()
+    if evidence.get('image') and (cursor != 0 or max_content_bytes < len(raw)):
+        raise ValueError('A rendered image is indivisible; defer it or deliver the whole attachment')
     if type(cursor) is not int or not 0 <= cursor <= len(raw):
         raise ValueError('Invalid evidence page cursor')
     if type(max_content_bytes) is not int or max_content_bytes < 4:
@@ -83,7 +91,8 @@ def page_evidence(evidence, *, cursor=0, max_content_bytes=4096):
             'source': evidence['source'], 'from_cursor': cursor, 'to_cursor': end,
             'total_source_bytes': len(raw), 'content': content, 'content_sha256': page_hash,
             'dependencies': list(evidence['dependencies']), 'summary_of': list(evidence['summary_of']),
-            'complete_source': cursor == 0 and end == len(raw)}
+            'complete_source': cursor == 0 and end == len(raw),
+            **({'image': copy.deepcopy(evidence['image'])} if evidence.get('image') else {})}
 
 
 def validate_page(page, evidence):
@@ -94,7 +103,8 @@ def validate_page(page, evidence):
 
 
 class PacketBuilder:
-    def __init__(self, evidence_catalog, max_input_bytes=128 * 1024, *, page_bytes=4096, envelope_schema="rsi_model_request_v2"):
+    def __init__(self, evidence_catalog, max_input_bytes=128 * 1024, *, page_bytes=4096, envelope_schema="rsi_model_request_v2",
+                 max_image_bytes=images.MAX_TOTAL_IMAGE_BYTES, max_images=images.MAX_IMAGES):
         if type(max_input_bytes) is not int or max_input_bytes < 1 or type(page_bytes) is not int or page_bytes < 4:
             raise ValueError('Packet and page capacities must be positive exact byte limits')
         self.catalog = copy.deepcopy(evidence_catalog)
@@ -105,6 +115,10 @@ class PacketBuilder:
             if key != row['evidence_id']:
                 raise ValueError('Catalog identifier differs from evidence')
         self.max_input_bytes, self.page_bytes = max_input_bytes, page_bytes
+        if (type(max_image_bytes) is not int or not 0 <= max_image_bytes <= images.MAX_TOTAL_IMAGE_BYTES
+                or type(max_images) is not int or not 0 <= max_images <= images.MAX_IMAGES):
+            raise ValueError('Image count/byte limits must be bounded host configuration')
+        self.max_image_bytes, self.max_images = max_image_bytes, max_images
         self.envelope_schema = envelope_schema
 
     def _closure(self, ids):
@@ -125,7 +139,7 @@ class PacketBuilder:
               model='gpt-6-astra', effort='medium', strategy='complete', page_cursors=None,
               owner_interpretation=None, prior_review=None):
         """One exact builder shared by planning, effects and final dispatch checks."""
-        if mode not in ('lab', 'discovery', 'disposition') or strategy not in ('complete', 'paged', 'deduplicated', 'narrowed'):
+        if mode not in ('lab', 'literature', 'discovery', 'disposition') or strategy not in ('complete', 'paged', 'deduplicated', 'narrowed'):
             raise ValueError('Unknown role mode or bounded context strategy')
         if not isinstance(instruction, str) or not instruction or not isinstance(schema, dict) or not isinstance(task, dict):
             raise ValueError('Packet requires instructions, response schema and versioned task')
@@ -144,7 +158,7 @@ class PacketBuilder:
             if full and cursors.get(eid, 0) != 0:
                 raise ValueError('Required full evidence cannot use a partial cursor')
             pages.append(page_evidence(row, cursor=0 if full else cursors.get(eid, 0),
-                                      max_content_bytes=max(4, row['content_bytes']) if full else self.page_bytes))
+                                      max_content_bytes=max(4, row['content_bytes']) if full or row.get('image') else self.page_bytes))
         metadata = [{key: self.catalog[eid][key] for key in
                      ('evidence_id', 'version', 'kind', 'source', 'content_sha256', 'content_bytes', 'dependencies', 'summary_of')}
                     for eid in requested]
@@ -152,6 +166,17 @@ class PacketBuilder:
                 'delivered_pages': pages, 'required_evidence_ids': required,
                 'not_delivered_evidence_ids': [eid for eid in requested if eid not in selected],
                 'partial_evidence_ids': [p['evidence_id'] for p in pages if not p['complete_source']]}
+        attachments = []
+        for page in pages:
+            if page.get('image'):
+                image = page['image']
+                attachments.append(images.validate_image_attachment({
+                    **{key: image[key] for key in images.IMAGE_FIELDS}, 'blob_ref': image['blob_ref'],
+                    'attachment_id': page['page_id'], 'evidence_id': page['evidence_id'],
+                    'source_version': page['source_version']}))
+        image_bytes = sum(item['bytes'] for item in attachments)
+        if attachments:
+            data['attached_images'] = [{'image_index': index + 1, **item} for index, item in enumerate(attachments)]
         if owner_interpretation is not None:
             data['owner_interpretation'] = copy.deepcopy(owner_interpretation)
         if prior_review is not None:
@@ -164,15 +189,21 @@ class PacketBuilder:
         envelope = {'schema_version': self.envelope_schema, 'mode': mode, 'model': model,
                     'effort': effort, 'prompt': prompt, 'response_schema': copy.deepcopy(schema),
                     'input_view_mode': presentation}
+        if attachments:
+            envelope['image_attachments'] = attachments
         raw = encoded(envelope)
-        fitting = len(raw) <= self.max_input_bytes
+        fitting = (len(raw) <= self.max_input_bytes and image_bytes <= self.max_image_bytes
+                   and len(attachments) <= self.max_images)
         return {'status': 'ready' if fitting else 'blocked_capacity', 'strategy': strategy,
                 'envelope': envelope, 'envelope_bytes': raw, 'packet_sha256': digest(raw),
                 'prompt_sha256': digest(prompt), 'input_bytes': len(raw), 'max_input_bytes': self.max_input_bytes,
+                'image_input_bytes': image_bytes, 'image_count': len(attachments),
+                'max_image_bytes': self.max_image_bytes, 'max_images': self.max_images,
                 'delivery_pages': copy.deepcopy(pages), 'required_evidence_ids': required,
                 'deferred_evidence_ids': data['not_delivered_evidence_ids'],
                 'partial_evidence_ids': data['partial_evidence_ids'], 'task': copy.deepcopy(task),
-                'render_audit': render_audit, 'capacity_scope': 'Complete application request bytes; provider framing/token counts not inferred'}
+                'render_audit': render_audit, 'capacity_scope':
+                    'Exact text/schema/attachment manifest bytes plus separately bounded immutable PNG bytes; image tokens and provider framing not inferred'}
 
     def plan(self, **arguments):
         """Bounded remedies; never loop, summarize originals, or hide missing data."""
@@ -199,13 +230,38 @@ class PacketBuilder:
         return actual
 
 
-def present_delivery(packet, *, effect_id, sent_packet_sha256, sent_prompt_sha256, receipt_ref):
+def present_delivery(packet, *, effect_id, sent_packet_sha256, sent_prompt_sha256, receipt_ref,
+                     sent_image_manifest=None, sent_image_manifest_sha256=None, image_delivery_verified=False):
     """Controller calls only after a verified transport invocation actually sent this packet."""
     if (packet.get('status') != 'ready' or sent_packet_sha256 != packet['packet_sha256']
             or sent_prompt_sha256 != packet['prompt_sha256'] or not effect_id or not receipt_ref):
         raise ValueError('Delivery requires exact dispatched packet, prompt and receipt identities')
+    # Plans are stored as canonical JSON, which can reorder dictionary keys.
+    # The admitted wire bytes remain authoritative; compare parsed values.
+    wire = packet.get('envelope_bytes', encoded(packet['envelope']))
+    if (json.loads(wire) != packet['envelope']
+            or digest(wire) != packet['packet_sha256']
+            or digest(packet['envelope']['prompt']) != packet['prompt_sha256']):
+        raise ValueError('Presented envelope differs from the admitted request bytes')
+    expected_images = images.attachment_manifest(packet['envelope'].get('image_attachments', []))
+    page_images = []
+    for page in packet['delivery_pages']:
+        if page.get('image'):
+            image = images.validate_image_reference(page['image'])
+            page_images.append({**{key: image[key] for key in images.IMAGE_FIELDS}, 'blob_ref': image['blob_ref'],
+                'attachment_id': page['page_id'], 'evidence_id': page['evidence_id'], 'source_version': page['source_version']})
+    if images.attachment_manifest(page_images) != expected_images:
+        raise ValueError('Image source pages differ from the exact attachment manifest')
+    if expected_images and (image_delivery_verified is not True or sent_image_manifest != expected_images
+            or sent_image_manifest_sha256 != images.image_manifest_sha256(expected_images)):
+        raise ValueError('Image source delivery requires a verified real image attachment receipt')
+    if not expected_images and sent_image_manifest:
+        raise ValueError('Cannot certify unrequested image attachments')
     return [{'status': 'presented', 'effect_id': effect_id, 'packet_sha256': sent_packet_sha256,
-             'receipt_ref': receipt_ref, **copy.deepcopy(page)} for page in packet['delivery_pages']]
+             'receipt_ref': receipt_ref, **copy.deepcopy(page),
+             **({'visual_presented': True, 'image_manifest_sha256': sent_image_manifest_sha256,
+                 'image_manifest': copy.deepcopy(expected_images)}
+                if page.get('image') else {})} for page in packet['delivery_pages']]
 
 
 def acknowledge_page(delivery, *, page_id, source_version, content_sha256, raw_source_id=None):
@@ -214,6 +270,18 @@ def acknowledge_page(delivery, *, page_id, source_version, content_sha256, raw_s
             or content_sha256 != delivery.get('content_sha256')
             or digest(delivery.get('content', '')) != content_sha256):
         raise ValueError('ACK must identify a page actually presented with exact version and bytes')
+    if delivery.get('image') and (delivery.get('visual_presented') is not True
+            or not delivery.get('image_manifest_sha256')):
+        raise ValueError('Image ACK requires certified visual presentation, not a PNG pointer')
+    if delivery.get('image'):
+        image = images.validate_image_reference(delivery['image'])
+        manifest = images.attachment_manifest(delivery.get('image_manifest'))
+        expected = {**{key: image[key] for key in images.IMAGE_FIELDS}, 'blob_ref': image['blob_ref'],
+            'attachment_id': delivery['page_id'], 'evidence_id': delivery['evidence_id'],
+            'source_version': delivery['source_version']}
+        if (images.image_manifest_sha256(manifest) != delivery['image_manifest_sha256']
+                or expected not in manifest):
+            raise ValueError('Image ACK differs from its certified source attachment')
     if raw_source_id is not None and (raw_source_id != delivery['evidence_id'] or delivery['source_kind'] == 'summary'):
         raise ValueError('A summary, pointer, or another record cannot acknowledge original evidence')
     return {**copy.deepcopy(delivery), 'status': 'acked', 'raw_source_ack': raw_source_id is not None}

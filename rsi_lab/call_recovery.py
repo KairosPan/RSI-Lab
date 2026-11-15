@@ -16,7 +16,8 @@ import uuid
 from .store import digest
 from .journal import read_journal
 from .transport import _json, audited_events
-from .session_context import find_owned_rollout, read_native_snapshot
+from .session_context import find_owned_rollout, read_native_snapshot, snapshot_from_bytes, verify_snapshot_images
+from . import images
 
 
 class RecoveryBlocked(ValueError):
@@ -93,6 +94,12 @@ def recover_codex_receipt(effect, packet_bytes, calls_root):
     invocation = _object(folder / 'invocation.json')
     _same(invocation.get('model'), request['model'], 'invocation model differs')
     _same(invocation.get('effort'), request['effort'], 'invocation effort differs')
+    expected_images = images.attachment_manifest(request.get('image_attachments', []))
+    image_delivery_verified = False
+    try:
+        images.verify_image_transport(folder, expected_images, invocation)
+    except (ValueError, OSError, KeyError, TypeError) as exc:
+        raise RecoveryBlocked('recovery_image_mismatch', 'Image bytes or dispatch audit cannot be certified') from exc
     # Read all evidence before interpreting it. The frontier excludes an
     # unconfirmed/torn suffix even when its bytes happen to look like a terminal.
     _read(journal_path)
@@ -123,6 +130,11 @@ def recover_codex_receipt(effect, packet_bytes, calls_root):
     recorded_invocation = start.get('invocation', {})
     for key in ('model', 'effort', 'command', 'cwd', 'session'):
         _same(recorded_invocation.get(key), invocation.get(key), 'invocation ' + key + ' changed')
+    if expected_images:
+        _same(recorded_invocation.get('requested_image_manifest'), expected_images,
+              'journal image request differs from immutable packet')
+        _same(recorded_invocation.get('requested_image_manifest_sha256'), images.image_manifest_sha256(expected_images),
+              'journal image manifest hash differs')
     binding = recorded_invocation.get('session')
     if not isinstance(binding, dict):
         raise RecoveryBlocked('recovery_binding_mismatch', 'journal has no native session binding')
@@ -218,6 +230,15 @@ def recover_codex_receipt(effect, packet_bytes, calls_root):
         native_path = find_owned_rollout(binding['codex_home'], thread_id, workspace)
         snapshot = read_native_snapshot(native_path, expected_thread_id=thread_id,
                                         expected_cwd=workspace, expected_prefix=prior)
+        before_record = 0
+        if prior:
+            before = snapshot_from_bytes(_read(native_path)[:prior['prefix_bytes']], expected_thread_id=thread_id,
+                                         expected_cwd=workspace)
+            before_record = before['record_count']
+        image_check = verify_snapshot_images(snapshot, expected_images, after_record=before_record)
+        if expected_images:
+            context.update(image_check)
+            image_delivery_verified = True
         if saved is not None and saved.get('native_session_sha256'):
             _same(snapshot['prefix_sha256'], saved['native_session_sha256'], 'native terminal snapshot changed')
         context.update(native_session_ref=str(native_path), native_session_sha256=snapshot['prefix_sha256'],
@@ -244,6 +265,9 @@ def recover_codex_receipt(effect, packet_bytes, calls_root):
             'parse_error': parse_error, 'error': '; '.join(errors) if errors else None,
             'receipt_ref': str(evidence_path), 'receipt_sha256': digest(_read(evidence_path)),
             'sent_packet_sha256': expected_hash, 'sent_prompt_sha256': digest(prompt),
+            **({'sent_image_manifest': expected_images,
+                'sent_image_manifest_sha256': images.image_manifest_sha256(expected_images),
+                'image_delivery_verified': image_delivery_verified} if expected_images else {}),
             'unknown_usage_is_zero': False, 'recovered_from_journal': True,
             'native_writer_quiesced': quiesced, 'recovery_requires_fencing': not quiesced,
             'reconciliation': {'effect_id': effect_id, 'provenance': 'verified local durable execution journal'}}

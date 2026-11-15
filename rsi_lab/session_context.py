@@ -13,19 +13,21 @@ and automatic internal requests need a separately registered runtime adapter;
 from __future__ import annotations
 
 import copy
+import base64
 import json
 from pathlib import Path
 import re
 
 from .store import digest, encode
+from . import images
 
 CONTRACT = 'codex-observable-rollout-v1'
 THREAD_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]{0,159}\Z')
 COMPACTION_KINDS = {'compacted', 'compaction', 'context_compaction', 'compaction_trigger',
                     'context_compacted', 'thread_rolled_back', 'thread_rollback'}
-# The first implementation supports the text-only no-native-tools transport.
+# Only text and bounded inline PNG inputs are supported; native tools remain forbidden.
 RESPONSE_KINDS = {'message', 'reasoning'}
-OUTER_KINDS = {'session_meta', 'turn_context', 'response_item', 'event_msg'}
+OUTER_KINDS = {'session_meta', 'turn_context', 'response_item', 'event_msg', 'world_state', 'token_usage_record'}
 
 
 class ContextUnavailable(ValueError):
@@ -53,6 +55,20 @@ def _identity(thread_id):
         raise ValueError('A safe exact provider thread identity is required')
 
 
+def _inline_image(value):
+    if not isinstance(value, str) or not value.startswith('data:image/png;base64,'):
+        raise ValueError('Native images must retain inline PNG bytes, not paths or remote URLs')
+    data = value.split(',', 1)[1]
+    if len(data) > 4 * ((images.MAX_IMAGE_BYTES + 2) // 3):
+        raise ValueError('Native image exceeds the admitted PNG size limit')
+    raw = base64.b64decode(data, validate=True)
+    if base64.b64encode(raw).decode('ascii') != data:
+        raise ValueError('Native image base64 is not canonical')
+    width, height = images.png_dimensions(raw)
+    return {'media_type': 'image/png', 'sha256': digest(raw), 'bytes': len(raw),
+            'width': width, 'height': height}, len(data)
+
+
 def snapshot_from_bytes(raw, *, expected_thread_id, expected_cwd, expected_prefix=None):
     """Parse a complete local rollout, preserving every byte in its identity.
 
@@ -72,6 +88,7 @@ def snapshot_from_bytes(raw, *, expected_thread_id, expected_cwd, expected_prefi
         if expected_prefix.get('provider_thread_id') != expected_thread_id:
             raise ContextUnavailable('session_owner_mismatch', 'prefix belongs to another thread')
     records, messages, contexts, metadata, unsupported = [], [], [], [], []
+    image_inputs, image_bytes, image_encoding_bytes = [], 0, 0
     for number, line in enumerate(raw.splitlines(), 1):
         if not line.strip():
             raise ContextUnavailable('stream_incomplete', f'empty rollout record {number}')
@@ -91,20 +108,63 @@ def snapshot_from_bytes(raw, *, expected_thread_id, expected_cwd, expected_prefi
             metadata.append(payload)
         elif kind == 'turn_context':
             contexts.append(payload)
+        elif kind == 'world_state':
+            if set(payload) != {'full', 'state'} or type(payload['full']) is not bool or not isinstance(payload['state'], dict):
+                unsupported.append({'record': number, 'kind': 'invalid_world_state'})
+            # An opaque audit snapshot is byte-accounted, never evidence or a
+            # new source of tool execution authority.
+        elif kind == 'token_usage_record':
+            expected = {'thread_id', 'turn_id', 'session_id', 'root_turn_id', 'response_id',
+                        'usage', 'turn_token_usage', 'thread_token_usage'}
+            counters = {'input_tokens', 'cached_input_tokens', 'cache_write_input_tokens',
+                        'output_tokens', 'reasoning_output_tokens', 'total_tokens'}
+            if (set(payload) != expected or payload.get('thread_id') != expected_thread_id
+                    or any(not isinstance(payload.get(key), str) or not payload[key] for key in
+                           ('turn_id', 'session_id', 'root_turn_id', 'response_id'))
+                    or any(not isinstance(payload.get(key), dict) or set(payload[key]) != counters
+                           or any(type(value) is not int or value < 0 for value in payload[key].values())
+                           for key in ('usage', 'turn_token_usage', 'thread_token_usage'))):
+                unsupported.append({'record': number, 'kind': 'invalid_token_usage_record'})
         elif kind == 'response_item':
             item_kind = payload.get('type')
             if item_kind not in RESPONSE_KINDS:
                 unsupported.append({'record': number, 'kind': item_kind})
             elif item_kind == 'message':
                 content = payload.get('content')
-                if (payload.get('role') not in {'system', 'developer', 'user', 'assistant'}
-                        or not isinstance(content, list)
-                        or any(not isinstance(item, dict) or item.get('type') not in {'input_text', 'output_text'}
-                               or not isinstance(item.get('text'), str) for item in content)):
-                    unsupported.append({'record': number, 'kind': 'non_text_message'})
-                else:
+                try:
+                    if payload.get('role') not in {'system', 'developer', 'user', 'assistant'} or not isinstance(content, list):
+                        raise ValueError('Invalid message')
+                    texts, attached = [], []
+                    for item in content:
+                        if not isinstance(item, dict):
+                            raise ValueError('Invalid content item')
+                        if item.get('type') in {'input_text', 'output_text'} and isinstance(item.get('text'), str):
+                            texts.append(item['text'])
+                        elif (payload['role'] == 'user' and item.get('type') == 'input_image'
+                                and not set(item) - {'type', 'image_url', 'detail'}):
+                            image, encoded_bytes = _inline_image(item.get('image_url'))
+                            attached.append(image)
+                            image_inputs.append({'record': number, **image})
+                            image_bytes += image['bytes']
+                            image_encoding_bytes += encoded_bytes
+                        else:
+                            raise ValueError('Unsupported message modality')
                     messages.append({'record': number, 'role': payload['role'],
-                        'content': '\n'.join(item['text'] for item in content), 'item_hash': digest(payload)})
+                        'content': '\n'.join(texts), 'item_hash': digest(payload),
+                        **({'images': attached} if attached else {})})
+                except (ValueError, TypeError):
+                    unsupported.append({'record': number, 'kind': 'unsupported_message_content'})
+        elif kind == 'event_msg' and payload.get('type') == 'user_message':
+            # Some Codex versions duplicate inline images in their user event.
+            # Account for both observed copies without granting either read rights.
+            for value in payload.get('images', []) or []:
+                if isinstance(value, str) and value.startswith('data:image/'):
+                    try:
+                        image, encoded_bytes = _inline_image(value)
+                        image_bytes += image['bytes']
+                        image_encoding_bytes += encoded_bytes
+                    except (ValueError, TypeError):
+                        unsupported.append({'record': number, 'kind': 'unsupported_event_image'})
     if len(metadata) != 1 or metadata[0].get('id') != expected_thread_id:
         raise ContextUnavailable('session_owner_mismatch', 'rollout session_meta does not match thread')
     wanted_cwd = str(Path(expected_cwd).resolve())
@@ -122,6 +182,9 @@ def snapshot_from_bytes(raw, *, expected_thread_id, expected_cwd, expected_prefi
             'messages': messages, 'messages_sha256': digest(messages),
             'context_records_sha256': digest(contexts), 'context_record_count': len(contexts),
             'observable_history_bytes': len(raw), 'provider_context_verified': False,
+            'observable_text_history_bytes': len(raw) - image_encoding_bytes,
+            'observable_image_bytes': image_bytes, 'image_inputs': image_inputs,
+            'image_inputs_sha256': digest(image_inputs),
             'read_authority': 'none; current-request delivery must be certified separately',
             'compaction_supported': False,
             'verified_parent_prefix': ({'prefix_bytes': expected_prefix['prefix_bytes'],
@@ -183,6 +246,7 @@ def validate_rollout_extension(before, after):
 
 def build_effective_context(packet, *, session_id, owner, snapshot=None,
                             working_memory_revision=None, max_input_bytes=131072,
+                            max_image_bytes=images.MAX_HISTORY_IMAGE_BYTES,
                             max_input_tokens=None, output_reserve_tokens=0,
                             token_counter=None, tokenizer_id=None,
                             runtime_overhead_bytes=0, runtime_overhead_tokens=0):
@@ -203,22 +267,29 @@ def build_effective_context(packet, *, session_id, owner, snapshot=None,
     if max_input_bytes < 1 or (max_input_tokens is not None and
                               (type(max_input_tokens) is not int or max_input_tokens < 1)):
         raise ValueError('Context capacity must be positive')
+    if type(max_image_bytes) is not int or not 0 <= max_image_bytes <= 64 * images.MAX_IMAGE_BYTES:
+        raise ValueError('Effective image bytes require an explicit bounded capacity')
     if token_counter is not None and (not callable(token_counter) or not isinstance(tokenizer_id, str) or not tokenizer_id):
         raise ValueError('A token counter needs its registered tokenizer identity')
     raw = packet if isinstance(packet, bytes) else encode(packet)
     try:
         text = raw.decode('utf-8')
-        _json(text)
+        request = _json(text)
     except (UnicodeError, ValueError) as exc:
         raise ValueError('Packet must be exact UTF-8 JSON bytes') from exc
-    history_bytes = 0
+    submitted_images = images.attachment_manifest(request.get('image_attachments', [])) if isinstance(request, dict) else []
+    new_image_bytes = sum(image['bytes'] for image in submitted_images)
+    history_bytes, history_image_bytes = 0, 0
     if snapshot is not None:
         if (snapshot.get('contract') != CONTRACT or snapshot.get('compaction_supported') is not False
                 or snapshot.get('provider_context_verified') is not False):
             raise ContextUnavailable('context_unverifiable', 'unsupported snapshot contract')
-        history_bytes = snapshot.get('observable_history_bytes')
+        history_bytes = snapshot.get('observable_text_history_bytes', snapshot.get('observable_history_bytes'))
+        history_image_bytes = snapshot.get('observable_image_bytes', 0)
         if type(history_bytes) is not int or history_bytes < 1:
             raise ContextUnavailable('context_unverifiable', 'invalid observable history byte count')
+        if type(history_image_bytes) is not int or history_image_bytes < 0:
+            raise ContextUnavailable('context_unverifiable', 'invalid observable image byte count')
     current_tokens = token_counter(text) if token_counter is not None else len(raw)
     if type(current_tokens) is not int or current_tokens < 0:
         raise ValueError('Tokenizer returned an invalid count')
@@ -228,13 +299,19 @@ def build_effective_context(packet, *, session_id, owner, snapshot=None,
     input_bytes = history_bytes + len(raw) + runtime_overhead_bytes
     input_token_bound = history_bytes + current_tokens + runtime_overhead_tokens
     total_token_bound = input_token_bound + output_reserve_tokens
-    fitting = input_bytes <= max_input_bytes and (max_input_tokens is None or total_token_bound <= max_input_tokens)
+    total_image_bytes = history_image_bytes + new_image_bytes
+    fitting = (input_bytes <= max_input_bytes and total_image_bytes <= max_image_bytes
+               and (max_input_tokens is None or total_token_bound <= max_input_tokens))
     manifest = {'contract': CONTRACT, 'session_id': session_id, 'owner': copy.deepcopy(owner),
         'submitted_input_hash': digest(raw), 'working_memory_revision': working_memory_revision,
         'native_prefix_hash': snapshot.get('prefix_sha256') if snapshot else None,
         'native_snapshot_hash': digest(snapshot) if snapshot else None,
         'native_thread_id': snapshot.get('provider_thread_id') if snapshot else None,
         'observable_history_bytes': history_bytes, 'new_input_bytes': len(raw),
+        'observable_history_image_bytes': history_image_bytes, 'new_image_bytes': new_image_bytes,
+        'total_image_bytes': total_image_bytes, 'max_image_bytes': max_image_bytes,
+        'image_input_manifest_sha256': images.image_manifest_sha256(submitted_images),
+        'image_tokens_measured': False, 'image_token_bound': None if total_image_bytes else 0,
         'runtime_overhead_bytes': runtime_overhead_bytes, 'input_bytes': input_bytes,
         'observable_input_token_bound': input_token_bound, 'output_reserve_tokens': output_reserve_tokens,
         'total_token_bound': total_token_bound,
@@ -242,11 +319,25 @@ def build_effective_context(packet, *, session_id, owner, snapshot=None,
         'history_token_method': 'complete-rollout-bytes-conservative-estimate-v1',
         'runtime_overhead_tokens': runtime_overhead_tokens, 'provider_context_verified': False,
         'retained_read_authority': False,
-        'capacity_scope': 'Observable persisted rollout plus complete application request; hidden provider context is not certified'}
+        'capacity_scope': 'Observable text history/request plus independently bounded image bytes; image tokens and hidden provider context are not certified'}
     return {'status': 'ready' if fitting else 'blocked_capacity', 'manifest': manifest,
             'effective_context_hash': digest(manifest), 'max_input_bytes': max_input_bytes,
+            'max_image_bytes': max_image_bytes,
             'max_input_tokens': max_input_tokens,
             'reason': None if fitting else 'Persistent observable history and new input exceed the registered context budget'}
+
+
+def verify_snapshot_images(snapshot, expected, *, after_record=0):
+    """Bind this turn's actual native image inputs; historic images grant no ACK."""
+    manifest = images.attachment_manifest(expected)
+    keys = ('media_type', 'sha256', 'bytes', 'width', 'height')
+    wanted = [{key: item[key] for key in keys} for item in manifest]
+    observed = [{key: item[key] for key in keys} for item in snapshot.get('image_inputs', [])
+                if item['record'] > after_record]
+    if observed != wanted:
+        raise ContextUnavailable('image_delivery_mismatch', 'native image inputs differ from this exact request')
+    return {'image_input_manifest_sha256': images.image_manifest_sha256(manifest),
+            'native_image_count': len(observed), 'native_image_inputs_verified': True}
 
 
 def retained_source_candidates(snapshot, history_pages, *, authorized_source_ids, current_versions):
