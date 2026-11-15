@@ -193,7 +193,7 @@ class ImageEvidenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             counters = dict.fromkeys(('input_tokens', 'cached_input_tokens', 'cache_write_input_tokens',
                 'output_tokens', 'reasoning_output_tokens', 'total_tokens'), 0)
-            usage = {'thread_id': test_call_recovery.THREAD, 'turn_id': 'turn-1', 'session_id': 'session-1',
+            usage = {'thread_id': test_call_recovery.THREAD, 'turn_id': 'turn-1', 'session_id': test_call_recovery.THREAD,
                 'root_turn_id': 'turn-1', 'response_id': 'response-1', 'usage': counters,
                 'turn_token_usage': counters, 'thread_token_usage': counters}
             base = native(root)

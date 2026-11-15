@@ -22,6 +22,9 @@ class Adapter:
     source_paths: tuple = ()
     legacy_effect_kinds: tuple = ()
     requires_acceptance: bool = False
+    # Optional domain interpretation of a settled publication. The controller
+    # stores its JSON result separately from controller-owned execution facts.
+    measure: Callable | None = None
 
     def __post_init__(self):
         for value in (self.adapter_id, self.version, self.effect_kind):
@@ -39,10 +42,15 @@ class Adapter:
         for fn in (self.prepare, self.reservations, self.execute, self.publication):
             if not callable(fn):
                 raise ValueError('A registered adapter requires executable callbacks')
+        if self.measure is not None and not callable(self.measure):
+            raise ValueError('An adapter measurement provider must be callable')
 
     def descriptor(self):
         sources, callbacks = {}, {}
-        for name in ('prepare','reservations','execute','publication'):
+        names = ('prepare','reservations','execute','publication')
+        if self.measure is not None:
+            names += ('measure',)
+        for name in names:
             fn = getattr(self,name)
             if not inspect.isfunction(fn) or fn.__closure__:
                 raise ValueError('Adapter callbacks must be source-backed functions; pass configuration explicitly, not captured state')

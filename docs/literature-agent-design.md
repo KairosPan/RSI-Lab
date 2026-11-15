@@ -31,11 +31,11 @@ flowchart TD
 
 每次 Lab 调用都收到通用的文献决策策略：先识别会影响当前决定的外部知识缺口，再检查本轮原文是否已经足够。方法适用性、跨条件外推、竞争解释或尚未交付的来源内容可以触发委托；本地观测、明确公式、执行记录和已有充分原文通常直接处理。科学主题本身不构成调用理由，任务也不必出现“查文献”等字样。
 
-启用文献能力时，Runtime 向 Lab 提供 `task.literature_context`：已注册能力、运行剩余额度，以及同一 owner/branch 的子任务、状态和结果指针。最多展示 16 个任务，活跃任务优先，省略数量明确标出。它用于避免重复研究和预留回传预算，不代表论文原文已经交付。任务描述与结果 ID 不获得引用权威。
+存在已验收且 manifest 显式声明 `literature_decision_policy: lab_literature_decision_v1` 的文献能力时，Runtime 向 Lab 提供 `task.literature_context`：已注册能力、运行剩余额度，以及同一 owner/branch 的子任务、状态和结果指针。新版 `rsi_literature` 适配器声明该版本；混合目录仍列出全部已验收的文献能力。最多展示 16 个任务，活跃任务优先，省略数量明确标出。它用于避免重复研究和预留回传预算，不代表论文原文已经交付。任务描述与结果 ID 不获得引用权威。
 
 Lab 在现有 `working_memory_delta.rationale_summaries` 中记录一个简短的 `literature_decision`，值为 `delegate`、`use_delivered_evidence`、`local_work`、`await_existing`、`blocked` 或 `not_needed`，附行动理由、当前交付的证据 ID 和已有任务 ID。协议校验决策记录与实际命令、证据和任务身份一致；它不认证科学判断正确。真正的调用仍由模型选择 `request_literature`，没有关键词触发器、强制配额或验收脚本代写的委托。
 
-实现入口为 [`roles.py`](../rsi_lab/roles.py) 的 `LAB_LITERATURE_POLICY` / `literature_decision_record`、[`literature_context.py`](../rsi_lab/literature_context.py) 和 Runtime 的 `_context`。没有启用文献能力的旧运行不要求新增决策记录。自主路由对照与持续优化验证见[验收报告](literature-autonomy-validation.md)。
+实现入口为 [`roles.py`](../rsi_lab/roles.py) 的 `LAB_LITERATURE_POLICY` / `literature_decision_record`、[`literature_context.py`](../rsi_lab/literature_context.py) 和 Runtime 的 `_context`。仅启用旧版 `rsi_domains.literature` 检索适配器的运行不要求新增决策记录；策略按显式版本启用，不因 `literature.*` 名称而隐式升级旧接口。自主路由对照与持续优化验证见[验收报告](literature-autonomy-validation.md)。
 
 Lab 验收的是交付是否满足任务用途。来源材料、反证和未解决问题保留在不可变记录中；未来的调整、拒绝验收或取消命令也必须保留这些材料与 Meta 已获准的审计访问。
 

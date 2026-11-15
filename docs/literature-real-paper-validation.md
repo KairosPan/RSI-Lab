@@ -21,7 +21,7 @@
 
 本次成功运行包含 **17 次真实模型调用**（Literature 15、Lab 2）、**14 次文献操作**；账本记录 18 个工具调用计量单位，包含操作内部请求。累计模型回执计量为 **1,606,202 tokens**，不是费用估算。Literature 使用同一 owner 的 12 个原生会话、11 次重建；预算均累计核算，没有重置，全部在本次冻结上限内。完整证据重复投递的开销较高，本配置用于流程验收。
 
-本机证据：[独立审计](../runs/literature-real-paper-samtools-20261115-v4/audit.json)、[原始运行摘要](../runs/literature-real-paper-samtools-20261115-v4/summary.json)、[Literature 研究结果](../runs/literature-real-paper-samtools-20261115-v4/report.md)。
+本机证据保存在 `runs/literature-real-paper-samtools-20261115-v4/` 下的 `audit.json`、`summary.json` 与 `report.md`。账本、原始模型对话、论文和图像不随 PR 发布；公开仓库包含复现脚本和此结果概要。该实测使用原源码快照 `ae3dbea`；PR 随后的 `main` 整合只作离线回归，不构成再次真实论文验收。
 
 ## 来源与阅读范围
 
@@ -64,4 +64,4 @@ PYTHONPATH=. .venv/bin/python scripts/validate_literature_paper.py \
 
 runner 保存 `progress.jsonl`、`summary.json` 和 `report.md`。独立 auditor 从只读账本快照核对实际来源、交付页、图像输入、双向引用、同父 Lab 的最终接收，以及跨会话预算，输出 `audit.json`；未通过返回非零退出码。运行产物保存在本机、被 Git 忽略。
 
-回归检查：文献测试 **179 项**、核心 v2 测试 **273 项**通过。
+该阶段回归检查：文献测试 **179 项**、核心 v2 测试 **273 项**通过。

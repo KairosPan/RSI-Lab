@@ -10,11 +10,12 @@ and the public capability contracts.
 
 ## Source provenance
 
-The four files under `rsi_domains/pablo/` were copied from RSI-Lab commit
-`ed71c7bcdc7c61d9261849a0c6d71b74db03d4d6`, using the existing local repository
-at `/Users/pan/.codex/worktrees/4121/RSI-Lab`. The copied scorer and oracle are also
-byte-identical to the frozen PR2 sources in
-`/Users/pan/.codex/worktrees/rsi-lab-pr-2/RSI-Lab/run_sources/pr2-pablo/`.
+The four scoring/lookup files under `rsi_domains/pablo/` used for the original
+validation were copied from RSI-Lab commit
+`ed71c7bcdc7c61d9261849a0c6d71b74db03d4d6`. The copied scorer and oracle were also
+byte-identical to the locally frozen PR2 sources. That validation did not enable
+the separate research host or Scientific Memory. The PR also integrates the
+subsequently merged `main` implementation; its research modules are retained.
 The adapter and lookup manifests now additionally expose a closed JSON input
 schema; their scoring, accounting, authorization, and replay algorithms are unchanged.
 

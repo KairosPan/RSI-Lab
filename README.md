@@ -12,6 +12,8 @@ RSI-Lab 是用于研究 Lab 执行、Meta 调查与受控机制修改的代码�
 | `rsi_literature/` | Lab 的 Literature 子 agent 使用的文献检索、原文存储/分段交付及可选研究工具桥 |
 | `rsi_domains/tabular/` | 使用合成 CSV 的可替换领域能力与离线演示 |
 | `rsi_domains/docking/` | Docking 输入契约、领域检查、能力适配和结果核验 |
+| `rsi_domains/pablo/` | 分子黑箱评分、精确身份查询、领域测量与研究策略 |
+| `rsi_domains/literature/` | 有界的公开方法文献检索、原始回执与来源复用 |
 | `docking_rsi/` | Docking 控制面的兼容 CLI 与离线演示 |
 | `lab_harness/`、`harness/` | 独立的 Lab 执行循环、提示模板与有界 Meta 版本流程 |
 | `scripts/` | 接受显式输入的数据准备、计算执行与结果核验工具 |
@@ -28,9 +30,11 @@ RSI-Lab 是用于研究 Lab 执行、Meta 调查与受控机制修改的代码�
 
 Lab 现在也可通过 `request_literature` 委托具有独立持久会话的 Literature 子 agent。子 agent 在任务额度内循环调用文献工具，阶段性或最终结果连同实际交付的原文证据返回所属 Lab。文献包定义 13 个能力，包含 9 个主线与 6 个可选来源、解析器或研究项目的接口/部署桥；默认启用 6 个主线，包括无需模型凭证的 Poppler 文本提取与页面渲染。PDF 阅读沿文本定位、单页渲染、图像实际交付和视觉核对进行；模型不获得全局 shell。需凭证、模型或尚未部署的项目保持关闭，配置通过不表示已经联网验收。原生元数据接口使用标准库；SDK、模型、托管凭证与研究项目部署另行配置。用法、实测范围及内部调用成本的可见性见[文献工具使用说明](docs/literature-tools.md)。
 
-普通 Lab 轮次按外部知识缺口、当前已交付原文、所属子任务与剩余额度自主决定是否委托，任务不必明确要求检索。启用文献能力时，每轮记录可审计的 `literature_decision`；已有充分原文或只需本地观测的任务直接推进。机制与真实正反例、持续 200 次评分验证见[自主决策报告](docs/literature-autonomy-validation.md)。
+普通 Lab 轮次按外部知识缺口、当前已交付原文、所属子任务与剩余额度自主决定是否委托，任务不必明确要求检索。启用新版文献工具包时，每轮记录可审计的 `literature_decision`；已有充分原文或只需本地观测的任务直接推进。旧版领域检索接口保留原协议。机制与真实正反例、持续 200 次评分验证见[自主决策报告](docs/literature-autonomy-validation.md)。
 
-[系统设计 v2.1](docs/system-design.html) 仍是完整目标规格。六类 Scientific Memory 对象、全自动工程修复发布，以及可逐请求拦截 Codex 内部工具/压缩/重试的 runtime 尚未全部实现。当前 CLI 后端禁用原生工具，容量检查覆盖可观察的会话历史与本轮输入；它不声称已证明完整 provider 输入或取得模型的全部内部推理。旧 `lab_harness/` 保留为兼容执行器，不与新核心的会话或工作记忆混用。
+研究模式还提供有来源绑定的 Meta→Lab 建议、实际工具执行和结果复核闭环，以及六类版本化 Scientific Memory 对象。领域适配器提供推荐类型、指标解释和优化方向；内核不假定分子搜索或分数最大化。PABLO 宿主将这些接口与真实文献检索接在一起，见 [PABLO 研究入口](docs/pablo-research.md)。记忆对象合法或工具成功不代表科研判断已获验证。
+
+[系统设计 v2.1](docs/system-design.html) 仍是完整目标规格。科学记忆的语义支持验证、全自动工程修复发布，以及可逐请求拦截 Codex 内部工具/压缩/重试的 runtime 尚未全部实现。当前 CLI 后端禁用原生工具，容量检查覆盖可观察的会话历史与本轮输入；它不声称已证明完整 provider 输入或取得模型的全部内部推理。旧 `lab_harness/` 保留为兼容执行器，不与新核心的会话或工作记忆混用。
 
 ## 离线运行
 
@@ -100,6 +104,7 @@ npm run build
 - [真实论文：检索、全文、看图与引用追踪验收](docs/literature-real-paper-validation.md)
 - [Lab 自主文献决策：正反例与新 200 次评估验证](docs/literature-autonomy-validation.md)
 - [通用核心与领域接口](docs/rsi-lab-core.md)
+- [PABLO 研究闭环、科学记忆与文献检索](docs/pablo-research.md)
 - [Docking 控制面](docs/docking-rsi-v2.md)
 - [独立 Lab harness](docs/lab-harness-v1.md)
 - [任务运行器](docs/live-agentic-study.md)

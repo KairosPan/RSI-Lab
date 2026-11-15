@@ -19,6 +19,7 @@ import urllib.parse
 
 from rsi_lab.adapters import Adapter
 from rsi_lab.controller import identity
+from rsi_lab.literature_context import LITERATURE_DECISION_POLICY_VERSION
 from rsi_lab.store import digest, encode
 from . import catalog, documents, providers, remote
 
@@ -601,6 +602,7 @@ def make_adapters(document_root, config=None):
         adapters.append(Adapter(adapter_id='literature.' + operation, version=VERSION,
             effect_kind='literature_' + operation,
             manifest={'scope': DESCRIPTIONS[operation],
+                'literature_decision_policy': LITERATURE_DECISION_POLICY_VERSION,
                 'input_schema': schema,
                 'input_contract': {'required': sorted(required), 'allowed': sorted(allowed),
                     'provider_default': config['default_provider'], 'max_limit': 25},

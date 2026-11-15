@@ -6,12 +6,17 @@ contents or grant source-citation authority. No benchmark labels belong here.
 from __future__ import annotations
 
 MAX_TASKS = 16
+LITERATURE_DECISION_POLICY_VERSION = 'lab_literature_decision_v1'
 
 
 def build_literature_context(store, run_id, session, capabilities):
     available = sorted(cid for cid, row in capabilities.items()
                        if cid.startswith('literature.') and row.get('status') == 'accepted')
-    if not available:
+    # Sharing a capability namespace does not opt a legacy adapter into a new
+    # Lab response contract. Only an explicitly registered policy version does.
+    if not any(capabilities[cid].get('descriptor', {}).get('manifest', {}).get(
+            'literature_decision_policy') == LITERATURE_DECISION_POLICY_VERSION
+            for cid in available):
         return None
     owned = [task for task in store.list(run_id, 'registration', kind='literature_task')
              if task.get('parent_owner_id') == session['owner_id']
@@ -34,7 +39,7 @@ def build_literature_context(store, run_id, session, capabilities):
             'result_evidence_ids': task.get('result_ids', []), 'remaining': remaining})
     allowance = {row['id']: max(0, row['limit'] - row['spent'] - row['reserved'])
                  for row in store.list(run_id, 'budget')}
-    return {'version': 'lab_literature_decision_v1',
+    return {'version': LITERATURE_DECISION_POLICY_VERSION,
         'available_capability_ids': available, 'owned_tasks': tasks,
         'owned_task_count': len(owned), 'omitted_task_count': max(0, len(owned) - MAX_TASKS),
         'run_allowance': allowance, 'allowance_timing': 'before_this_model_turn',

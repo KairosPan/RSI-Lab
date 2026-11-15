@@ -31,8 +31,21 @@ python3 -m lab_harness demo --out runs/new_v1_demo --with-meta
 | 模型决策 | 已配置的 Codex CLI、当前账户可用的模型，以及明确冻结的 model / effort |
 | Vina worker | 独立 AutoDock Vina 1.2.7，及含 RDKit、Meeko、PoseBusters 的科学 Python 环境 |
 | 化学状态准备 | 与准备脚本契约兼容的 MolScrub 及其依赖；见[研究运行器](live-agentic-study.md) |
+| PABLO 评分与宿主 | Python 3.11 和 [requirements-pablo.txt](../requirements-pablo.txt) 中的可选科学依赖；见 [PABLO 研究入口](pablo-research.md) |
+| 文献检索 | Python 标准库与 Europe PMC HTTPS 访问，不需要另设 API key |
 
 外部环境由使用者配置。记录实际依赖版本、执行路径、源码和二进制哈希；不同平台不复用他人的二进制身份。协议中的 `vina_binary_path` 必须指向实际文件，并与 `vina_sha256` 匹配。凭证保留在本地登录或环境配置中，不放进任务数据和 Git。
+
+PABLO 的可选环境可单独安装；宿主使用 `fcntl`、`resource` 等 Unix 接口。以下版本组合已在 macOS 的 Python 3.11 上验证，不是通用内核的安装要求：
+
+```sh
+python3.11 -m venv .venv
+.venv/bin/python -m pip install -r requirements-pablo.txt
+.venv/bin/python -m pip install --force-reinstall --no-deps rdkit==2024.9.6
+.venv/bin/python -m unittest discover -s tests -v
+```
+
+该环境包含 GuacaMol、RDKit、NumPy、SciPy 和 Pandas。GuacaMol 的传递依赖会引入旧的 `rdkit-pypi` 包，因此安装后重新安装已固定版本的 `rdkit`，确保实际导入的共享模块来自该版本。评分使用前四项，宿主还将 Pandas 版本写入运行环境记录。缺少科学依赖时，PABLO 的真实评分与身份测试明确跳过；通用控制面、合成闭环与文献回执测试仍可离线运行。全套测试还包括依赖 NumPy 与 RDKit 的独立几何检查，运行完整测试集前应安装科学环境。真实模型调用另需本地 Codex 登录及相应模型访问。
 
 ## 准备自己的输入
 

@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from rsi_lab.adapters import Adapter
 from rsi_lab.controller import Controller, identity
+from rsi_lab.literature_context import LITERATURE_DECISION_POLICY_VERSION
 from rsi_lab.runtime import Runtime
 from rsi_lab.roles import validate_command
 from rsi_lab.store import Store, digest
@@ -37,9 +38,11 @@ def publish(effect, receipt):
 
 
 def adapter(adapter_id='literature.read_document'):
+    manifest = {'input_schema': {'type': 'object'}, 'output_contract': 'original passage'}
+    if adapter_id.startswith('literature.'):
+        manifest['literature_decision_policy'] = LITERATURE_DECISION_POLICY_VERSION
     return Adapter(adapter_id=adapter_id, version='1.0.0', effect_kind=adapter_id.replace('.', '_'),
-        manifest={'input_schema': {'type': 'object'}, 'output_contract': 'original passage'},
-        prepare=prepare, reservations=reserve, execute=execute, publication=publish)
+        manifest=manifest, prepare=prepare, reservations=reserve, execute=execute, publication=publish)
 
 
 class LiteratureRuntimeTests(unittest.TestCase):

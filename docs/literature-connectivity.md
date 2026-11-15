@@ -49,7 +49,7 @@ Poppler 26.04.0 已完成真实解析、渲染和模型交付验收。原生文�
 
 多轮模型验收采用 [`literature-reading-run.json`](../examples/literature-reading-run.json) 的会话容量设置：单次文本 128 KiB、会话文本 512 KiB、单次图片合计 4 MiB、历史图片合计 16 MiB。检查过程中修正了当前 Codex 新增审计帧的识别；原有 128 KiB 总会话上限曾在工具往返后明确阻止派发，旧失败/受限回执继续保留，没有重发或改写旧 Effect。
 
-验证：文献测试 169 项、核心 v2 回归 271 项通过。额外运行 generic 测试时，既有 docking 独立几何检查因此环境没有 RDKit 而报错；本次未安装或修改该领域依赖。
+该阶段验证：文献测试 169 项、核心 v2 回归 271 项通过。当时额外运行 generic 测试时，既有 docking 独立几何检查因该环境没有 RDKit 而报错；该阶段未安装或修改此领域依赖。
 
 Starling 检查固定在 commit `123ba92699146fdfe2ae3569078c7f78a5d171d3`，其 `src/starling/cli/extraction.py:395` 在提取任务循环前调用 `exit()`。本项目没有修改上游。适配器已修正官方要求的 PMID JSON 数组和必需 spec 文件；空提取产物会明确失败并保留执行未知状态，不能当作成功研究结果。
 
@@ -61,6 +61,6 @@ Poppler 新回执：`poppler-native-v1/summary.json` 记录原生解析/视觉�
 
 ## 真实论文完整流程验收
 
-已用 SAMtools 2009 论文完成真实 Lab → Literature → Lab 流程：检索、9,027 字符规范化全文实际交付、PDF 第 3 页图像输入与读数核对、双向引用及邻接摘要跟进。独立审计 23 项全部通过；本次回归为文献 179 项、核心 v2 273 项。具体来源、运行数据和复现命令见[真实论文验收报告](literature-real-paper-validation.md)。
+已用 SAMtools 2009 论文完成真实 Lab → Literature → Lab 流程：检索、9,027 字符规范化全文实际交付、PDF 第 3 页图像输入与读数核对、双向引用及邻接摘要跟进。独立审计 23 项全部通过；该阶段回归为文献 179 项、核心 v2 273 项。具体来源、运行数据和复现命令见[真实论文验收报告](literature-real-paper-validation.md)。
 
 远程 PDF 返回 403，本次使用宿主预先取得并登记的 Harvard 官方仓储文件，尚未验证自动备用 PDF 发现。真实论文验收采用 512 KiB 单次请求、2 MiB 可观测会话文本，并要求当前轮完整重投递已有来源；上文 128 KiB/512 KiB 配置仍是较小的合成材料验收记录。Poppler 渲染上限已设为 1600，附件派发前检查 Codex 的高精度 patch 上限，保持实际输入哈希严格验证。

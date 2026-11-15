@@ -1,6 +1,7 @@
 """Campaign host contracts only: no model calls or new objective evaluations."""
 import importlib.util
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -8,7 +9,8 @@ import unittest
 from scripts import run_literature_autonomy_campaign as campaign
 
 
-READY = campaign.DEFAULT_INITIAL.is_file() and all(importlib.util.find_spec(name) is not None
+INITIAL_CSV = Path(os.environ.get('PABLO_INITIAL_CSV', str(campaign.DEFAULT_INITIAL)))
+READY = INITIAL_CSV.is_file() and all(importlib.util.find_spec(name) is not None
     for name in ('rdkit', 'guacamol', 'numpy', 'scipy'))
 
 
@@ -18,7 +20,7 @@ class CampaignHostTests(unittest.TestCase):
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
         self.root = Path(folder.name) / 'fresh'
-        self.runtime = campaign.initialize(self.root, campaign.DEFAULT_INITIAL,
+        self.runtime = campaign.initialize(self.root, INITIAL_CSV,
             campaign.PROJECT / 'examples/literature-tools.json', 1200)
         self.addCleanup(self.runtime.store.close)
 
