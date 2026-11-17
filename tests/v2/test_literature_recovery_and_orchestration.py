@@ -165,6 +165,59 @@ class LiteratureRecoveryAndOrchestrationTests(unittest.TestCase):
         self.assertEqual(self.task()['status'], 'active')
         self.assertEqual(self.results(), [])
 
+    def returned_to_lab(self):
+        return [work for work in self.controller.ready('r')
+                if work['kind'] == 'lab' and work['inputs'].get('literature_result_task_id')]
+
+    def test_a_failed_child_call_without_a_retry_returns_the_task_unresolved(self):
+        self.open()
+        self.delegate()
+        self.runtime.run_meta(self.child()['id'], model(None, failed=True), RES)
+        self.assertEqual(self.task()['status'], 'completed')
+        self.assertEqual([(row['coverage_status'], row['stop_reason']) for row in self.results()],
+                         [('unresolved', 'Provider refused the request')])
+        self.assertEqual(len(self.returned_to_lab()), 1)
+        settled = self.store.verify_history('r')
+        self.runtime.recover()
+        self.runtime.recover()
+        self.assertEqual(self.store.verify_history('r'), settled)
+
+    def test_a_retry_that_also_fails_ends_the_task_only_then(self):
+        self.open(model_failure_retries=1)
+        self.delegate()
+        self.runtime.run_meta(self.child()['id'], model(None, failed=True), RES)
+        self.assertEqual(self.task()['status'], 'active')
+        self.runtime.run_meta(self.child()['id'], model(None, failed=True), RES)
+        self.assertEqual(self.task()['status'], 'completed')
+        self.assertEqual([row['coverage_status'] for row in self.results()], ['unresolved'])
+        self.assertEqual(len(self.returned_to_lab()), 1)
+
+    def test_a_child_action_blocked_while_routing_returns_the_task_unresolved(self):
+        self.open()
+        self.delegate()
+        child = self.child()
+        missing = {'evidence_ids': ['never-cached'], 'document_ids': [], 'query': '', 'limit': 1}
+        outcome = self.runtime.run_meta(child['id'], model(self.reply(child, 'read_cached_evidence', missing)), RES)
+        self.assertEqual(outcome['proposal']['status'], 'blocked_action', outcome['proposal'])
+        self.assertEqual(self.task()['status'], 'completed')
+        self.assertEqual([row['coverage_status'] for row in self.results()], ['unresolved'])
+        self.assertEqual(len(self.returned_to_lab()), 1)
+        self.runtime.apply_meta(outcome['effect']['id'])
+        self.runtime.recover()
+        self.assertEqual(len(self.results()), 1)
+        self.store.verify_history('r')
+
+    def test_an_active_task_nobody_works_on_reads_stalled(self):
+        self.open()
+        task = self.delegate()
+        child = self.child()
+        self.store.mutate('r', 'fixture-lost-child-work', 'fixture_lost_child_work',
+                          lambda tx: tx.update('work', child['id'], {'status': 'cancelled'}))
+        driven = self.runtime.run_until_wait(model(None), RES, max_steps=1)
+        self.assertEqual((driven['status'], driven['reason']), ('stalled', 'stalled_literature_tasks'))
+        self.assertEqual([row['task_id'] for row in driven['report']['attention']['stalled_literature_tasks']],
+                         [task['id']])
+
     def test_discarded_child_turn_returns_its_task_to_the_lab_in_the_recovery_that_completes_it(self):
         # Recovery records an Effect complete as soon as its proposal is
         # terminal, and never replays a completed Effect. The child's task must
