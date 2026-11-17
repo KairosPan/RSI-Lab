@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import tempfile
 import time
 
 from .store import Store, digest, encode
@@ -31,6 +33,42 @@ def request_scope_identity(scope):
     return digest(scope)
 
 
+def publish_envelope(path, value):
+    """Make a receipt envelope visible only once it is complete and durable."""
+    fd, temporary = tempfile.mkstemp(prefix='.tmp-' + path.name + '-', dir=path.parent)
+    published = False
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(encode(value))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        published = True
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if not published:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+
+
+def read_envelope(path):
+    """A missing, torn or incomplete envelope proves nothing and counts as absent."""
+    try:
+        envelope = json.loads(path.read_bytes())
+    except (FileNotFoundError, ValueError):
+        return None
+    if not isinstance(envelope, dict) or any(not isinstance(envelope.get(field), str)
+                                             for field in ('effect_id', 'packet_hash', 'receipt_ref')):
+        return None
+    return envelope
+
+
 class Controller:
     schema_version = 'rsi_control_v2'
 
@@ -47,8 +85,8 @@ class Controller:
                 raise ValueError('Only executable call-count restrictions can be hard in v2')
             if not finite(row.get('settlement_reserve', 0)) or row.get('settlement_reserve', 0) > row['limit']:
                 raise ValueError('Invalid protected disposition/settlement allowance')
-        self.store.create_run(run_id, {'schema_version': self.schema_version, **(config or {}),
-                                      'budgets': budgets, 'max_external': max_external})
+        run_config = {'schema_version': self.schema_version, **(config or {}),
+                      'budgets': budgets, 'max_external': max_external}
         def initialize(tx):
             rows = [tx.insert('budget', name, {**row, 'spent': 0, 'reserved': 0,
                 'overrun': False}) for name, row in budgets.items()]
@@ -56,7 +94,10 @@ class Controller:
                 'value': {'status': 'available', 'available': max_external},
                 'content_hash': digest({'status': 'available', 'available': max_external}), 'revision': 1})
             return rows
-        return self.store.mutate(run_id, 'initialize', 'run_initialized', initialize, payload=budgets)
+        # The run row and its budgets commit together, so a repeated init either
+        # returns the first result or completes a run left without budgets.
+        return self.store.mutate(run_id, 'initialize', 'run_initialized', initialize, payload=budgets,
+                                 run_config=run_config)
 
     def _capacity(self, tx):
         maximum = self.store.run(tx.run_id)['config'].get('max_external', 1)
@@ -442,17 +483,7 @@ class Controller:
         # effect binding even if the following SQLite commit is interrupted.
         receipt_ref = self.store.put_blob(receipt)
         envelope = {'effect_id': effect_id, 'packet_hash': effect['packet_hash'], 'receipt_ref': receipt_ref}
-        path = self.store.root / ('receipt_' + effect_id + '.json')
-        with path.open('x') as stream:
-            stream.write(encode(envelope).decode())
-            stream.flush()
-            import os
-            os.fsync(stream.fileno())
-        directory = os.open(self.store.root, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        publish_envelope(self.store.root / ('receipt_' + effect_id + '.json'), envelope)
         return self.settle_effect(run_id, effect_id, receipt_ref, 'settle:' + effect_id)
 
     def cancel_prepared(self, run_id, effect_id, reason, key):
@@ -577,9 +608,8 @@ class Controller:
         for effect in self.store.list(run_id, 'effect'):
             if effect['status'] not in {'dispatching', 'unknown'}:
                 continue
-            path = self.store.root / ('receipt_' + effect['id'] + '.json')
-            if path.exists():
-                envelope = json.loads(path.read_bytes())
+            envelope = read_envelope(self.store.root / ('receipt_' + effect['id'] + '.json'))
+            if envelope is not None:
                 if envelope['effect_id'] != effect['id'] or envelope['packet_hash'] != effect['packet_hash']:
                     raise ValueError('Recovery receipt belongs to a different attempt/input')
                 recovered.append(self.settle_effect(run_id, effect['id'], envelope['receipt_ref'], 'settle:' + effect['id']))

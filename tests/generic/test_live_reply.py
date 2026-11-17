@@ -5,7 +5,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from rsi_domains.docking.live_reply import bind_and_resume
+from rsi_lab.producers.reply import bind_and_resume
 from rsi_lab.controller import Controller, identity
 from rsi_lab.runtime import Runtime
 from rsi_lab.store import Store

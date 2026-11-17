@@ -1,6 +1,6 @@
 # 安装、输入准备与本地运行
 
-本仓库发布代码、接口说明和合成测试。运行记录、数据集、模型权重、原始模型对话与结果截图由使用者在本地独立保存，不是软件安装的前置输入。
+本仓库发布通用代码、接口说明和合成测试。运行记录、数据集、模型权重、原始模型对话与结果截图由使用者在本地独立保存，不是安装的前置输入。
 
 ## 获取代码与离线检查
 
@@ -13,60 +13,40 @@ python3 -m unittest discover -s tests/v2 -v
 python3 -m unittest discover -s tests -v
 ```
 
-控制器与合成 demo 使用 Python 标准库。按当前 checkout 的测试输出核对失败和跳过项目；文档不保存固定的历史通过数量。
+控制器与合成示例使用 Python 标准库，无需安装领域计算包。按当前 checkout 的测试输出核对失败与跳过项目；文档不保存历史通过数量。
 
 ```sh
-python3 -m docking_rsi --root runs/new_demo --run demo demo
-python3 -m docking_rsi --root runs/new_demo --run demo status
-python3 -m lab_harness demo --out runs/new_v1_demo --with-meta
+python3 -c 'from rsi_domains.tabular.demo import run_demo; print(run_demo("runs/tabular-demo"))'
+python3 -m rsi_lab --root runs/tabular-demo --run tabular-portability status
 ```
 
-每个示例使用独立的新目录。合成响应与测试数值仅用于机制验收，不是科学结果。已存在运行的恢复须核对持久状态与未决外部调用，不能通过删除状态重新执行。
+示例实际执行 CSV 校验、单位换算、能力验收与恢复，角色决策使用固定合成响应。每个新任务使用独立的新目录；已存在运行的恢复须核对持久状态和未决调用，不能通过删除状态重新执行。示例细节见[通用核心说明](rsi-lab-core.md#合成-csv-示例)。
 
 ## 可选运行环境
 
 | 用途 | 依赖 |
 | --- | --- |
-| 前端 | Node.js；见[前端说明](../frontend/README.md) |
-| 模型决策 | 已配置的 Codex CLI、当前账户可用的模型，以及明确冻结的 model / effort |
-| Vina worker | 独立 AutoDock Vina 1.2.7，及含 RDKit、Meeko、PoseBusters 的科学 Python 环境 |
-| 化学状态准备 | 与准备脚本契约兼容的 MolScrub 及其依赖；见[研究运行器](live-agentic-study.md) |
-| PABLO 评分与宿主 | Python 3.11 和 [requirements-pablo.txt](../requirements-pablo.txt) 中的可选科学依赖；见 [PABLO 研究入口](pablo-research.md) |
-| 文献检索 | Python 标准库与 Europe PMC HTTPS 访问，不需要另设 API key |
+| 前端 | Node.js 20 或更新版本；见[前端说明](../frontend/README.md) |
+| 模型决策 | 已配置的 Codex CLI、账户可用的模型，以及明确冻结的 model / effort |
+| 自定义能力 | 该适配器声明的依赖、输入契约、资源与恢复方式，由任务宿主显式配置 |
 
-外部环境由使用者配置。记录实际依赖版本、执行路径、源码和二进制哈希；不同平台不复用他人的二进制身份。协议中的 `vina_binary_path` 必须指向实际文件，并与 `vina_sha256` 匹配。凭证保留在本地登录或环境配置中，不放进任务数据和 Git。
-
-PABLO 的可选环境可单独安装；宿主使用 `fcntl`、`resource` 等 Unix 接口。以下版本组合已在 macOS 的 Python 3.11 上验证，不是通用内核的安装要求：
-
-```sh
-python3.11 -m venv .venv
-.venv/bin/python -m pip install -r requirements-pablo.txt
-.venv/bin/python -m pip install --force-reinstall --no-deps rdkit==2024.9.6
-.venv/bin/python -m unittest discover -s tests -v
-```
-
-该环境包含 GuacaMol、RDKit、NumPy、SciPy 和 Pandas。GuacaMol 的传递依赖会引入旧的 `rdkit-pypi` 包，因此安装后重新安装已固定版本的 `rdkit`，确保实际导入的共享模块来自该版本。评分使用前四项，宿主还将 Pandas 版本写入运行环境记录。缺少科学依赖时，PABLO 的真实评分与身份测试明确跳过；通用控制面、合成闭环与文献回执测试仍可离线运行。全套测试还包括依赖 NumPy 与 RDKit 的独立几何检查，运行完整测试集前应安装科学环境。真实模型调用另需本地 Codex 登录及相应模型访问。
+凭证保留在本地登录或环境配置中，不放进任务数据与 Git。对自定义计算环境记录实际版本、执行路径、源码或二进制 hash；不同平台不能直接假定执行实现相同。核心的本地验收与分支执行器使用 Unix 进程及资源控制接口，不提供操作系统或网络安全沙箱。
 
 ## 准备自己的输入
 
-`scripts/build_agentic_dataset.py` 接受调用者提供的来源、元数据和受体。以下路径均为占位符；输出目录必须尚不存在。
+任务宿主负责提供以下材料：
 
-```sh
-python3 scripts/build_agentic_dataset.py \
-  --source /path/to/source.json \
-  --source-metadata /path/to/source.meta.json \
-  --receptor /path/to/prepared-receptor \
-  --out runs/new_study/data
-```
+- 有稳定身份与来源的输入；需要的单位、格式和适用条件不得猜测补齐。
+- 冻结的 `TaskPlan`：输入 hash、协议、能力版本、指标、全部计划对象与成功条件。
+- 独立运行目录、明确预算，以及被宿主信任和注册的适配器。
+- 需要外部材料时，登记来源范围与交付责任；需要用户回复时，使用有版本和消息身份的提问记录。
 
-构建器保留固定 cohort 分配和结构准入规则，它不是通用数据下载器。输入内容必须满足该脚本的契约。需要化学状态准备时，先配置相应依赖，再显式添加 `--chemical-preparation`。
+`rsi_lab.producers` 提供通用来源、回复与工程交付辅助实现。它们交付来源或产物，不能绕过任务授权、能力验收或把交付成功当作目标达成。第三方来源内容是输入材料，不赋予模型额外执行权限。
 
-过去已使用的对象可由 `--prior-data`、可重复的 `--prior-run-root` / `--exclude-catalog` 或明确的 `--exclusions` 文件登记。默认不会扫描个人工作区或自动引入其他运行；未提供排除材料时不能声称输入与既有研究独立。
+初始化、`lab-start`、调度、checkpoint、恢复与停止的完整配置示例见[持久 Agent 使用说明](persistent-agents.md)。真实模型与工具调用会产生实际资源消耗，每次调用保存身份、输入、输出、回执和用量。
 
-运行前固定来源授权、科学条件、评价方法和预算。计算可执行不等于科学前提已满足，具体准入见[Lab 使用说明](lab-harness-v1.md)、[Docking 控制契约](docking-rsi-v2.md)。
+## 运行与发布边界
 
-## 运行与文件管理
+`runs/`、本地输入目录、SQLite 账本、逐事件日志、工作记忆、原始对话、checkpoint 与构建产物留在本地。前端默认没有预载运行，只有显式导入或连接后才显示数据。
 
-新研究先准备 `study_config.json`、来源证据和冻结输入，再按[研究运行器](live-agentic-study.md)启动。真实模型与计算调用会产生实际资源消耗；每次调用保存身份、输入、输出、回执和用量。
-
-`runs/`、本地输入目录、SQLite 账本、日志与构建产物不纳入版本管理。分享代码时使用干净源码；分享运行记录时另行选择有权限分发的材料，并检查其中的原始对话、来源与环境信息。
+分享代码前检查 tracked 文件与待提交 diff；`.gitignore` 只影响未跟踪文件，不能自动移除已经跟踪的记录。合成测试中的常量和固定响应属于机制 fixture，不是实际实验记录。分享运行材料时另行选择有权限分发的内容，核对原始对话、来源及环境信息。

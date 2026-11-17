@@ -3,17 +3,26 @@ import argparse
 import importlib
 import json
 from pathlib import Path
+import sqlite3
 import sys
 
 from .controller import Controller
 from .plans import register_task_plan
 from .roles import CodexExecutor
-from .runtime import Runtime
-from .store import Store
+from .orchestration import orchestration_config
+from .runtime import Runtime, model_failure_retries, unknown_usage_policy
+from .store import Store, digest
 
 
 def read(path):
     return json.loads(Path(path).read_text())
+
+
+def model_timeout(config):
+    value=config.get('model_timeout_seconds',300)
+    if type(value) not in {int,float} or not 1<=value<=3600:
+        raise ValueError('model_timeout_seconds must be a number between 1 and 3600')
+    return value
 
 
 def load_adapter_factory(reference):
@@ -45,6 +54,8 @@ def main(argv=None):
     q.add_argument('--reason',required=True);q.add_argument('--checkpoint')
     q=sub.add_parser('finalize');q.add_argument('--reason',required=True)
     q=sub.add_parser('run-until-wait');q.add_argument('--max-steps',type=int,default=20)
+    q=sub.add_parser('reconcile');q.add_argument('--effect',required=True);q.add_argument('--receipt',required=True)
+    q.add_argument('--key')
     q=sub.add_parser('cancel-prepared');q.add_argument('--effect',required=True);q.add_argument('--reason',required=True)
     q=sub.add_parser('reply');q.add_argument('--question',required=True);q.add_argument('--version',type=int,required=True)
     q.add_argument('--text',required=True);q.add_argument('--message-id',required=True)
@@ -57,7 +68,10 @@ def main(argv=None):
     try:
         controller=Controller(store)
         if args.command=='init':
-            config=read(args.config);budgets=config.pop('budgets');capacity=config.pop('max_external',1)
+            config=read(args.config)
+            # The config is immutable once stored; refuse what Runtime would later reject.
+            for check in (unknown_usage_policy,model_failure_retries,model_timeout,orchestration_config):check(config)
+            budgets=config.pop('budgets');capacity=config.pop('max_external',1)
             result=controller.initialize(args.run,budgets=budgets,max_external=capacity,config=config)
         else:
             runtime=Runtime(store,args.run,adapters=adapters)
@@ -82,6 +96,11 @@ def main(argv=None):
                 result=register_task_plan(store,args.run,plan,key='task-plan:'+plan['task_id'])
             elif args.command=='adapter-run':
                 result=runtime.execute_adapter(args.adapter,read(args.inputs),trigger_id=args.event)
+            elif args.command=='reconcile':
+                receipt=read(args.receipt)
+                key=args.key or 'operator-reconcile:'+args.effect+':'+digest(receipt)
+                effect=controller.reconcile(args.run,args.effect,receipt,key)
+                result={'effect':effect,'recovery':runtime.recover()}
             elif args.command=='cancel-prepared':
                 result=controller.cancel_prepared(args.run,args.effect,args.reason,'cancel:'+args.effect)
             elif args.command=='reply':
@@ -94,7 +113,7 @@ def main(argv=None):
                 config=store.run(args.run)['config']
                 if config.get('execution_mode') not in {'live','role_recall'}:
                     raise ValueError('Real model execution needs a prospectively configured live or role_recall run')
-                executor=CodexExecutor(store.root/'calls')
+                executor=CodexExecutor(store.root/'calls',timeout_seconds=model_timeout(config))
                 if args.command in {'meta-step','lab-step'}:
                     run_step=runtime.run_lab if args.command=='lab-step' else runtime.run_meta
                     result=run_step(args.work,executor,config['model_reservation'])
@@ -108,6 +127,6 @@ def main(argv=None):
 
 if __name__=='__main__':
     try:sys.exit(main())
-    except (ValueError,KeyError,OSError,ImportError,AttributeError) as error:
+    except (ValueError,KeyError,OSError,ImportError,AttributeError,sqlite3.Error) as error:
         print(json.dumps({'status':'blocked','reason':str(error)},ensure_ascii=False),file=sys.stderr)
         sys.exit(2)

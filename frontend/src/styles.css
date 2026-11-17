@@ -955,39 +955,6 @@ td:last-child,
 th:last-child {
   padding-right: 23px;
 }
-.compound-cell {
-  display: flex;
-  align-items: center;
-  gap: 11px;
-  color: #4d6342;
-}
-.compound-glyph {
-  width: 31px;
-  height: 31px;
-  display: grid;
-  place-items: center;
-  background: #f4f6ed;
-  border: 1px solid #e8eddf;
-  border-radius: 7px;
-  color: #859e6b;
-}
-.compound-glyph .icon {
-  width: 21px;
-  height: 21px;
-}
-.compound-name {
-  font-size: 10px;
-  font-weight: 550;
-  display: block;
-  color: #546847;
-}
-.compound-id {
-  font-size: 8px;
-  color: #a2ac94;
-  margin-top: 3px;
-  display: block;
-  letter-spacing: 0.3px;
-}
 .number {
   font-family: "SFMono-Regular", Consolas, monospace;
   font-size: 10px;
@@ -1470,15 +1437,6 @@ dialog::backdrop {
   gap: 15px;
   margin-bottom: 22px;
 }
-.detail-header .compound-glyph {
-  height: 52px;
-  width: 52px;
-  border-radius: 12px;
-}
-.detail-header .compound-glyph .icon {
-  width: 34px;
-  height: 34px;
-}
 .detail-header h3 {
   font-size: 17px;
   font-weight: 500;
@@ -1814,7 +1772,6 @@ dialog::backdrop {
 }
 .panel-subtitle,
 .stat-foot,
-.compound-id,
 .activity-time,
 .flow-subtitle,
 .download-note,

@@ -9,7 +9,7 @@ export const traceFixture = {
   calls: [
     call("fixture-meta", { agentId: "meta", kind: "meta", category: "model", usage: { tokens: 10, wallSeconds: 1 } }),
     call("fixture-engineer", { agentId: "engineer", kind: "engineering_model", category: "model", status: "unknown", usage: { tokens: null, reservedTokens: 25 } }),
-    call("fixture-source", { agentId: "tools", kind: "frozen_local_source_retrieval", category: "tool", requestedBy: "meta" }),
+    call("fixture-source", { agentId: "tools", kind: "source_read", category: "tool", tool: { role: "source" }, requestedBy: "meta" }),
     call("fixture-validation", { agentId: "tools", kind: "validation", category: "tool", requestedBy: "engineer" }),
     call("fixture-unlinked", { agentId: "tools", kind: "validation", category: "tool" }),
   ],

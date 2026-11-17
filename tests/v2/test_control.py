@@ -3,8 +3,8 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from docking_rsi.store import Store
-from docking_rsi.controller import Controller
+from rsi_lab.store import Store
+from rsi_lab.controller import Controller
 
 
 class ControlTests(unittest.TestCase):

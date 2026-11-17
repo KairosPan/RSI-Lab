@@ -5,7 +5,7 @@ const app = document.querySelector("#app");
 app.innerHTML = `<div class="app-shell agent-shell">
   <button class="mobile-backdrop" data-action="close-nav" aria-label="Close navigation"></button>
   <aside class="sidebar" aria-label="Main navigation">
-    <a class="brand" href="#agents" aria-label="RSI-Lab home"><span class="brand-mark">${icon("molecule")}</span><span class="brand-name">RSI<span>—</span>Lab</span></a>
+    <a class="brand" href="#agents" aria-label="RSI-Lab home"><span class="brand-mark">${icon("layers")}</span><span class="brand-name">RSI<span>—</span>Lab</span></a>
     <div class="workspace-switch"><span class="workspace-icon">${icon("branch")}</span><span class="workspace-copy"><strong>System workspace</strong><small>Harnesses · Memory · Tools</small></span></div>
     <div class="nav-caption">RESEARCH WORKSPACE</div>
     <nav class="nav-list"><a class="nav-link active" href="#agents" aria-current="page">${icon("branch")}Architecture</a></nav>

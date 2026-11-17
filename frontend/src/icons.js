@@ -4,8 +4,6 @@ const paths = {
   grid: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
   flask:
     '<path d="M9 3h6M10 3v6L4.5 19a1.3 1.3 0 0 0 1.2 2h12.6a1.3 1.3 0 0 0 1.2-2L14 9V3M8 14h8"/>',
-  molecule:
-    '<path d="m7 8 5-3 5 3v7l-5 3-5-3zM7 8 3 6m14 2 4-2m-9 12v4"/><circle cx="12" cy="5" r="2"/><circle cx="7" cy="15" r="2"/><circle cx="17" cy="15" r="2"/>',
   layers: '<path d="m12 3 10 5-10 5L2 8zM3 12l9 5 9-5M3 16l9 5 9-5"/>',
   branch:
     '<circle cx="6" cy="5" r="2.5"/><circle cx="6" cy="19" r="2.5"/><circle cx="18" cy="5" r="2.5"/><path d="M6 8v8m12-8c0 6-12 2-12 8"/>',

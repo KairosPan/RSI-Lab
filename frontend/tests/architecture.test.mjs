@@ -6,7 +6,7 @@ import { architectureComponents, architectureRows, architectureCallHome, archite
 const ids = (rows) => rows.map((r) => r.id);
 
 test("architecture retains five modules and places controller in infrastructure", () => {
-  assert.deepEqual(Object.values(architectureComponents).filter((c) => !c.infrastructure).map((c) => c.name), ["Lab Harness", "Meta-Harness", "Scientific Memory", "Literature Tool Calling", "Computational Tools"]);
+  assert.deepEqual(Object.values(architectureComponents).filter((c) => !c.infrastructure).map((c) => c.name), ["Lab Harness", "Meta-Harness", "Scientific Memory", "Source Tools", "Computational Tools"]);
   assert.equal(architectureComponents.engineer, undefined);
   assert.equal(architectureComponents.controller.infrastructure, true);
 });
@@ -38,16 +38,16 @@ test("Lab defaults to persisted orchestration and never infers it from empty mod
   assert.equal(architectureState({ calls: [] }, "lab").status, "unknown");
 });
 
-test("frozen source reads and computational executions are disjoint and exhaustive", () => {
-  const sources = architectureRows(snapshot, "literature", "frozen_sources");
+test("source reads and computational executions are disjoint and exhaustive", () => {
+  const sources = architectureRows(snapshot, "sources", "reads");
   const computations = architectureRows(snapshot, "tools", "executions");
   assert.equal(sources.length, 1);
   assert.equal(computations.length, 2);
   assert.equal(new Set(ids([...sources, ...computations])).size, 3);
   assert.ok(!computations.some((call) => sources.includes(call)));
-  assert.deepEqual(architectureRows(snapshot, "literature", "overview"), []);
-  assert.equal(architectureState(snapshot, "literature").status, "not_connected");
-  assert.match(architectureState(snapshot, "tools").note, /No Vina calls in this run/);
+  assert.deepEqual(architectureRows(snapshot, "sources", "overview"), []);
+  assert.equal(architectureState(snapshot, "sources").status, "recorded");
+  assert.match(architectureState(snapshot, "tools").note, /2 tool Effects recorded/);
 });
 
 test("module costs deduplicate linked calls and retain unresolved reservation and null usage", () => {
@@ -67,15 +67,15 @@ test("attribution and tool classification use explicit fields, never keywords", 
   const data = { calls: [
     { id: "build", kind: "engineering_model", agentId: "meta", category: "model" },
     { id: "build-by-role", kind: "other", agentId: "engineer", category: "model" },
-    { id: "unlinked", kind: "future_tool", category: "tool", title: "Meta literature PubMed", summary: "engineering request" },
+    { id: "unlinked", kind: "future_tool", category: "tool", title: "Meta source retrieval", summary: "engineering request" },
     { id: "linked", kind: "future_tool", category: "tool", requestedBy: "engineer" },
-    { id: "source", kind: "frozen_local_source_retrieval", category: "tool" },
+    { id: "source", kind: "source_read", category: "tool", tool: { role: "source" } },
   ] };
   assert.deepEqual(ids(architectureRows(data, "meta", "engineering")), ["build", "build-by-role"]);
   assert.deepEqual(ids(architectureRows(data, "meta", "tools")), ["linked"]);
-  assert.deepEqual(ids(architectureRows(data, "literature", "frozen_sources")), ["source"]);
+  assert.deepEqual(ids(architectureRows(data, "sources", "reads")), ["source"]);
   assert.deepEqual(architectureCallHome(data.calls[2]), { id: "tools", section: "executions" });
-  assert.deepEqual(architectureCallHome(data.calls[4]), { id: "literature", section: "frozen_sources" });
+  assert.deepEqual(architectureCallHome(data.calls[4]), { id: "sources", section: "reads" });
 });
 
 test("memory keeps original issue fields and is explicitly partial; missing sources stay unknown", () => {

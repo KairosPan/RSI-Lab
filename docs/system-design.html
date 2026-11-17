@@ -3,7 +3,7 @@
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="description" content="RSI-Lab 完整系统设计 v2.1：Meta 主动检测、开源 Codex harness 自动修改、编译验收、版本切换、续跑与失败回退；Lab/Meta 独立持久会话、工作记忆、逐事件日志与共享 Scientific Memory。">
 <meta name="base-source-sha256" content="24421b77edb5ee39c9dd19d26d161923c309e9b8ca4a0d3fafcbd4dd810990a9">
-<meta name="html-revision" content="2026-11-09-persistent-agent-sessions">
+<meta name="html-revision" content="2026-11-09-generic-framework">
 <title>RSI-Lab 完整系统设计 v2.1</title><style>
 :root{--bg:#f5f5ef;--paper:#fffefa;--ink:#202f2c;--muted:#68746e;--line:#dce3dc;--accent:#155a4d;--soft:#eaf1ec;--side:286px}
 *{box-sizing:border-box}html{scroll-behavior:smooth;scroll-padding-top:32px}body{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Noto Sans CJK SC","Microsoft YaHei",sans-serif;font-size:15px;line-height:1.9}a{color:var(--accent);text-underline-offset:3px}button{font:inherit;cursor:pointer}.skip{position:absolute;left:-10000px}.skip:focus{left:20px;top:10px;z-index:20;background:white;padding:10px}
@@ -122,7 +122,7 @@ code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } /* Warni
 <li><a class="toc-level-4" href="#session-checkpoint-recovery">9.4 检查点与会话恢复</a></li>
 <li><a class="toc-level-3" href="#lab-执行和领域批次">10. Lab 执行和领域批次</a></li>
 <li><a class="toc-level-4" href="#通用步骤契约">10.1 通用步骤契约</a></li>
-<li><a class="toc-level-4" href="#化合物工作流示例">10.2 化合物工作流示例</a></li>
+<li><a class="toc-level-4" href="#表格分析工作流示例">10.2 表格分析工作流示例</a></li>
 <li><a class="toc-level-4 toc-highlight" href="#可选知识和记忆">10.3 Scientific Memory：通用科研状态与记忆机制</a></li>
 <li><a class="toc-level-5" href="#scientific-memory-objects">10.3.1 三层职责与六类科研对象</a></li>
 <li><a class="toc-level-5" href="#scientific-memory-update">10.3.2 登记、关联与判断修订</a></li>
@@ -162,8 +162,9 @@ code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } /* Warni
 <p>v2.1 明确 Meta 对发现问题负责：独立读取运行事实，在没有 Lab 报错、没有规则告警时也持续巡检；主动追查目标偏离、静默数据错误和能力缺口，自行取证并跟进处理。周期巡检、停滞诊断、覆盖记录和反证要求见 §7.1–7.6。检测主动性以提前发现和调查闭环衡量，不以告警数或修改数衡量。</p>
 <p>v2.1 同时将<strong>开源 Codex harness 的源码修复纳入主闭环</strong>：Meta 可自主发现执行层问题，在 task 预授权范围内修改指定 fork，编译并验收候选，切换本运行使用的 Codex 版本后继续任务；失败自动撤销候选或回退。该能力使用同一 ChangeEngine，具体绑定、进程切换与恢复契约见 §11.6；它是必须实现和验证的目标能力，当前文档更新不表示运行代码已具备此能力。</p>
 <p>本文取代 v1.0 的默认配对实验发布门槛、T3 整体禁用及只在下一运行启用的限制；保留不可变事实、精确交付、预算守恒、外部效果恢复和版本追踪要求。本文是完整的目标设计，不报告新运行结果，也不表示代码已按此重构。本发布副本仅包含目标设计，不分发既有实验记录、结果快照或原始模型对话。</p>
-<p><strong>Scientific Memory 修订：</strong>新增以研究问题组织的持久科研状态，连接来源、判断、研究行动、方法经验与决定。按问题读取支持/反证与未结工作，来源变化和新增证据均触发有界复核；观察卡与引用统一交付。主契约见 <a href="#可选知识和记忆">§10.3</a>，实体、API、预算、迁移和 SM01–SM20 验收同步更新；通用机制不依赖化合物候选或单一评分。</p>
+<p><strong>Scientific Memory 修订：</strong>新增以研究问题组织的持久科研状态，连接来源、判断、研究行动、方法经验与决定。按问题读取支持/反证与未结工作，来源变化和新增证据均触发有界复核；观察卡与引用统一交付。主契约见 <a href="#可选知识和记忆">§10.3</a>，实体、API、预算、迁移和 SM01–SM20 验收同步更新；通用机制不依赖特定候选类型或单一评分。</p>
 <p><strong>2026-11-09 会话与执行记忆修订：</strong>Lab 与 Meta 各自维护独立持久会话，正常续跑不再每轮使用 <code>--ephemeral</code>。增加可跨会话恢复的 AgentWorkingMemory、逐事件持久执行日志和受信检查点；共享 Scientific Memory 仍是经过来源与版本约束的科研状态。§3、§6、§9、§11、§13–17 同步规定所有权、有效上下文、交付认证、崩溃边界及 PS01–PS12 验收。这是目标方案；当前实现范围与运行入口见 <a href="persistent-agents.md">持久会话实现说明</a>。目标验收不等于已全部通过，本文不分发历史运行样本。</p>
+<p><strong>通用框架发布范围：</strong>本仓库保留 <code>rsi_lab</code>、通用来源/回复/工程交付生产者、合成 CSV 示例及机制测试。下述目标目录、GridFixture/MemoryFixture 与验收矩阵是架构要求，实际代码布局与可执行入口以 <a href="rsi-lab-core.md">通用核心说明</a> 和 <a href="../README.md">README</a> 为准。</p>
 <h2 id="第一部分三层解耦">第一部分：三层解耦</h2>
 <h3 id="a.1-三层的责任与依赖方向">A.1 三层的责任与依赖方向</h3>
 <p>系统拆为通用内核 <code>rsi_lab</code>、领域包 <code>rsi_domains</code> 和计算任务 <code>task</code>。Lab 与 Meta 是内核承载的执行角色；领域包提供科学能力；task 指定这一次要完成什么、用哪些输入、满足哪些条件。</p>
@@ -184,7 +185,7 @@ code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } /* Warni
 <tr>
 <td><code>rsi_lab</code></td>
 <td>状态、调度、预算、事件与证据、外部调用、上下文、能力加载、变更验收与恢复</td>
-<td>化合物结构、靶点名称、领域分数公式、具体科学阈值、特定任务的完成数量</td>
+<td>具体输入格式、业务对象名称、领域分数公式、具体科学阈值、特定任务的完成数量</td>
 </tr>
 <tr>
 <td><code>rsi_domains.&lt;domain&gt;</code></td>
@@ -198,7 +199,7 @@ code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } /* Warni
 </tr>
 </tbody>
 </table>
-<p>依赖方向固定：领域包实现内核定义的接口；task 通过配置引用内核与领域能力。<code>rsi_lab</code> 不导入具体领域包，安装内核并运行领域中立 fixture 时不需要安装化学等领域依赖。进程入口按登记的包名、接口版本和内容哈希加载实现；内核通过接口调用，不通过 <code>if domain == ...</code> 分支判断科学含义。</p>
+<p>依赖方向固定：领域包实现内核定义的接口；task 通过配置引用内核与领域能力。<code>rsi_lab</code> 不导入具体领域包，安装内核并运行领域中立 fixture 时不需要安装额外领域依赖。进程入口按登记的包名、接口版本和内容哈希加载实现；内核通过接口调用，不通过 <code>if domain == ...</code> 分支判断科学含义。</p>
 <p>领域包可以依赖独立数值库和提供多个计算后端；每个后端声明兼容协议、资源需求、结果格式和恢复方式。更换后端仍需通过同一版本与来源检查，不因 Python 接口相同就视为结果可互换。</p>
 <p>Codex harness 是 <code>rsi_lab</code> 通过 <code>AgentRuntimeAdapter</code> 管理的执行组件，登记为 <code>codex_runtime</code>，不另增一个领域层。应用侧提示、上下文和策略与开源 Codex 内部的 agent loop、工具调度、重试、上下文压缩实现分别标识；诊断必须指出改动属于哪一组件。源码修复面向 RSI-Lab 自己构建并启动的 Codex fork；官方桌面应用及本次编辑文档的聊天进程不作为隐含的版本切换目标。开源 harness 与 CLI、SDK、app-server 的关系见 <a href="https://developers.openai.com/blog/codex-as-a-platform">OpenAI 官方说明</a>；本文后续 runtime 管理契约是 RSI-Lab 的目标设计。</p>
 <figure class="architecture-diagram"><svg role="img" aria-label="三层职责与证据循环" width="336pt" height="525pt"
@@ -328,8 +329,8 @@ code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } /* Warni
       codex/                # 指定 fork 的源码候选、构建配方、兼容与回退检查
     reporting/              # 任务、修复、费用与未决义务
   rsi_domains/
-    compound_screening/
-      schemas/              # 化合物、受体等领域对象
+    tabular/
+      schemas/              # 数据集、记录与单位等领域对象
       adapters/             # 计算、解析与分析后端
       protocols/            # 协议 schema 与兼容性规则
       validation/           # 科学结果有效性及完成判据
@@ -365,7 +366,7 @@ runs/&lt;run_id&gt;/
 <li><code>Effect</code>：某项 Work 引起的实际外部调用，具有输入哈希、幂等键、资源预约和结果责任。</li>
 <li><code>Artifact</code>：原始或派生产物，持有创建它的版本与依赖关系。</li>
 </ul>
-<p>task 不要求所有领域都采用“生成候选—评分”的形态。内核调度带类型的计算步骤；候选生成、身份查重、评分与批次只是化合物等领域可以启用的执行模式。相应 schema 和 Worker 循环通过能力契约接入，不能成为其他领域必须伪造的数据结构。</p>
+<p>task 不要求所有领域都采用“生成候选—评分”的形态。内核调度带类型的计算步骤；候选生成、身份查重、评分与批次只是特定任务可以启用的执行模式。相应 schema 和 Worker 循环通过能力契约接入，不能成为其他领域必须伪造的数据结构。</p>
 <p><code>ScientificQuestion</code> 表达 task 内的科研问题；<code>ScientificInvestigation</code> 组织实验、分析、检索或推导，并关联 Step/Work/Effect。二者不替代 TaskSpec、调度 Work 或 Meta Issue；科研解释更新不自动变成系统修复，关闭问题不改变 task 的冻结完成条件。</p>
 <h3 id="a.4-通用接口与能力注册">A.4 通用接口与能力注册</h3>
 <p>接口定义留在 <code>rsi_lab.contracts</code>。领域包返回类型化计划和结果；内核执行副作用、管理状态和计费。</p>
@@ -499,7 +500,7 @@ runs/&lt;run_id&gt;/
 </tbody>
 </table>
 <p><code>TaskSpec</code> 与启动 <code>RunConfig</code> 是不可变起点，表中的精确版本是初始绑定。运行中发布通过追加式 <code>ReleaseManifest / ActiveRunBinding</code> 更新当前版本，至少记录 <code>run_id, branch_id, parent_release_hash, task_spec_hash, frozen_requirements_hash, actual_protocol_hash, capability_bindings, rsi_kernel_artifact_hash, agent_runtime_bindings_by_role, memory_binding_hash, activation_seq</code>。每个角色的 runtime 绑定指向 §11.6 的完整不可变清单，明确 Codex binary/config、适配器与会话契约；旧 <code>runtime_artifact_hash</code> 经显式 schema 迁移保留其原义，不用于同时指代 RSI 内核和 Codex。修复不覆盖启动配置、不改变 task_spec_hash 或冻结要求；派发读取本运行的活动绑定，结果保存实际版本。新协议或新 Codex 产物登记本身不切换任何运行；只有明确作用于该 run/branch/role 的发布才生效，其他运行和角色保持自己的绑定。</p>
-<p>例如，当任务要求“至少 100 个达标 compound”时，数量下限 <code>100</code>、达标阈值、身份去重规则和所需科学证据均属于冻结要求。内核保存要求哈希；领域包负责解释 compound 和达标的科学含义。完成报告必须提供可追溯、去重后的合格名单及所用协议，不能把 100 次调用、100 条派生记录或同一化合物的多个构象算成 100 个合格 compound。</p>
+<p>例如，当任务要求“两个站点的能耗聚合结果均与登记对照一致”时，对象数量 <code>2</code>、绝对误差阈值、记录身份规则和单位证据均属于冻结要求。内核保存要求哈希；能力包解释单位与指标。完成报告必须给出两个站点的可追溯结果及所用协议，不能把多次调用、派生记录或同一站点的重复输出算成额外达标对象。</p>
 <p>少量样本可以证明解析器、适配器或上下文改动可用，但不能替代最终任务的数量要求。局部验收通过与整个 task 完成使用不同结果字段。</p>
 <p>task 启动后，Meta 不能通过修改配置、提示词、判定代码或新建协议版本间接降低上述要求。科学输入可在已授权范围内改变，但协议版本必须继续引用同一冻结要求；需要改变科学目标或冻结要求时，由用户提供新的明确任务定义，不能冒充原任务已经完成。</p>
 <p><code>MemoryRuntimeBinding</code> 是内容寻址清单，包含实际 <code>memory_contract_ref/hash, memory_policy_ref/hash, selector_ref/hash, projection_ref/hash, compatible_schema_versions, migration_ref/hash?</code>。初始值来自 TaskSpec；后续变更通过 ReleaseManifest/ActiveRunBinding 在安全点 CAS 切换，不能覆写初始配置或扩大来源权限。每个 packet/Effect 和科研提议保存实际 <code>memory_binding_hash</code> 与读取快照，按实际版本解释和恢复；在途调用保留原绑定。</p>
@@ -598,7 +599,7 @@ runs/&lt;run_id&gt;/
 <ol type="1">
 <li>内核不安装任何具体科学依赖也能运行契约 fixture；静态依赖检查不出现对具体 <code>rsi_domains</code> 实现的导入。</li>
 <li>同一内核通过注册表运行至少两个不同能力集合；更换 task 的科学输入与完成要求不修改内核代码。</li>
-<li>compound 阈值和至少 100 个达标结果的要求仅从该 task 的冻结配置取得，领域包实现解释，内核验证版本与执行边界。</li>
+<li>指标阈值和最低达标结果数量仅从该 task 的冻结配置取得，领域包实现解释，内核验证版本与执行边界。</li>
 <li>修改解析器可以重用原始输出，新增适配器可以处理已有数据；都能指出本次实际计算与复用的产物。</li>
 <li>科学输入改变后，可证明无关计算被复用、受影响结果被重算，旧协议的结果不能被无来源地冒充新协议结果。</li>
 <li>模块越界修改、预算扩张与冻结要求改变均被执行器拒绝；合法补丁能在局部验收后接入当前 task 的后续执行。</li>
@@ -868,7 +869,7 @@ runs/&lt;run_id&gt;/
 <p>确定性指相同已提交事件、配置和版本产生相同控制状态；模型和外部计算本身不要求确定。事件回放只消费归档，不重新调用外部服务。</p>
 <ol type="1">
 <li><strong>I1 原始事实不可变。</strong> 调用输入、原始输出、评价、页面和回执只追加；修订结果引用旧版本，不覆盖历史。</li>
-<li><strong>I2 冻结要求不可自改。</strong> Meta 不能更改任务目标、阈值、达标定义、已冻结的数量要求（如本化合物任务的至少 100 个达标 compound）、预算上限或自己的授权边界。</li>
+<li><strong>I2 冻结要求不可自改。</strong> Meta 不能更改任务目标、阈值、达标定义、已冻结的数量要求（如 CSV 示例的两个站点均达标）、预算上限或自己的授权边界。</li>
 <li><strong>I3 调度不伪造证据。</strong> 到期、容量变化和租约释放只推进调度版本。</li>
 <li><strong>I4 等待不占派发槽。</strong> parked 事项和 pending 请求不占执行租约；未知外部效果仍持有未决责任。</li>
 <li><strong>I5 执行先有持久意图。</strong> 所有外部调用都绑定已提交 effect、版本、输入哈希、预算预约和幂等键。</li>
@@ -1496,22 +1497,21 @@ outcome = suspected_problem | no_issue_found | insufficient_evidence | not_appli
 <h4 id="通用步骤契约">10.1 通用步骤契约</h4>
 <p>Lab 选择已注册能力，控制面检查输入、权限、依赖、版本和预算，再创建 Effect。完成原始计算、解析、分析和科学判断分别建结果节点，避免一个解析器错误让整个计算回滚重跑。task 的完成条件由领域 validator 在当前有效结果上检查；模型报告“完成”只是提议。</p>
 <p>相关步骤携带 ScientificQuestion / ScientificInvestigation 引用，按真实输入身份绑定回执和产物。执行完成后登记待解释结果，下一次相关 Lab 调用可修订判断或说明证据不足；执行完成、解释完成和 task 达标分开。仅声明为前瞻检验的步骤需要事前冻结预测与比较规则。</p>
-<h4 id="化合物工作流示例">10.2 化合物工作流示例</h4>
-<p>以下属于 <code>rsi_domains</code> 的筛选工作流，不写死在 <code>rsi_lab</code> 中。默认每批最多 8 项、最多 2 次生成尝试、一次缺口修补；修补拒绝比例默认 0.5，合法范围 [0,1]。这些工程参数与冻结科学阈值分别存放。repair 在对应适配器验收通过后可在当前任务安全点开启，无需配对实验。</p>
+<h4 id="表格分析工作流示例">10.2 表格分析工作流示例</h4>
+<p>以下以 <code>rsi_domains.tabular</code> 的合成 CSV 聚合为例，展示任务语义如何通过适配器接入；数据格式、单位与预期结果不写死在 <code>rsi_lab</code> 中。演示的角色决策使用固定 fixture，校验、能力验收、聚合与恢复实际执行，不能据此声称真实模型具有自主发现能力。</p>
 <ol type="1">
-<li>begin_batch 冻结历史、策略、协议和预算；target_count 取配置与可分配评价额度的小者，评价预约从父账户转拨。</li>
-<li>attempt 0 保存完整原始输出、解析版本和候选来源；预检结构、规范身份、全历史/同批重复及他方未决预约，不做评价。</li>
-<li>合法新候选保留。首轮空/格式错误或缺口且拒绝比例达登记条件时，attempt 1 仅补缺口；多余候选记 surplus，不扩批或追加第三次。</li>
-<li>派发前按最新历史、协议兼容性和身份预约复检，逐项执行评价并提交，保留成功前缀。</li>
-<li>已准入效果均确定后只提交一次 batch_committed；unknown 则 blocked_unknown，不重复评价已成功项、不虚增进度。</li>
+<li>登记 CSV 的内容哈希与记录身份。没有单位证据时提出缺口并持久等待，不根据数值大小猜测 Wh/kWh。</li>
+<li>按来源请求交付记录对应的单位映射，唤醒原问题；跨进程恢复使用同一请求和 Work 身份。</li>
+<li>为聚合能力登记输入/输出契约，执行正常输入、缺失单位、不支持单位及重复记录的验收案例。</li>
+<li>冻结 TaskPlan 的全部对象、协议、能力版本与成功条件，再派发实际聚合；每条原始记录与结果保持可追踪。</li>
+<li>成功回执后、发布前中断时，恢复仅完成已有结果发布与后续通知，不重新聚合。未知外部效果保留对账责任。</li>
 </ol>
-<p>Batch、Attempt、Call/Effect、Evaluation 是四种身份；修补调用照常计费，但不增加批次、Meta credit 或巡查时钟。连续三批零产出触发一次停滞处置；无合法修复/新策略则 stalled，不无限生成。</p>
-<p>候选身份使用领域 canonicalizer，命中哈希后核对规范表示。<strong>计算查重键同时包含实际输入、评价语义/协议兼容性及计算能力版本</strong>：同 compound 的同一有效计算不重复；协议变化需要重新计算时不会被“历史见过该分子”错误禁止。至少 100 个达标 compound 按冻结身份和资格规则去重计数，重新解析或同分子多次评价不能增加独立 compound 数。</p>
-<p>重复、无效、未接纳、已执行及 unknown 均保留逐项身份回执。已有结果的真实值、协议与证据引用反馈给后续合法生成步骤，不要求模型判断未呈现全历史的成员关系；独立重复或协议改变仍按冻结规则处理。新回执不扩充本批尝试次数或实际评价额度。</p>
+<p>示例要求 North 与 South 两个站点均符合冻结的绝对误差条件，重复输出不会增加达标对象数。<strong>计算查重键同时包含实际输入、方法/协议兼容性及计算能力版本</strong>；同一有效计算不能因重启而重复，协议改变时也不能仅以“历史见过该记录”为由阻止必要的新计算。</p>
+<p>失败、未知、未开始及已完成结果分别保存。任务覆盖要求与实际资源消耗独立报告，修复完成不自动表示任务成功。示例的具体入口与合成期望值见 <a href="rsi-lab-core.md#合成-csv-示例">通用核心说明</a>。</p>
 <h4 id="可选知识和记忆">10.3 Scientific
 Memory：通用科研状态与记忆机制</h4>
 <p>Scientific Memory
-以<strong>研究问题组织记忆，以证据约束判断，以新结果推动修订</strong>，支持实验、计算分析、观察、复现、文献综合与理论推导。它保存研究状态，并为下一步行动重建相关上下文。以下是目标契约。当前仓库中的运行账本与版本化事实不等于本节六类科研对象和完整记忆机制均已实现；功能及科研收益须分别验证。</p>
+以<strong>研究问题组织记忆，以证据约束判断，以新结果推动修订</strong>，支持实验、计算分析、观察、复现、文献综合与理论推导。它保存研究状态，并为下一步行动重建相关上下文。以下是目标契约。当前研究模式已有六类版本化对象、来源绑定和按预算交付的实现，见 <a href="rsi-lab-core.md#scientific-memory-与独立工作记忆">通用核心说明</a>；完整语义支持检查、自动长期归纳等目标仍需分别实现与验证。对象保存成功不代表科研判断或科研收益已经验证。</p>
 <p>本节共享科研状态与 §9.2 的 AgentWorkingMemory 分开：Lab/Meta 的私人计划、调查草稿和理由摘要不会自动成为 Claim/MethodExperience。科研提议须绑定精确来源与本次受信读取记录；记忆对象保留其研究范围和检查状态，不因被某会话反复引用而升级可信度。原始日志可以作为执行/机制诊断证据，若用于科学判断，还须经领域语义与来源检查。</p>
 
 
@@ -1798,11 +1798,7 @@ Agent。没有新信息或证据不足时允许空提议，不以写入量为成
 <code>memory_match / memory_review / memory_consolidate</code>。每种处理器同时提供权限、资源、恢复和终态；纯本地索引工作计量
 CPU/时间，额外模型/工具调用另建 Effect
 并共享任务预算。已有调用内的轻量解释不重复计费；维护不能把同一费用记两次，也不能占着外部许可等待子调用。</p>
-<p>原有“每逻辑批次最多一个知识查询和一个记忆提议，两次尝试合计；每运行
-12 查询 / 48 传输”仅保留为 §10.2
-化合物工作流的可配置预设，不成为所有领域的内核规则。一般 task
-显式配置读取、提议与维护预算及选择策略版本。provider、范围、条数和费用登记，source_call_id
-由控制器认证；查询/提议在后续合法步骤使用，不增加该工作流的生成尝试次数。</p>
+<p>task 显式配置读取、提议与维护预算及选择策略版本，不从某个示例继承固定调用次数。provider、范围、条数和费用均登记，<code>source_call_id</code> 由控制器认证；查询或记忆提议不能增加执行额度，也不能通过维护队列重复获得资源。</p>
 <p>科学解释更新不自动触发代码发布；改变检索机制、工作流或可执行方法时由
 Meta 通过 ChangeEngine
 处理。科研进展时钟只接受任务登记的真实进展，重复记忆、维护次数与归纳事件不制造进度或重新发放额度。</p>
@@ -2076,7 +2072,7 @@ AcceptanceSpec
 <p>task 的冻结完成判据满足、预算/时长耗尽、用户停止、不可恢复错误或有界停滞处理失败时进入 finalizing。停止新 Lab、发现、变更，以及新的科研解释/归纳/外部检索 Effect；已排队 memory_review / memory_consolidate 不因不叫 lab_step 而绕过停止。继续幂等摄取已承诺的在途结果、确定性失效标记、待处理状态持久化和必要恢复；不为清空记忆队列新增模型/工具调用。</p>
 <p>处理顺序：摄取已落盘结果 → 对账未知效果 → 撤销未验收试用版本/完成必要恢复 → 结算可判定变更与 Continuation → 处理未决 Wait 或记录资源不足 → 验证当前结果和任务完成条件 → 输出义务与预算总账。已 accepted 的修复不无条件退回旧基线。</p>
 <p>同时停止 Lab/Meta 新 turn；在途日志继续接收并持久化，合法完成结果仍提交。按可核验安全边界封存 journal、工作记忆 head 和 session checkpoint，不能为写结束总结或压缩而新增未授权模型请求。无法对齐的会话标记 recovery_required 并列出日志缺口/未决 Effect；停止不删除原生会话文件或将局部草稿自动发布为科研结论。</p>
-<p>收尾不额外启动整轮对照，也不偷偷增加评价来凑达标数或验收样本。合法在途预约按停止策略处理。对于冻结了至少 100 个达标 compound 要求的任务，若有效达标数少于 100，即使停止原因是预算耗尽或修复完成，也不能标记科学任务成功；其他领域使用各自冻结完成判据。</p>
+<p>收尾不额外启动整轮对照，也不偷偷增加评价来凑达标数或验收样本。合法在途预约按停止策略处理。若任务冻结了两个站点均达标的要求，只有一个有效结果时，即使停止原因是预算耗尽或修复完成，也不能标记科学任务成功；其他任务同样按各自冻结完成判据结算。</p>
 <h4 id="报告相互独立的状态">13.2 报告相互独立的状态</h4>
 <pre class="text"><code>stop_reason = goal_met | compute_budget | token_budget | wall_time | user_stop | stalled | error
 task_status = succeeded | partial | blocked | failed
@@ -2265,7 +2261,7 @@ finalize_run(reason) -&gt; report_ref</code></pre>
 <tr>
 <td>科学任务</td>
 <td>当前有效结果、独立达标对象数、冻结阈值与目标状态</td>
-<td>100 次调用/评价不等于 100 个达标 compound</td>
+<td>两次调用或重复结果不等于两个独立达标对象</td>
 </tr>
 <tr>
 <td>成本</td>
@@ -2310,7 +2306,7 @@ finalize_run(reason) -&gt; report_ref</code></pre>
 <tr>
 <td>P0 三层契约</td>
 <td>rsi_lab/rsi_domains/task 边界、能力接口、任务/协议/冻结要求、领域中立 fixture</td>
-<td>内核无具体领域导入；一个非化合物 fixture 可通过同一入口执行</td>
+<td>内核无具体领域导入；多个通用 fixture 可通过同一入口执行</td>
 </tr>
 <tr>
 <td>P1 控制面</td>
@@ -2340,15 +2336,15 @@ finalize_run(reason) -&gt; report_ref</code></pre>
 </tbody>
 </table>
 <p>P4 不要求每个补丁成功，但通用闭环至少有一次真实修复达到 problem_status=resolved、continuation=verified；Codex 自修改子项另外要求实际 fork 修改、构建、切换和同一任务续跑达到这些条件。两项分别报告，完整新版 P4 要求两项都通过，允许同一 Codex 案例同时满足。只有失败回退、合成正例或没有遇到相应修复机会时，该子项仍待验证。P3 受控故障证明五条路径可执行，必须与 P4 自然运行案例区分。</p>
-<p>P4 的有限任务范围在开始前登记；若只验收续跑闭环，应分别报告“P4 通过”和“科学任务仍在进行”。最终科学任务必须满足其全部冻结条件；对于已冻结至少 100 个达标 compound 要求的化合物任务，该数量不变，不能把小样本修复验收替代最终交付。</p>
+<p>P4 的有限任务范围在开始前登记；若只验收续跑闭环，应分别报告“P4 通过”和“科学任务仍在进行”。最终任务必须满足全部冻结条件；例如冻结了两个站点全部达标的 CSV 任务，该覆盖要求不变，不能把局部修复验收替代最终交付。</p>
 <p>迁移优先复用不可变存储、原始调用、身份索引、评价来源、原生记录查询和回执认证；通过桥接适配器接入，旧 runtime 的隐式批次推进不直接嵌入新循环。旧机制与研究结果保留，不追溯改写成新 ChangeOutcome。</p>
 <p>旧 ephemeral 调用的日志与共享状态可作为新 agent 工作记忆的导入来源，但不能伪造不存在的原生 session 前缀。迁移建立新的 Lab/Meta 持久会话、标注导入来源与未知项，并按本次实际交付认证；独立工作记忆、逐事件日志和基本会话恢复属于 P1/P2 必需项，不后置到可选研究。</p>
 <p>Scientific Memory 的基本功能随 P1/P2 接入，不要求先完成向量检索、长期自动归纳或跨任务共享。P4 保持工程修复与续跑验收；记忆的独立科研收益另按 P5/§12 评价。旧记录不能仅因迁移到新 schema 被升级为 checked 或已验证经验。</p>
 <h3 id="验收与故障注入">17. 验收与故障注入</h3>
 <p>以下是实现的完成条件，本文不声称已经通过这些测试。检查事件、版本、结果 hash、资源和实际外部调用计数，不能只检查最终返回值。</p>
 <h4 id="领域中立-fixture">17.1 领域中立 fixture</h4>
-<p>提供独立测试域 GridFixture：输入整数 x/y，规范表示为排序 JSON，评价为 <code>-((x-3)^2+(y+1)^2)</code>，带原始输出、input hash 和 evaluation_id。同一内核另加载化合物域契约；fixture 的坐标/评分不进入内核。支持幂等查询与“不支持查询”的故障适配器，使用固定种子的 scripted Lab/Meta 仅验证机制。</p>
-<p>另提供无需化学依赖的 MemoryFixture：两个条件下的数值/定性证据、来源更正、相关与不相关命题、理论前提和乱序行动回执。它测试多形态科研对象及版本/关系/交付机制，不把 GridFixture 的标量评分视为所有研究的结果形式；脚本化解释只证明契约执行。</p>
+<p>提供独立测试域 GridFixture：输入整数 x/y，规范表示为排序 JSON，评价为 <code>-((x-3)^2+(y+1)^2)</code>，带原始输出、input hash 和 evaluation_id。同一内核另加载 CSV 聚合契约；fixture 的坐标/评分不进入内核。支持幂等查询与“不支持查询”的故障适配器，使用固定种子的 scripted Lab/Meta 仅验证机制。</p>
+<p>另提供仅使用标准库的 MemoryFixture：两个条件下的数值/定性证据、来源更正、相关与不相关命题、理论前提和乱序行动回执。它测试多形态科研对象及版本/关系/交付机制，不把 GridFixture 的标量评分视为所有研究的结果形式；脚本化解释只证明契约执行。</p>
 <h4 id="必需矩阵">17.2 必需矩阵</h4>
 <table>
 <colgroup>
@@ -2367,7 +2363,7 @@ finalize_run(reason) -&gt; report_ref</code></pre>
 <tr>
 <td>A01</td>
 <td>更换领域包及 task</td>
-<td>内核无需改动；不导入分子库、不硬编码科学阈值</td>
+<td>内核无需改动；不导入具体领域库、不硬编码科学阈值</td>
 </tr>
 <tr>
 <td>A02</td>
@@ -2611,7 +2607,7 @@ finalize_run(reason) -&gt; report_ref</code></pre>
 </tr>
 <tr>
 <td>F01</td>
-<td>冻结下限为 100 的化合物任务只有 99 个独立达标项，或重复/无效项凑数</td>
+<td>冻结要求两个站点均达标，实际只有一个独立达标项，或重复/无效项凑数</td>
 <td>科学任务不可 succeeded；阈值/资格规则保持冻结</td>
 </tr>
 <tr>

@@ -22,6 +22,29 @@ from .transport import _json as transport_json
 from .call_recovery import recover_codex_receipt, RecoveryBlocked
 from .improvements import ImprovementLoop, enabled
 from .research_policy import normalize_research_policy
+from .driver_report import build_report
+from .orchestration import Orchestration, orchestration_config
+
+
+def recovery_error(stage, item_id, exc):
+    """A reportable recovery failure for one recovery stage and item."""
+    return {'stage': stage, 'id': item_id, 'error_type': type(exc).__name__, 'reason': str(exc)}
+
+
+def unknown_usage_policy(config):
+    """The run's validated ``unknown_usage_policy``; ``hold`` when unset."""
+    value = config.get('unknown_usage_policy', 'hold')
+    if value not in {'hold', 'charge_reservation'}:
+        raise ValueError('unknown_usage_policy must be hold or charge_reservation')
+    return value
+
+
+def model_failure_retries(config):
+    """The run's validated ``model_failure_retries``; 0 when unset."""
+    value = config.get('model_failure_retries', 0)
+    if type(value) is not int or not 0 <= value <= 5:
+        raise ValueError('model_failure_retries must be an integer from 0 to 5')
+    return value
 
 
 class Runtime:
@@ -36,6 +59,9 @@ class Runtime:
         from .adapters import AdapterRegistry
         self.adapters = AdapterRegistry(adapters)
         self.config = store.run(run_id)['config']
+        unknown_usage_policy(self.config)
+        model_failure_retries(self.config)
+        orchestration = orchestration_config(self.config)
         self.research_policy = normalize_research_policy(self.config.get('research_policy'))
         self.agents = AgentState(store, run_id)
         self.improvements = ImprovementLoop(self) if enabled(self.config,'meta_lab') else None
@@ -43,6 +69,7 @@ class Runtime:
         if enabled(self.config,'scientific_memory'):
             from .scientific_memory import ScientificMemory
             self.scientific_memory = ScientificMemory(store, run_id, identity_provider=scientific_identity_provider)
+        self.orchestration = Orchestration(self, orchestration) if orchestration else None
 
     def _mutate(self, key, event, fn, payload):
         return self.store.mutate(self.run_id, key, event, fn, payload=payload)
@@ -114,11 +141,17 @@ class Runtime:
             return proposal
         return self._mutate('observe:' + event_id, 'discovery_admission', apply, payload)
 
-    def _context(self, work):
+    def _context(self, work, orchestration=None):
         issue_id = work['issue_id']
         issue = self.store.get(self.run_id, 'issue', issue_id) if issue_id else None
         mode = 'lab' if work['kind'] == 'lab' else 'discovery' if work['kind'] == 'meta_discovery' else 'disposition'
         evidence_ids = work['inputs'].get('evidence_ids', issue['evidence_ids'] if issue else [])
+        if self.orchestration and orchestration is None:
+            orchestration = self.orchestration.snapshot()
+        if self.orchestration and mode == 'lab':
+            # Recent tool results are optional: the planner may page or omit them.
+            recent = self.orchestration.recent_result_ids(orchestration['settings']['recent_results'])
+            evidence_ids = list(dict.fromkeys(list(evidence_ids) + recent))
         catalog = {}
         for fact in self.store.list(self.run_id, 'fact'):
             provenance = fact['provenance'] if isinstance(fact['provenance'], dict) else {}
@@ -136,6 +169,17 @@ class Runtime:
                 'authorized_source_contracts': self.config.get('authorized_source_contracts', {}),
                 'waiting': self.store.list(self.run_id, 'wait', issue_id=issue_id) if issue_id else []}}
         required = list(work['inputs'].get('required_evidence_ids', []))
+        if self.orchestration and mode == 'lab':
+            task['capability_catalog'] = self.orchestration.lab_catalog(task['capability_catalog'],
+                                                                        orchestration['settings'])
+            task['constraints']['orchestration'] = self.orchestration.lab_constraints(orchestration)
+        elif self.orchestration:
+            # Where the request carries the current signal it is never paged
+            # or omitted; elsewhere Meta is not shown an identity it cannot cite.
+            citable = orchestration['signal_id'] in evidence_ids
+            task['constraints']['orchestration'] = self.orchestration.meta_constraints(orchestration, citable)
+            if citable:
+                required.append(orchestration['signal_id'])
         if self.config.get('research_features'):
             task['constraints']['research_features'] = self.config['research_features']
         if self.research_policy:
@@ -214,7 +258,8 @@ class Runtime:
         work = self.store.get(self.run_id, 'work', work_id)
         if work['kind'] not in {'lab', 'meta_discovery', 'meta_disposition', 'disposition'} or work['status'] != 'ready':
             raise ValueError('An eligible Lab or Meta Work is required')
-        agent, mode, task, options = self._context(work)
+        orchestration = self.orchestration.snapshot() if self.orchestration else None
+        agent, mode, task, options = self._context(work, orchestration)
         if task.get('scientific_memory',{}).get('status') == 'blocked':
             return self._mutate('scientific-context-block:'+work_id,'packet_unrepresentable',
                 lambda tx:tx.update('work',work_id,{'status':'blocked',
@@ -268,6 +313,8 @@ class Runtime:
                 **({'research_features': self.config['research_features']} if self.config.get('research_features') else {}),
                 **({'research_policy': self.research_policy} if self.research_policy else {}),
                 **({'final_review_only':True} if task['constraints'].get('final_review_only') else {}),
+                # The executor recomputes the response schema from this record.
+                **({'orchestration': self.orchestration.metadata(mode, orchestration)} if orchestration else {}),
                 'context_ref': self.store.put_blob(context), 'effective_context_hash': context['effective_context_hash'],
                 'max_effective_context_bytes': context['max_input_bytes']})
 
@@ -284,6 +331,7 @@ class Runtime:
         if effect.get('status') == 'blocked':
             return {'work': effect, 'proposal': None}
         effect = self.controller.dispatch_effect(self.run_id, effect['id'], executor)
+        effect = self._apply_usage_policy(effect)
         if effect['status'] in {'succeeded', 'failed_definite'}:
             receipt = json.loads(self.store.read_blob(effect['result_ref']))
             if receipt.get('terminal_received') or self.config.get('execution_mode') not in {'live', 'role_recall'}:
@@ -294,8 +342,60 @@ class Runtime:
                     raise
             elif effect['status'] == 'failed_definite':
                 self._block_agent_turn(effect, receipt.get('error') or 'Known failure has no native turn terminal')
+        self._schedule_retry(effect)
         proposal = self.apply_meta(effect['id']) if effect['status'] == 'succeeded' and not effect.get('accounting_unknown') else None
         return {'effect': effect, 'proposal': proposal}
+
+    def _apply_usage_policy(self, effect):
+        """Charge a finished call's unmeasured resources at their held amount when the run opts in.
+
+        Returns the Effect as stored afterwards. Dispatching and unknown calls
+        keep their holds: only a known outcome can be settled this way. A
+        journal-recovered call still awaiting writer-exit proof is left alone,
+        because the later journal receipt carries its measured costs. A
+        resource held at 0 is never charged: that would record unmeasured
+        usage as 0, so such a call keeps its reconciliation duty.
+        """
+        if (self.config.get('unknown_usage_policy', 'hold') != 'charge_reservation'
+                or effect['kind'] not in {'lab', 'meta'} or effect['status'] not in {'succeeded', 'failed_definite'}
+                or not effect.get('accounting_unknown')):
+            return effect
+        prior = json.loads(self.store.read_blob(effect['result_ref']))
+        if prior.get('recovered_from_journal') is True and prior.get('recovery_requires_fencing') is True:
+            return effect
+        missing = sorted(r for r in effect['reservations'] if r not in effect.get('actual_costs', {}))
+        if any(effect['held_reservations'][r] == 0 for r in missing):
+            return effect
+        receipt = {'status': effect['status'],
+                   'actual_costs': {r: effect['held_reservations'][r] for r in missing},
+                   'estimated_resources': missing,
+                   'reconciliation': {'effect_id': effect['id'],
+                                      'provenance': 'run config unknown_usage_policy=charge_reservation'}}
+        self.controller.reconcile(self.run_id, effect['id'], receipt, 'usage-policy:' + effect['id'])
+        return self.store.get(self.run_id, 'effect', effect['id'])
+
+    def _schedule_retry(self, effect):
+        """Enqueue one successor for a definite provider failure while the run's retry allowance lasts.
+
+        The failed Effect is never dispatched again. The successor's identity
+        is fixed by the chain root and attempt, so repeating this is a no-op.
+        """
+        if effect['kind'] not in {'lab', 'meta'} or effect['status'] != 'failed_definite':
+            return None
+        work = self.store.get(self.run_id, 'work', effect['work_id'])
+        attempt = work['inputs'].get('retry_attempt', 0) + 1
+        if (work['kind'] not in {'lab', 'meta_discovery', 'meta_disposition'}
+                or attempt > self.config.get('model_failure_retries', 0)):
+            return None
+        receipt = json.loads(self.store.read_blob(effect['result_ref']))
+        if receipt.get('terminal_received') is not True or receipt.get('never_dispatched'):
+            return None
+        if work['issue_id'] and self.store.get(self.run_id, 'issue', work['issue_id'])['status'] != 'open':
+            return None
+        root_id = work['inputs'].get('retry_of', work['id'])
+        key = 'retry:%d:%s' % (attempt, root_id)
+        return self.controller.enqueue(self.run_id, work['kind'], key, key, issue_id=work['issue_id'],
+            inputs={**work['inputs'], 'retry_of': root_id, 'retry_attempt': attempt}, priority=work['priority'])
 
     def enqueue_lab(self, trigger_id, evidence_ids=()):
         """Explicitly start a bounded Lab step; no implicit completed-goal claim."""
@@ -413,10 +513,19 @@ class Runtime:
                     raise ValueError('Meta command must be a closed JSON object')
                 if command.get('action') in {'narrow_request', 'replan_request'}:
                     request = self.store.get(self.run_id, 'request', command['payload']['request_id'])
+                capabilities = self.capability_catalog()
+                if self.orchestration and effect['kind'] == 'lab':
+                    # A Lab call is held to the settings its own Effect recorded.
+                    capabilities = self.orchestration.lab_catalog(capabilities,
+                                                                  self.orchestration.effect_settings(effect))
                 validated = validate_command(response, packet,
                     current_versions=self.versions(effect['issue_id']),
                     authorized_sources=self.config.get('authorized_sources', []),
-                    capabilities=self.capability_catalog(), request=request)
+                    capabilities=capabilities, request=request)
+                if validated['action'] == 'request_diagnostic':
+                    self._admit_tool_inputs(validated['payload'])
+                if validated['action'] == 'propose_lab_settings':
+                    self.orchestration.admit(validated)
                 research_response = self.improvements.validate(response,packet) if self.improvements else {}
                 work = self.store.get(self.run_id, 'work', effect['work_id'])
                 allowed = work['inputs'].get('allowed_action')
@@ -437,7 +546,7 @@ class Runtime:
                     'initial_review_ref': tx.blob(initial_review_receipt(packet, response, effect_id=effect_id,
                         response_ref=effect['receipt_ref'])) if not error and effect['metadata']['mode'] == 'discovery' and not effect['metadata'].get('agent_session_id') else None})
                 if error:
-                    self._repair(tx, effect['issue_id'], pid, error)
+                    self._repair(tx, effect['issue_id'], pid, error, effect_id)
                 return result
             proposal = self._mutate('admit:' + pid, 'meta_proposal_admitted', admit,
                                    {'effect_id': effect_id, 'receipt_ref': effect['receipt_ref']})
@@ -464,7 +573,9 @@ class Runtime:
             result = self._route(proposal)
             if self.improvements:
                 self.improvements.apply_responses(proposal,result)
-        except (ValueError, KeyError) as exc:
+        except (ValueError, KeyError, TypeError) as exc:
+            # Data-shaped routing errors end the proposal; storage failures
+            # (sqlite3.Error, unrelated OSError) propagate and leave it admitted.
             return self._blocked_proposal(proposal, 'blocked_action', str(exc))
         return self._mutate('applied:' + pid, 'meta_proposal_applied',
             lambda tx: tx.update('proposal', pid, {'status': 'applied', 'result_ref': tx.blob(result)}),
@@ -473,17 +584,35 @@ class Runtime:
     def _blocked_proposal(self, proposal, status, reason):
         def apply(tx):
             result = tx.update('proposal', proposal['id'], {'status': status, 'error': reason})
-            self._repair(tx, proposal['issue_id'], proposal['id'], reason)
+            self._repair(tx, proposal['issue_id'], proposal['id'], reason, proposal['effect_id'])
             return result
         return self._mutate('blocked:' + proposal['id'], 'proposal_blocked', apply,
                             {'proposal_id': proposal['id'], 'status': status, 'reason': reason})
 
-    def _repair(self, tx, iid, pid, reason):
+    def _admit_tool_inputs(self, payload):
+        # Dry-run the loaded adapter's side-effect-free prepare so that inputs
+        # it can never accept are refused here instead of poisoning the queue.
+        adapter = self.adapters.by_id.get(payload['capability_id'])
+        if adapter is None:
+            return
+        try:
+            adapter.prepare(json.loads(payload['inputs_json']))
+        except (ValueError, KeyError, TypeError) as exc:
+            raise ValueError('Tool inputs rejected by ' + payload['capability_id'] + ': ' + str(exc)) from exc
+
+    def _repair(self, tx, iid, pid, reason, effect_id):
         # One repair opportunity per issue, independent of scientific evidence.
         if iid and tx.get('issue', iid)['status'] == 'open' and not tx.find('registration', id='repair:' + iid):
             tx.insert('registration', 'repair:' + iid, {'proposal_id': pid, 'reason': reason})
             self.controller._work(tx, iid, 'meta_disposition', 'repair:' + pid,
                                   inputs={'routing_error': reason}, priority=0)
+        if iid is None:
+            # A Lab proposal has no issue; it gets one repair turn, and a
+            # repair turn (inputs carry repair_of) never gets another.
+            source = tx.get('work', tx.get('effect', effect_id)['work_id'])
+            if source['kind'] == 'lab' and 'repair_of' not in source['inputs']:
+                self.controller._work(tx, None, 'lab', 'repair:' + pid,
+                                      inputs={**source['inputs'], 'routing_error': reason, 'repair_of': pid})
 
     def _park(self, iid, dep, key, *, deadline=None, expiry='replan'):
         # Deadline is derived from the persisted proposal event time, not retry time.
@@ -565,7 +694,14 @@ class Runtime:
                 self._park(iid, dep, key + ':park', deadline=deadline)
             return work
         if action == 'propose_trial':
-            spec = json.loads(self.store.read_blob(p['plan_ref']))
+            # plan_ref is model-supplied: a reference to nothing, or to
+            # something other than a JSON object, is a proposal error.
+            try:
+                spec = json.loads(self.store.read_blob(p['plan_ref']))
+            except (FileNotFoundError, json.JSONDecodeError):
+                spec = None
+            if not isinstance(spec, dict):
+                raise ValueError('Trial plan_ref does not name a stored trial specification')
             kinds = {'orchestration_policy': 'policy', 'tool_capability': 'capability', 'scientific_protocol': 'scientific_protocol'}
             version_keys = {'policy': 'policy', 'capability': 'capability', 'scientific_protocol': 'scientific_protocol'}
             kind = kinds[p['trial_kind']]
@@ -589,6 +725,8 @@ class Runtime:
                 {'narrow_request': 'narrow_request', 'replan_request': 'replan', 'close_unresolved': 'close_unresolved', 'escalate': 'ask_user'}[p['expiry_action']], key)
         if action == 'close_issue':
             return c.close_issue(run, iid, p['resolution'], p['reason'], key, evidence_ids=command['evidence_ids'])
+        if action == 'propose_lab_settings' and self.orchestration:
+            return self.orchestration.publish(proposal, key, iid, deadline)
         raise ValueError('Unregistered action')
 
     def ingest_delivery(self, request_id, content, provenance, *, kind='raw', page=0, source_version=1):
@@ -685,80 +823,114 @@ class Runtime:
 
     def recover(self):
         effects = self.controller.recover(self.run_id)
-        agent_recovery = []
+        agent_recovery, errors = [], []
+        # One failing item must not abort the whole recovery. Its stored state
+        # is left untouched and the failure is reported for the operator.
+        def failed(stage, item_id, exc):
+            errors.append(recovery_error(stage, item_id, exc))
         # The outer receipt may be absent even though the CLI already completed.
         # Recover only this attempt's owned durable journal; never resend input.
         for effect in self.store.list(self.run_id, 'effect'):
             if effect['kind'] not in {'lab', 'meta'} or not effect.get('metadata', {}).get('agent_session_id'):
                 continue
-            prior = json.loads(self.store.read_blob(effect['result_ref'])) if effect.get('result_ref') else {}
-            if (effect['status'] not in {'dispatching', 'unknown'}
-                    and not (effect['status'] in {'succeeded', 'failed_definite'}
-                        and prior.get('recovered_from_journal')
-                        and (effect.get('accounting_unknown') or prior.get('recovery_requires_fencing')))):
+            try:
+                prior = json.loads(self.store.read_blob(effect['result_ref'])) if effect.get('result_ref') else {}
+                if (effect['status'] not in {'dispatching', 'unknown'}
+                        and not (effect['status'] in {'succeeded', 'failed_definite'}
+                            and prior.get('recovered_from_journal')
+                            and (effect.get('accounting_unknown') or prior.get('recovery_requires_fencing')))):
+                    continue
+                try:
+                    receipt = recover_codex_receipt(effect, self.store.read_blob(effect['packet_ref']), self.store.root / 'calls')
+                    if receipt is not None:
+                        effects.append(self.controller.reconcile(self.run_id, effect['id'], receipt,
+                            'journal-reconcile:' + effect['id'] + ':' + digest(receipt)))
+                except (RecoveryBlocked, ValueError, OSError) as exc:
+                    self._block_agent_turn(effect, str(exc))
+                    agent_recovery.append({'effect_id': effect['id'], 'status': 'blocked', 'reason': str(exc)})
+            except Exception as exc:
+                failed('agent_effect', effect['id'], exc)
+        # Opt-in failure policies also cover calls settled before a restart.
+        for effect in self.store.list(self.run_id, 'effect'):
+            if effect['kind'] not in {'lab', 'meta'} or effect['status'] not in {'succeeded', 'failed_definite'}:
                 continue
             try:
-                receipt = recover_codex_receipt(effect, self.store.read_blob(effect['packet_ref']), self.store.root / 'calls')
-                if receipt is not None:
-                    effects.append(self.controller.reconcile(self.run_id, effect['id'], receipt,
-                        'journal-reconcile:' + effect['id'] + ':' + digest(receipt)))
-            except (RecoveryBlocked, ValueError, OSError) as exc:
-                self._block_agent_turn(effect, str(exc))
-                agent_recovery.append({'effect_id': effect['id'], 'status': 'blocked', 'reason': str(exc)})
+                self._schedule_retry(self._apply_usage_policy(effect))
+            except Exception as exc:
+                failed('agent_effect', effect['id'], exc)
         proposals = []
         for delivery in self.store.list(self.run_id, 'delivery', status='materialized'):
             # Packet presentation records are separate from source Deliveries.
             if not delivery.get('request_id'):
                 continue
-            self.ingest_delivery(delivery['request_id'], json.loads(self.store.read_blob(delivery['content_ref'])),
-                delivery['provenance'], kind=delivery['kind'], page=delivery['page'], source_version=delivery['source_version'])
+            try:
+                self.ingest_delivery(delivery['request_id'], json.loads(self.store.read_blob(delivery['content_ref'])),
+                    delivery['provenance'], kind=delivery['kind'], page=delivery['page'], source_version=delivery['source_version'])
+            except Exception as exc:
+                failed('delivery', delivery['id'], exc)
         for effect in self.store.list(self.run_id, 'effect', kind='capability_acceptance', status='succeeded'):
             if not effect.get('accounting_unknown'):
-                self.resume_capability(effect['id'])
-        adapter_results = self.recover_adapters()
+                try:
+                    self.resume_capability(effect['id'])
+                except Exception as exc:
+                    failed('capability', effect['id'], exc)
+        adapter_results = self.recover_adapters(errors=errors)
         if self.improvements:
             for effect in self.store.list(self.run_id,'effect',status='failed_definite'):
-                self.improvements.failed_execution(effect)
+                try:
+                    self.improvements.failed_execution(effect)
+                except Exception as exc:
+                    failed('improvement_failure', effect['id'], exc)
         for trial in self.store.list(self.run_id,'trial',status='settled'):
             if trial.get('issue_id'):
-                self.publish_trial_outcome(trial['id'])
+                try:
+                    self.publish_trial_outcome(trial['id'])
+                except Exception as exc:
+                    failed('trial', trial['id'], exc)
         for effect in [e for e in self.store.list(self.run_id, 'effect')
                        if e['kind'] in {'meta', 'lab'} and e['status'] in {'succeeded', 'failed_definite'}]:
-            receipt = json.loads(self.store.read_blob(effect['result_ref']))
             try:
-                if receipt.get('terminal_received') or self.config.get('execution_mode') not in {'live', 'role_recall'}:
-                    self._commit_agent_turn(effect, receipt)
-                elif effect['status'] == 'failed_definite':
-                    self._block_agent_turn(effect, receipt.get('error') or 'Known failure has no native turn terminal')
-                if effect['status'] == 'succeeded' and not effect.get('accounting_unknown'):
-                    proposals.append(self.apply_meta(effect['id']))
-            except ValueError as exc:
-                self._block_agent_turn(effect, str(exc))
-                agent_recovery.append({'effect_id': effect['id'], 'status': 'blocked', 'reason': str(exc)})
+                receipt = json.loads(self.store.read_blob(effect['result_ref']))
+                try:
+                    if receipt.get('terminal_received') or self.config.get('execution_mode') not in {'live', 'role_recall'}:
+                        self._commit_agent_turn(effect, receipt)
+                    elif effect['status'] == 'failed_definite':
+                        self._block_agent_turn(effect, receipt.get('error') or 'Known failure has no native turn terminal')
+                    if effect['status'] == 'succeeded' and not effect.get('accounting_unknown'):
+                        proposals.append(self.apply_meta(effect['id']))
+                except ValueError as exc:
+                    self._block_agent_turn(effect, str(exc))
+                    agent_recovery.append({'effect_id': effect['id'], 'status': 'blocked', 'reason': str(exc)})
+            except Exception as exc:
+                failed('agent_effect', effect['id'], exc)
         self.controller.tick(self.run_id)
         return {'effects': effects, 'proposals': proposals, 'adapter_results': adapter_results,
-                'agent_recovery': agent_recovery}
+                'agent_recovery': agent_recovery, 'errors': errors}
 
     def execute_adapter(self, adapter_id, inputs, *, trigger_id, work_id=None):
         adapter = self.adapters.get(adapter_id)
-        if adapter_id not in self.capability_catalog():
-            raise ValueError('The executable adapter requires verified artifact acceptance before use')
+        self._require_admitted_adapter(adapter_id)
         descriptor = adapter.descriptor()
         from pathlib import Path
         for path,expected_hash in descriptor['implementation_sources'].items():
             if self.store.put_blob(Path(path).read_bytes()) != expected_hash:
                 raise ValueError('Adapter source changed while freezing the executable artifact')
-        packet = adapter.prepare(inputs)
-        reservations = adapter.reservations(packet)
-        if work_id is None:
-            work = self.controller.enqueue(self.run_id, 'diagnostic', 'adapter:' + adapter_id + ':' + trigger_id,
-                'adapter-work:' + adapter_id + ':' + trigger_id, inputs={'adapter_id': adapter_id, 'input': inputs})
-        else:
+        if work_id is not None:
             work = self.store.get(self.run_id, 'work', work_id)
             if (work['kind'] != 'diagnostic' or work['inputs'].get('capability_id') != adapter_id
                     or work['inputs'].get('capability_version') != adapter.version
                     or json.loads(work['inputs']['inputs_json']) != inputs):
                 raise ValueError('Diagnostic invocation differs from its admitted Work')
+        try:
+            packet = adapter.prepare(inputs)
+            reservations = adapter.reservations(packet)
+        except (ValueError, KeyError, TypeError) as exc:
+            if work_id is None:
+                raise
+            return self._reject_diagnostic(work, str(exc))
+        if work_id is None:
+            work = self.controller.enqueue(self.run_id, 'diagnostic', 'adapter:' + adapter_id + ':' + trigger_id,
+                'adapter-work:' + adapter_id + ':' + trigger_id, inputs={'adapter_id': adapter_id, 'input': inputs})
         metadata = {'adapter_id': adapter_id, 'adapter_version': adapter.version,
             'adapter_descriptor_sha256': digest(descriptor), 'adapter_descriptor_ref': self.store.put_blob(descriptor),
             'issue_id': work['inputs'].get('issue_id'), 'dependency_id': work['inputs'].get('dependency_id'),
@@ -774,11 +946,67 @@ class Runtime:
         self.adapters.resolve(current)
         if current['status'] == 'prepared':
             current = self.controller.dispatch_effect(self.run_id, current['id'], adapter.execute)
+        return self._settled_adapter_effect(current)
+
+    def resume_adapter_effect(self, effect):
+        """Dispatch a persisted prepared adapter Effect; prepare is never called again."""
+        adapter = self.adapters.resolve(effect)
+        # The capability may have lost its accepted standing since prepare.
+        self._require_admitted_adapter(adapter.adapter_id)
+        current = self.controller.dispatch_effect(self.run_id, effect['id'], adapter.execute)
+        return self._settled_adapter_effect(current)
+
+    def _require_admitted_adapter(self, adapter_id):
+        # capability_catalog() itself raises when the loaded adapter differs
+        # from the accepted artifact or several verified versions compete.
+        if adapter_id not in self.capability_catalog():
+            raise ValueError('The executable adapter requires verified artifact acceptance before use')
+
+    def _settled_adapter_effect(self, current):
         if current['status'] != 'succeeded' or current.get('accounting_unknown'):
             if self.improvements:
                 self.improvements.failed_execution(current)
             return {'effect': current, 'result': None}
         return {'effect': current, 'result': self.publish_adapter_effect(current)}
+
+    def _reject_diagnostic(self, work, reason):
+        """Fail an admitted diagnostic whose inputs the loaded adapter refuses.
+
+        No Effect is created and nothing is reserved. The dependency records
+        the failure so a parked issue wakes; a Lab request returns to the Lab.
+        """
+        work_id, inputs = work['id'], work['inputs']
+        # A finished Work keeps its recorded outcome: write nothing for it.
+        if self.store.get(self.run_id, 'work', work_id)['status'] != 'ready':
+            raise ValueError('Work is not eligible for dispatch')
+        if inputs.get('dependency_id'):
+            self.controller.dependency(self.run_id, inputs['dependency_id'], inputs['capability_id'],
+                {'status': 'failed', 'reason': reason, 'work_id': work_id},
+                'diagnostic-rejected-dependency:' + work_id)
+        lab_inputs = None
+        if inputs.get('lab_continuation'):
+            lab_inputs = {'evidence_ids': [], 'required_evidence_ids': []}
+            proposal = (self.store.list(self.run_id, 'proposal', id=inputs['source_proposal_id'])
+                        if inputs.get('source_proposal_id') else [])
+            if proposal:
+                effect = self.store.list(self.run_id, 'effect', id=proposal[0]['effect_id'])
+                source = self.store.list(self.run_id, 'work', id=effect[0]['work_id']) if effect else []
+                if source:
+                    lab_inputs = dict(source[0]['inputs'])
+            lab_inputs.update(routing_error=reason, repair_of=work_id)
+        def apply(tx):
+            current = tx.get('work', work_id)
+            if current['status'] != 'ready':
+                raise ValueError('Rejected diagnostic Work is no longer ready')
+            failed = tx.update('work', work_id, {'status': 'failed',
+                'outcome_ref': tx.blob({'reason': reason, 'stage': 'adapter_prepare'})})
+            if lab_inputs is not None:
+                self.controller._work(tx, None, 'lab', 'tool-rejected:' + work_id, inputs=lab_inputs)
+            return failed
+        failed = self._mutate('diagnostic-rejected:' + work_id, 'diagnostic_rejected', apply,
+                              {'work_id': work_id, 'reason': reason})
+        self.controller.tick(self.run_id)
+        return {'effect': None, 'result': None, 'work': failed, 'rejected': reason}
 
     def publish_adapter_effect(self, effect):
         self.store.verify_history(self.run_id)
@@ -870,7 +1098,13 @@ class Runtime:
         """Public host query for bounded final result-review drain; no mutations."""
         return self.improvements.pending() if self.improvements else []
 
-    def recover_adapters(self):
+    def recover_adapters(self, errors=None):
+        """Publish settled adapter Effects; ``errors`` collects other failures per Effect.
+
+        Without an ``errors`` list, an exception other than ValueError/KeyError
+        propagates as before; with one, a recovery error row (stage ``adapter``)
+        is appended and the remaining Effects are still recovered.
+        """
         results = []
         for effect in self.store.list(self.run_id, 'effect', status='succeeded'):
             if not (effect.get('metadata',{}).get('adapter_id') or effect['kind'] in self.adapters.legacy):
@@ -882,6 +1116,10 @@ class Runtime:
                 results.append({'effect_id':effect['id'],'status':'published'})
             except (ValueError,KeyError) as exc:
                 results.append({'effect_id':effect['id'],'status':'blocked_adapter','reason':str(exc)})
+            except Exception as exc:
+                if errors is None:
+                    raise
+                errors.append(recovery_error('adapter', effect['id'], exc))
         return results
 
     def settle_trial(self, trial_id, *, key):
@@ -928,7 +1166,8 @@ class Runtime:
                     if e['status'] in {'dispatching', 'unknown'} or e.get('accounting_unknown')],
                 'budgets': self.store.list(self.run_id, 'budget'),
                 'agent_sessions': self.store.list(self.run_id, 'agent_session'),
-                'agent_turns': self.store.list(self.run_id, 'agent_turn')}
+                'agent_turns': self.store.list(self.run_id, 'agent_turn'),
+                **({'orchestration': self.orchestration.status()} if self.orchestration else {})}
 
     def _agent_available(self, work):
         if work['kind'] not in {'lab', 'meta_discovery', 'meta_disposition', 'disposition'}:
@@ -941,6 +1180,17 @@ class Runtime:
             and o['scope']['agent_instance_id'] == agent and o['scope']['branch_id'] == branch), None)
         return owner is None or self.store.get(self.run_id, 'agent_session', owner['session_id'])['status'] == 'idle'
 
+    def _only_unselectable_agent_work(self):
+        """No Wait is open and every ready Work is agent Work whose session is not idle.
+
+        The driver never selects such Work, so nothing will arrive for it.
+        """
+        if any(w['status'] in {'waiting', 'disposition_due', 'disposed'}
+               for w in self.store.list(self.run_id, 'wait')):
+            return False
+        return all(w['kind'] in {'lab', 'meta_discovery', 'meta_disposition', 'disposition'}
+                   and not self._agent_available(w) for w in self.controller.ready(self.run_id))
+
     def finalize(self, reason):
         if not isinstance(reason, str) or not reason.strip():
             raise ValueError('A finalization reason is required')
@@ -950,6 +1200,9 @@ class Runtime:
                 return old[0]
             return tx.insert('registration', 'run_lifecycle', {'status': 'finalizing', 'reason': reason})
         state = self._mutate('finalize-run', 'run_finalizing', apply, {'reason': reason})
+        if self.orchestration:
+            # A change still in trial has no conclusion and is reverted.
+            self.orchestration.advance()
         for effect in self.store.list(self.run_id, 'effect', status='prepared'):
             work = self.store.get(self.run_id, 'work', effect['work_id'])
             if work['kind'] not in {'effect_reconcile', 'trial_settle'}:
@@ -979,6 +1232,34 @@ class Runtime:
                             'status':'blocked_adapter','reason':reason})
         return pending
 
+    def _cancel_refused(self, effect, refusal, cancelled, blocking, blocking_ids):
+        # A refused prepared Effect provably never ran; release its lease and
+        # reservation. If even cancellation is refused, report it instead.
+        try:
+            self.controller.cancel_prepared(self.run_id, effect['id'], refusal, 'driver-cancel:' + effect['id'])
+        except ValueError as exc:
+            blocking_ids.add(effect['id'])
+            blocking.append({'effect_id': effect['id'], 'kind': effect['kind'], 'reason': str(exc)})
+            return
+        cancelled.append({'effect_id': effect['id'], 'reason': refusal})
+
+    def _driver_wait_status(self, unresolved, blocking, skipped, recovery_errors):
+        """The first matching reason why nothing more can run in this call."""
+        if unresolved:
+            return 'blocked_external', 'Existing unknown execution retains capacity and reconciliation responsibility'
+        if blocking:
+            return 'blocked_prepared', blocking[0]['reason']
+        if skipped:
+            return 'blocked_admission', skipped[0]['reason']
+        status = self.status()
+        if status['adapter_publications_pending']:
+            return 'blocked_adapter', None
+        if recovery_errors:
+            return 'blocked_recovery', recovery_errors[0]['reason']
+        if status['ready'] or any(w['status'] in {'waiting','disposition_due','disposed'} for w in status['waits']):
+            return 'awaiting_producer_or_deadline', None
+        return 'quiescent', None
+
     def run_until_wait(self, meta_executor, reservations, *, max_steps=20):
         """Drain eligible Lab/Meta and registered tools without occupying wait slots.
 
@@ -989,43 +1270,95 @@ class Runtime:
         """
         if type(max_steps) is not int or not 1 <= max_steps <= 1000:
             raise ValueError('The cooperative driver requires a bounded positive step allowance')
-        self.recover()
-        actions, outcome, reason = [], 'step_limit_reached', None
-        for _ in range(max_steps):
+        recovery_errors = self.recover()['errors']
+        actions, skipped, cancelled, blocking, step_errors = [], [], [], [], []
+        selected, blocking_ids = set(), set()
+        outcome, reason, steps = 'step_limit_reached', None, 0
+        while steps < max_steps:
+            if self.orchestration:
+                # Settle and signal before tick, so a settlement wakes Meta.
+                self.orchestration.advance()
             self.controller.tick(self.run_id)
             if self.store.list(self.run_id, 'registration', id='run_lifecycle', status='finalizing'):
                 outcome, reason = 'finalizing', 'New agent turns are stopped; durable recovery remains available'
                 break
             unresolved = [e for e in self.store.list(self.run_id, 'effect') if e['status'] in {'dispatching','unknown'}]
-            pending = [e for e in self.store.list(self.run_id, 'effect', status='prepared') if e['kind'] in {'lab', 'meta'}]
-            if len(unresolved) >= self.config.get('max_external', 1) and not pending:
-                outcome, reason = 'blocked_external', 'Existing unknown execution retains capacity and reconciliation responsibility'
+            # A prepared Effect holds a lease and was never dispatched: resume
+            # it before new Work. One no adapter here can run is reported.
+            prepared = self.store.list(self.run_id, 'effect', status='prepared')
+            effect = None
+            for candidate in prepared:
+                if candidate['id'] in blocking_ids:
+                    continue
+                if candidate['kind'] not in {'lab', 'meta'}:
+                    # A refused acceptance may be a host problem a restart
+                    # fixes, so the Effect is held, never cancelled, for it.
+                    try:
+                        self._require_admitted_adapter(self.adapters.resolve(candidate).adapter_id)
+                    except ValueError as exc:
+                        blocking_ids.add(candidate['id'])
+                        blocking.append({'effect_id': candidate['id'], 'kind': candidate['kind'], 'reason': str(exc)})
+                        continue
+                effect = candidate
                 break
-            work = self.store.get(self.run_id, 'work', pending[0]['work_id']) if pending else None
-            if work is None:
-                work = next((w for w in self.controller.ready(self.run_id)
-                             if (w['kind'] in {'lab','meta_discovery','meta_disposition','disposition'} and self._agent_available(w))
-                             or (w['kind']=='diagnostic' and w['inputs'].get('capability_id') in self.adapters.by_id)),None)
-            if work is None:
-                status = self.status()
-                outcome = 'blocked_adapter' if status['adapter_publications_pending'] else 'blocked_external' if unresolved else 'awaiting_producer_or_deadline' if status['ready'] or any(
-                    w['status'] in {'waiting','disposition_due','disposed'} for w in status['waits']) else 'quiescent'
+            held = len(unresolved) + sum(e['id'] in blocking_ids for e in prepared)
+            if effect is None and held >= self.config.get('max_external', 1):
+                outcome, reason = self._driver_wait_status(unresolved, blocking, skipped, recovery_errors)
                 break
+            if effect is not None:
+                work = self.store.get(self.run_id, 'work', effect['work_id'])
+            else:
+                work = next((w for w in self.controller.ready(self.run_id) if w['id'] not in selected and (
+                             (w['kind'] in {'lab','meta_discovery','meta_disposition','disposition'} and self._agent_available(w))
+                             or (w['kind']=='diagnostic' and w['inputs'].get('capability_id') in self.adapters.by_id))),None)
+            if work is None:
+                outcome, reason = self._driver_wait_status(unresolved, blocking, skipped, recovery_errors)
+                break
+            selected.add(work['id'])
+            steps += 1
             try:
-                if work['kind']=='diagnostic':
+                if effect is not None and effect['kind'] not in {'lab', 'meta'}:
+                    result = self.resume_adapter_effect(effect)
+                elif work['kind']=='diagnostic':
                     result = self.execute_adapter(work['inputs']['capability_id'],
                         json.loads(work['inputs']['inputs_json']),trigger_id=work['id'],work_id=work['id'])
                 else:
-                    result = self.run_meta(work['id'], meta_executor, reservations)
+                    # A resumed prepared invocation keeps the reservation it
+                    # was admitted with; the caller's applies to new Work only.
+                    result = self.run_meta(work['id'], meta_executor,
+                                           effect['reservations'] if effect is not None else reservations)
             except (ValueError, KeyError) as exc:
                 # Admission checks happen before external work. Preserve the
-                # concrete blocked reason; elapsed time is not a retry signal.
-                outcome, reason = 'blocked_admission', str(exc)
-                break
-            actions.append({'work_id': work['id'], 'effect_id': result.get('effect',{}).get('id'),
+                # concrete reason and go on; elapsed time is not a retry signal.
+                current = self.store.get(self.run_id, 'work', work['id'])
+                owned = effect['id'] if effect is not None else current.get('effect_id')
+                owned = self.store.get(self.run_id, 'effect', owned) if owned else None
+                if owned is not None and owned['status'] == 'prepared':
+                    self._cancel_refused(owned, str(exc), cancelled, blocking, blocking_ids)
+                elif owned is not None:
+                    # Raised after dispatch: not an admission refusal.
+                    step_errors.append({'work_id': work['id'], 'effect_id': owned['id'], 'reason': str(exc)})
+                else:
+                    skipped.append({'work_id': work['id'], 'reason': str(exc)})
+                continue
+            actions.append({'work_id': work['id'], 'effect_id': (result.get('effect') or {}).get('id'),
                 'proposal_status': (result.get('proposal') or {}).get('status'),
-                'work_status': result.get('work',{}).get('status')})
-        result = {'status': outcome, 'reason': reason, 'steps': actions, 'state': self.status()}
+                'work_status': (result.get('work') or {}).get('status')})
+        if outcome == 'step_limit_reached' and skipped:
+            # The allowance ran out; keep the concrete reason of the first skip.
+            reason = skipped[0]['reason']
+        report = build_report(self, skipped=skipped)
+        if outcome == 'quiescent' or (outcome == 'awaiting_producer_or_deadline'
+                                      and self._only_unselectable_agent_work()):
+            # Nothing runs, yet an obligation is left without a scheduled owner.
+            attention = report['attention']
+            reason = next((name for name in ('stalled_issues', 'stopped_lab', 'sessions_requiring_recovery',
+                                             'capacity_blocked_work') if attention[name]), None)
+            if reason:
+                outcome = 'stalled'
+        result = {'status': outcome, 'reason': reason, 'steps': actions, 'state': self.status(),
+                  'recovery_errors': recovery_errors, 'skipped': skipped, 'step_errors': step_errors,
+                  'cancelled_prepared': cancelled, 'prepared_blocking': blocking, 'report': report}
         # Include observation sequence in the key: equivalent polls can be
         # recorded without altering a wait's evidence or scheduling version.
         token = identity('driver', self.store.verify_history(self.run_id)['events'], result)

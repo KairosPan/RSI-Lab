@@ -4,10 +4,10 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from docking_rsi.controller import Controller
-from docking_rsi.demo import SyntheticMetaExecutor, fixture_delivery
-from docking_rsi.runtime import Runtime
-from docking_rsi.store import Store
+from rsi_lab.controller import Controller
+from tests.v2.fixtures import SyntheticMetaExecutor, fixture_delivery, inspection_adapter
+from rsi_lab.runtime import Runtime
+from rsi_lab.store import Store
 
 
 class RuntimeTests(unittest.TestCase):
@@ -48,8 +48,8 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(len([w for w in self.c.ready('r') if w['kind']=='meta_disposition']), 1)
 
     def test_question_is_saved_and_exact_version_reply_resumes(self):
-        out = self.decision('ask_user', {'question':'Which experimental conditions apply?', 'options':['documented assay','exploratory'],
-            'reason_user_needed':'Neither authorized source nor current receipt identifies the intended assay'})
+        out = self.decision('ask_user', {'question':'Which experimental conditions apply?', 'options':['documented procedure','exploratory'],
+            'reason_user_needed':'Neither authorized source nor current receipt identifies the intended procedure'})
         q = self.store.get('r','question',out['question_id'])
         self.assertEqual(q['status'],'pending')
         self.assertEqual(self.c.ready('r'),[])
@@ -95,7 +95,7 @@ class RuntimeTests(unittest.TestCase):
         work = self.c.ready('r')[0]
         effect = self.rt.prepare_meta(work['id'],self.res)
         self.c.dispatch_effect('r',effect['id'],SyntheticMetaExecutor('ask_user',{
-            'question':'Which assay?','options':['unknown','documented'], 'reason_user_needed':'Assay goal is user-owned'}))
+            'question':'Which procedure?','options':['unknown','documented'], 'reason_user_needed':'Procedure goal is user-owned'}))
         original = self.rt._route
         def interrupted(proposal):
             original(proposal)
@@ -109,19 +109,14 @@ class RuntimeTests(unittest.TestCase):
         self.rt.recover(); self.store.verify_history('r')
 
     def test_inspection_fact_reuse_and_interrupted_publication_recover(self):
-        # Inject only the slow domain reader; all budget/outbox/publication and
-        # recovery behavior uses the real controller.
-        self.store.mutate('r','inspection-budget','fixture_budget',lambda tx: [
-            tx.update('budget','cpu_seconds',{'limit':200}), tx.update('budget','wall_seconds',{'limit':200})])
-        report={'raw_facts':[{'id':'inspection_fact','kind':'raw_fact','content':{'atoms':12},
-                            'provenance':{'source':'fixture receipt'}}], 'source_statements':[],
-                'checks':[{'status':'unverified'}]}
-        from docking_rsi import domain
-        with patch.object(domain,'inspect_preconditions',return_value=report):
-            with patch.object(self.rt,'_publish_inspection',side_effect=KeyboardInterrupt), self.assertRaises(KeyboardInterrupt):
-                self.rt.inspect_docking(self.tmp.name,Path(self.tmp.name)/'protocol',trigger_id='one')
-            self.rt.recover()
-            self.rt.inspect_docking(self.tmp.name,Path(self.tmp.name)/'protocol',trigger_id='two')
+        # The source-backed fixture uses real dispatch, publication, and recovery.
+        self.rt = Runtime(self.store, 'r', adapters=[inspection_adapter()])
+        report={'facts':[{'id':'inspection_fact','kind':'raw_fact','content':{'rows':12},
+                          'provenance':{'source':'fixture receipt'}}]}
+        with patch.object(self.rt,'publish_adapter_effect',side_effect=KeyboardInterrupt), self.assertRaises(KeyboardInterrupt):
+            self.rt.execute_adapter('synthetic_inspection', report, trigger_id='one')
+        self.rt.recover()
+        self.rt.execute_adapter('synthetic_inspection', report, trigger_id='two')
         self.assertEqual(len(self.store.list('r','fact',id='inspection_fact')),1)
         self.assertEqual(self.store.get('r','budget','tool_calls')['spent'],2)
         self.store.verify_history('r')
