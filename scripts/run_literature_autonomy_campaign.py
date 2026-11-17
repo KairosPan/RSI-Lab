@@ -17,7 +17,12 @@ from pathlib import Path
 import shutil
 import sys
 
-from rsi_domains.pablo import adapter as scorer, lookup, oracle
+# The PABLO task package lives with its experiment host, outside the generic kernel tree.
+PABLO_HOST = Path(__file__).resolve().parents[1] / 'experiments' / 'pablo'
+if str(PABLO_HOST) not in sys.path:
+    sys.path.insert(0, str(PABLO_HOST))
+
+from pablo_task import adapter as scorer, lookup, oracle
 from rsi_lab.controller import Controller
 from rsi_lab.packets import present_delivery
 from rsi_lab.roles import CodexExecutor, literature_decision_record
@@ -89,7 +94,7 @@ def normalize_literature_configuration(configuration):
 
 def code_manifest(adapters, configuration):
     paths = {Path(__file__).resolve()}
-    for directory in ('rsi_lab', 'rsi_literature', 'rsi_domains/pablo'):
+    for directory in ('rsi_lab', 'rsi_literature', 'experiments/pablo/pablo_task'):
         paths.update((PROJECT / directory).rglob('*.py'))
     dependencies = {Path(sys.executable).absolute()}
     paper = configuration.get('connectors', {}).get('paper2skill', {})

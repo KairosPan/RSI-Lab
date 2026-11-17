@@ -247,7 +247,16 @@ class LiteratureDelegationBoundaryTests(unittest.TestCase):
         self.assertEqual(EXECUTED, [])
         before = self.store.verify_history('r')
         self.runtime.apply_meta(effect['id'])
-        self.assertEqual(self.store.verify_history('r'), before)
+        # The first replay of a rejected proposal only appends the Effect's
+        # completion record; every later replay writes nothing.
+        recorded = self.store.verify_history('r')
+        self.assertEqual(recorded['events'], before['events'] + 1)
+        self.assertEqual([row['effect_id'] for row in self.store.list(
+            'r', 'registration', kind='runtime_effect_completion')], [effect['id']])
+        self.runtime.apply_meta(effect['id'])
+        self.assertEqual(self.store.verify_history('r'), recorded)
+        self.assertEqual(self.store.list('r', 'registration', kind='literature_task'), [])
+        self.assertEqual(EXECUTED, [])
 
     def test_legacy_packet_keeps_explicit_subset_and_replays_without_expansion(self):
         original_context = literature_context.build_literature_context

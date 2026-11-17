@@ -1,12 +1,12 @@
-"""Actual harmless adapter subprocesses; these are engineering, not chemistry tests."""
+"""Actual harmless adapter subprocesses; these are engineering, not scientific result evaluations."""
 import copy
 import json
 from pathlib import Path
 import tempfile
 import unittest
 
-from docking_rsi.capabilities import CapabilityRegistry, digest, encoded, execute_acceptance, validate_request
-from docking_rsi.store import Store
+from rsi_lab.capabilities import CapabilityRegistry, digest, encoded, execute_acceptance, validate_request
+from rsi_lab.store import Store
 
 ADAPTER = '''import hashlib,json,sys
 p=json.load(sys.stdin); x=p["input"]

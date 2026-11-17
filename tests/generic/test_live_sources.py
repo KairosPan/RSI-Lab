@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from rsi_domains.docking.live_sources import deliver_pending, freeze_sources, source_contracts
+from rsi_lab.producers.sources import deliver_pending, freeze_sources, source_contracts
 from rsi_lab.controller import Controller
 from rsi_lab.runtime import Runtime
 from rsi_lab.store import Store
@@ -49,10 +49,11 @@ class LiveSourceTests(unittest.TestCase):
         self.assertEqual(deliver_pending(self.runtime, self.sources), [])
         self.assertEqual(self.store.get('arbitrary-run', 'budget', 'tool_calls')['spent'], 1)
         self.assertEqual(len(self.store.list('arbitrary-run', 'effect')), 1)
+        self.assertEqual(self.store.list('arbitrary-run', 'effect')[0]['metadata']['tool_role'], 'source')
         self.store.verify_history('arbitrary-run')
 
     def test_unavailable_requests_are_not_substituted_or_charged_again(self):
-        self.request(object_ids=['foreign.sdf'])
+        self.request(object_ids=['foreign.csv'])
         first = deliver_pending(self.runtime, self.sources)[0]
         second = deliver_pending(self.runtime, self.sources)[0]
         self.assertEqual(first, second)
@@ -93,7 +94,7 @@ class LiveSourceTests(unittest.TestCase):
                 deliver_pending(self.runtime, self.sources)
         self.assertEqual(len(self.store.list('arbitrary-run', 'effect')), 1)
         resumed = Runtime(self.store, 'arbitrary-run')
-        with patch('rsi_domains.docking.live_sources._lookup', side_effect=AssertionError('Must not execute twice')):
+        with patch('rsi_lab.producers.sources._lookup', side_effect=AssertionError('Must not execute twice')):
             result = deliver_pending(resumed, self.sources)[0]
         self.assertEqual(result['status'], 'delivered')
         self.assertEqual(self.store.get('arbitrary-run', 'budget', 'tool_calls')['spent'], 1)

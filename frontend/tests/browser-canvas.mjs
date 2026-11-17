@@ -63,6 +63,16 @@ try {
     await page.locator('.ac-tabs [data-ac-section="issues"]').click();
     assert.match(await page.locator(".ac-service-records").textContent(), /Synthetic hypothesis/);
   });
+  await check("source and computational tools show separate generic records", async () => {
+    await selectAgent("sources");
+    assert.match(await page.locator(".ac-capability-view").innerText(), /1 recorded reads/);
+    await page.locator('.ac-tabs [data-ac-section="reads"]').click();
+    await page.waitForFunction(() => document.querySelector(".ac-record-heading > code")?.textContent === "fixture-source");
+    assert.match(await page.locator(".ac-record-scope").innerText(), /recorded tool-role metadata/);
+    await selectAgent("tools");
+    assert.equal(await page.locator("[data-ac-call]").count(), 2);
+    assert.match(await page.locator("[data-ac-heading]").innerText(), /2 tool Effects recorded/);
+  });
   await check("source failure clears old data", async () => {
     await page.route(pattern, route => route.fulfill({ status: 503, body: "Unavailable fixture" }));
     await page.locator('[data-ac-action="refresh"]').click();

@@ -17,8 +17,10 @@ import sqlite3
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# The PABLO task package lives with its experiment host, outside the generic kernel tree.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'experiments' / 'pablo'))
 
-from rsi_domains.pablo.oracle import canonicalize, fingerprint
+from pablo_task.oracle import canonicalize, fingerprint
 from rsi_lab.images import verify_image_transport
 from rsi_lab.journal import read_journal, raw_stream
 from rsi_lab.packets import present_delivery

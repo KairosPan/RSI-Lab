@@ -225,13 +225,13 @@ class Trace:
             proposal = intent.get('proposal', {})
             kind = row.get('kind', '')
             role = ('engineering' if kind == 'capability_build' else 'meta' if kind in ('meta_discovery', 'meta_disposition', 'disposition')
-                    else 'lab' if kind in ('lab', 'lab_model', 'lab_step') else 'task_tool' if kind == 'diagnostic' and inputs.get('capability_id') == 'docking.vina_batch'
+                    else 'lab' if kind in ('lab', 'lab_model', 'lab_step') else 'task_tool' if kind == 'diagnostic' and (inputs.get('capability_id') or inputs.get('adapter_id'))
                     else 'other')
             works.append({'id': row['id'], 'kind': kind, 'status': row.get('status'), 'role': role,
                 'issueId': row.get('issue_id') or inputs.get('issue_id'), 'effectId': row.get('effect_id'),
                 'attempts': row.get('attempts'), 'priority': row.get('priority'), 'inputs': inputs,
                 'expectedVersions': row.get('expected_versions', {}), 'outcomeRef': row.get('outcome_ref'),
-                'trigger': row.get('trigger'), 'capabilityId': proposal.get('capability_id') or inputs.get('capability_id'),
+                'trigger': row.get('trigger'), 'capabilityId': proposal.get('capability_id') or inputs.get('capability_id') or inputs.get('adapter_id'),
                 'purpose': proposal.get('purpose'), 'acceptanceChecks': proposal.get('acceptance_checks', []),
                 'requesterCallId': self.links.get(intent.get('id')), 'provenance': self.row_basis(row)})
         works.sort(key=lambda row: row['provenance']['updatedSequence'] or 0, reverse=True)
@@ -283,7 +283,7 @@ class Trace:
                 'provenance': self.row_basis(row)}
         ready = [w for w in works if w['status'] == 'ready']
         lab_calls = sum(e['kind'] in ('lab', 'lab_model') for e in self.effects)
-        vina_calls = sum(e['kind'] == 'docking_vina_batch' or e.get('metadata', {}).get('adapter_id') == 'docking.vina_batch' for e in self.effects)
+        task_tool_calls = sum(e['kind'] not in MODEL_KINDS and bool(e.get('metadata', {}).get('adapter_id')) for e in self.effects)
         awaiting = any(w['producer'] == 'engineering_executor' and w['status'] == 'waiting' for w in waits)
         status = 'unknown' if not complete else 'awaiting_capability' if awaiting else 'needs_reconciliation' if unknown else 'investigating' if open_issues else 'recorded'
         labels = {'unknown': 'Orchestration unavailable', 'awaiting_capability': 'Awaiting capability',
@@ -304,7 +304,7 @@ class Trace:
         workflow_types = {'work_enqueued', 'issue_parked', 'dependency_updated', 'engineering_requested', 'meta_proposal_applied', 'effect_settled', 'driver_checkpoint'}
         timeline = [self.event_basis(e['seq']) for e in self.events if e['event_type'] in workflow_types][-8:]
         return {'schemaVersion': 'lab_orchestration_v1', 'status': status, 'label': labels[status],
-            'note': 'Persisted investigation, work and waiting state; not a claim that Lab or Vina is executing. Scientific review and external-call accounting remain separate.',
+            'note': 'Persisted investigation, work and waiting state; not a claim that Lab or a task tool is executing. Scientific review and external-call accounting remain separate.',
             'snapshotAt': utc(snapshot_at), 'heartbeat': False, 'snapshotBasis': self.event_basis(latest['seq']) if latest else None,
             'projectionComplete': complete,
             'task': {'objective': config.get('goal') or case.get('goal'), 'plans': plans, 'caseRef': config.get('case_ref'),
@@ -317,18 +317,18 @@ class Trace:
                     'note': 'Open issue records and requests are evidence of ongoing review; this reader does not run scientific admission checks.'},
                 'execution': {'status': status, 'readyWorkByKind': dict(Counter(w['kind'] for w in ready)),
                     'labReadyWorkCount': sum(w['role'] == 'lab' for w in ready),
-                    'vinaReadyWorkCount': sum(w['role'] == 'task_tool' for w in ready),
+                    'taskToolReadyWorkCount': sum(w['role'] == 'task_tool' for w in ready),
                     'unknownEffectIds': [e['id'] for e in unknown], 'automaticResumeConfirmed': False,
-                    'note': 'Ready is the saved Work status, not a new dispatch decision. Meta and engineering Work are not Lab or Vina admission.'}},
+                    'note': 'Ready is the saved Work status, not a new dispatch decision. Meta and engineering readiness does not admit Lab or task-tool execution.'}},
             'counts': {'pendingWorks': len(works), 'readyWorks': len(ready), 'activeWaits': len(waits),
-                       'openIssues': len(open_issues), 'unknownEffects': len(unknown), 'labModelCalls': lab_calls, 'vinaEffects': vina_calls},
+                       'openIssues': len(open_issues), 'unknownEffects': len(unknown), 'labModelCalls': lab_calls, 'taskToolEffects': task_tool_calls},
             'stages': [
                 {'id': 'plan', 'label': 'Frozen task plan', 'status': 'recorded' if plans else 'not_recorded', 'count': len(plans), 'basisIds': [p['registrationId'] for p in plans]},
                 {'id': 'review', 'label': 'Scientific review', 'status': 'unresolved' if open_issues else 'not_established', 'count': len(open_issues), 'basisIds': [q['id'] for q in open_issues]},
                 {'id': 'lab', 'label': 'Lab model calls', 'status': 'recorded' if lab_calls else 'not_recorded', 'count': lab_calls},
-                {'id': 'vina', 'label': 'Vina execution Effects', 'status': 'recorded' if vina_calls else 'not_recorded', 'count': vina_calls},
-                {'id': 'output', 'label': 'Screening output', 'status': 'not_assessed', 'count': None,
-                 'note': 'This projection does not validate final screening output or infer it from model/tool counts.'}],
+                {'id': 'task_tools', 'label': 'Registered adapter Effects', 'status': 'recorded' if task_tool_calls else 'not_recorded', 'count': task_tool_calls},
+                {'id': 'output', 'label': 'Task output', 'status': 'not_assessed', 'count': None,
+                 'note': 'This projection does not validate final task output or infer it from model/tool counts.'}],
             'pendingWorks': works, 'activeWaits': waits, 'issues': issues, 'unknownEffects': unknown,
             'activeWaitScopeNote': 'Unterminated waiting obligations include waiting, disposition_due and disposed. Disposed means its one disposition attempt occurred; the controller still permits a later dependency change to wake it.',
             'latestDriverCheckpoint': checkpoint, 'resumeRequirements': requirements, 'recentTimeline': timeline,
@@ -362,7 +362,7 @@ class Trace:
                 'summary': clean(summary)[:650], 'issueId': e.get('issue_id') or metadata.get('issue_id'),
                 'requestedBy': 'meta' if requester else None, 'requesterCallId': requester,
                 'requestLinkBasis': 'Exact recorded request/build intent identity' if requester else None,
-                'tool': {'name': title} if category == 'tool' else None,
+                'tool': {'name': title, 'role': metadata.get('tool_role'), 'adapterId': metadata.get('adapter_id')} if category == 'tool' else None,
                 'detailUrl': ('/data/agent-trace/calls/' if self.mode == 'recorded' else '/api/trace/calls/') + e['id'] + ('.json' if self.mode == 'recorded' else '')}
 
     def index(self):
@@ -370,7 +370,7 @@ class Trace:
         agents = []
         definitions = [
             ('controller', 'Controller', 'service', '调度与预算', '代码控制器管理请求、预算、等待、验证和恢复。'),
-            ('lab', 'Lab agent', 'agent', '任务执行', '在已准入的科学协议内选择候选并推进筛选；本轮尚无 Lab 模型调用。'),
+            ('lab', 'Lab agent', 'agent', '任务执行', '在已准入的任务协议内提出工作请求并整理证据；调用状态以记录为准。'),
             ('meta', 'Meta agent', 'agent', '发现 · 调查 · 处置', '同一个 Meta-agent 按需切换发现与处置模式；这些模式不是独立 agent。'),
             ('engineer', 'Engineering agent', 'agent', '能力建设', '真实工程模型提出代码，宿主审查与实际测试单独记录。'),
             ('tools', 'Tool executor', 'service', '诊断与验证', '实际来源读取、准备诊断、能力验收和宿主工具调用。'),
@@ -485,7 +485,7 @@ class Trace:
             if receipt.get('artifacts', {}).get('stderr.txt'):
                 stderr = self.blob(receipt['artifacts']['stderr.txt']).decode('utf-8', errors='replace')
             result = receipt.get('result', receipt.get('capability_acceptance', {'status': receipt.get('status'), 'returncode': receipt.get('returncode'), 'error': receipt.get('error')}))
-            tool = {'name': call['title'], 'args': preview('args', packet), 'result': preview('result', result),
+            tool = {**call['tool'], 'args': preview('args', packet), 'result': preview('result', result),
                     'stdout': preview('stdout', stdout), 'stderr': preview('stderr', stderr),
                     'error': clean(receipt.get('error')) if receipt.get('error') else None,
                     'returncode': receipt.get('returncode'), 'truncation': truncation}

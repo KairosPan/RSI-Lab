@@ -89,10 +89,11 @@ class ImprovementsTests(unittest.TestCase):
         self.res={'model_calls':1,'tokens':10,'wall_seconds':1}
         self.advice={'change_kind':'candidate_selection','instruction':'Evaluate candidate new instead of repeating old',
             'capability_id':'candidate_test','capability_version':'v1','expected_outcome':'A novel scored observation',
+            'execution_contract_json': json.dumps({'version': 1, 'kind': 'exact_inputs', 'inputs': {'candidates': ['new']}}),
             'measurement':'accepted count and observed score','falsifier':'No novel observations accepted'}
 
     def recommend(self):
-        w=self.rt.observe('one','new_evidence',0,['original'])
+        w=self.rt.observe('one','input_changed',0,['original'])
         model=FakeModel('recommend_change',self.advice)
         out=self.rt.run_meta(w['work_id'],model,self.res)
         self.assertEqual(out['proposal']['status'],'applied',out['proposal'])
@@ -135,6 +136,233 @@ class ImprovementsTests(unittest.TestCase):
         self.assertEqual(self.rt.pending_improvements(),[])
         self.assertEqual(self.rt.improvements.rows()[0]['causal_benefit'],'not_established')
         self.store.verify_history('r')
+
+    def test_string_provenance_does_not_block_requests_or_hide_latest_tool_fact(self):
+        self.c.add_fact('r', 'older-tool', 'raw_fact', {'score': .6},
+                        {'effect_id': 'historical-tool-1'}, 'older-tool')
+        self.c.add_fact('r', 'latest-tool', 'raw_fact', {'score': .7},
+                        {'effect_id': 'historical-tool-2'}, 'latest-tool')
+        self.c.add_fact('r', 'text-source', 'raw_fact', {'observation': 'host note'},
+                        'controller source description', 'text-source')
+        self.c.add_fact('r', 'unlinked-source', 'raw_fact', {'observation': 'newer host note'},
+                        {'source': 'host'}, 'unlinked-source')
+
+        self.recommend()
+        outcome, model = self.lab('decline')
+
+        self.assertEqual(outcome['proposal']['status'], 'applied')
+        required = model.inputs[0]['required_evidence_ids']
+        self.assertIn('latest-tool', required)
+        self.assertNotIn('older-tool', required)
+        self.assertNotIn('text-source', required)
+        self.assertNotIn('unlinked-source', required)
+        self.assertEqual(self.store.get('r', 'fact', 'text-source')['provenance'],
+                         'controller source description')
+        self.store.verify_history('r')
+
+    def admission_packet(self, trigger='availability'):
+        work = self.rt.observe(trigger, 'input_changed', 0, ['original'])
+        row = self.store.get('r', 'work', work['work_id'])
+        agent, mode, task, options = self.rt._context(row, read_only=True)
+        return agent.prepare(mode, task, **options)
+
+    def test_pending_advice_is_visible_and_unavailable_to_meta_schema(self):
+        row, _ = self.recommend()
+        for status in ('proposed', 'deferred', 'adopted'):
+            self.store.mutate('r', 'status-' + status, 'fixture_status',
+                lambda tx, status=status: tx.update('registration', row['id'], {'status': status}))
+            packet = self.admission_packet('pending-' + status)
+            admission = packet['task']['constraints']['research_loop']['recommendation_admission']
+            self.assertEqual(admission, {'allowed': False, 'reason': 'recommendation_pending',
+                'remaining': 7, 'total_limit': 8, 'total_created': 1, 'pending_limit': 1,
+                'pending_count': 1, 'pending': [{'id': row['id'], 'status': status}]})
+            actions = [v['properties']['action']['enum'][0]
+                       for v in packet['envelope']['response_schema']['properties']['command']['anyOf']]
+            self.assertNotIn('recommend_change', actions)
+            self.assertIn('request_diagnostic', actions)
+
+    def test_lifetime_quota_counts_declines_and_keeps_other_meta_actions(self):
+        self.rt.config['max_recommendations'] = 1
+        self.recommend()
+        self.lab('decline')
+        packet = self.admission_packet('quota')
+        admission = packet['task']['constraints']['research_loop']['recommendation_admission']
+        self.assertEqual(admission, {'allowed': False, 'reason': 'recommendation_allowance_exhausted',
+            'remaining': 0, 'total_limit': 1, 'total_created': 1, 'pending_limit': 1,
+            'pending_count': 0, 'pending': []})
+        actions = [v['properties']['action']['enum'][0]
+                   for v in packet['envelope']['response_schema']['properties']['command']['anyOf']]
+        self.assertNotIn('recommend_change', actions)
+        self.assertIn('propose_issue', actions)
+        self.assertIn('request_diagnostic', actions)
+
+    def test_admission_checks_current_state_after_a_packet_was_frozen(self):
+        packet = self.admission_packet('before-advice')
+        self.assertTrue(packet['task']['constraints']['research_loop']['recommendation_admission']['allowed'])
+        row, _ = self.recommend()
+        response = {'command': {'action': 'recommend_change'}}
+        with self.assertRaisesRegex(ValueError, 'recommendation_pending: ' + row['id']):
+            self.rt.improvements.validate(response, packet)
+        self.lab('decline')
+        self.rt.config['max_recommendations'] = 1
+        with self.assertRaisesRegex(ValueError, 'recommendation_allowance_exhausted'):
+            self.rt.improvements.validate(response, packet)
+
+    def test_limits_reject_invalid_frozen_configuration(self):
+        serial = 0
+        for name in ('max_recommendations', 'max_pending_recommendations'):
+            for value in (-1, True, 1.5, '2', None):
+                with self.subTest(name=name, value=value):
+                    serial += 1
+                    run_id = 'invalid-' + str(serial)
+                    self.c.initialize(run_id, budgets={},
+                        config={'research_features': {'meta_lab': True}, name: value})
+                    with self.assertRaisesRegex(ValueError, name + ' must be a nonnegative integer'):
+                        Runtime(self.store, run_id)
+
+    def test_zero_total_or_pending_capacity_removes_creation_but_not_other_actions(self):
+        for total, pending, reason in ((0, 1, 'recommendation_allowance_exhausted'),
+                                       (8, 0, 'recommendation_pending')):
+            with self.subTest(total=total, pending=pending):
+                self.rt.config.update(max_recommendations=total, max_pending_recommendations=pending)
+                packet = self.admission_packet('zero-' + str(total))
+                admission = packet['task']['constraints']['research_loop']['recommendation_admission']
+                self.assertEqual(admission['reason'], reason)
+                self.assertEqual(admission['total_limit'], total)
+                self.assertEqual(admission['pending_limit'], pending)
+                self.assertEqual(admission['pending_count'], 0)
+                actions = [v['properties']['action']['enum'][0]
+                    for v in packet['envelope']['response_schema']['properties']['command']['anyOf']]
+                self.assertNotIn('recommend_change', actions)
+                self.assertIn('request_diagnostic', actions)
+
+    def test_pending_limit_two_allows_two_recommendations_and_blocks_third(self):
+        self.rt.config.update(max_recommendations=5, max_pending_recommendations=2)
+        for number in (1, 2, 3):
+            work = self.rt.observe('capacity-' + str(number), 'input_changed', 0, ['original'])
+            model = FakeModel('recommend_change', {**self.advice, 'instruction': 'Candidate advice ' + str(number)})
+            outcome = self.rt.run_meta(work['work_id'], model, self.res)
+            self.assertEqual(outcome['proposal']['status'], 'applied' if number < 3 else 'rejected')
+        admission = self.rt.improvements.admission(mode='discovery')
+        self.assertEqual(admission['pending_count'], 2)
+        self.assertEqual(admission['pending_limit'], 2)
+        self.assertEqual(admission['remaining'], 3)
+        self.assertEqual(admission['reason'], 'recommendation_pending')
+        self.assertEqual(len(self.rt.improvements.rows()), 2)
+
+    def test_merged_notifications_keep_a_lab_wakeup_for_each_unanswered_recommendation(self):
+        self.rt.config.update(max_recommendations=5, max_pending_recommendations=2)
+        for number in (1, 2):
+            work = self.rt.observe('merged-capacity-' + str(number), 'input_changed', 0, ['original'])
+            result = self.rt.run_meta(work['work_id'], FakeModel('recommend_change',
+                {**self.advice, 'instruction': 'Merged advice ' + str(number)}), self.res)
+            self.assertEqual(result['proposal']['status'], 'applied')
+        self.assertEqual(len([w for w in self.c.ready('r') if w['kind'] == 'lab']), 1)
+        first, _ = self.lab('decline')
+        self.assertEqual(first['proposal']['status'], 'applied')
+        self.assertEqual(len(self.rt.pending_improvements()), 1)
+        self.assertEqual(len([w for w in self.c.ready('r') if w['kind'] == 'lab']), 1)
+        second, _ = self.lab('decline')
+        self.assertEqual(second['proposal']['status'], 'applied')
+        self.assertEqual(self.rt.pending_improvements(), [])
+        self.assertEqual(self.rt.improvements.admission(mode='discovery')['remaining'], 3)
+
+    def test_pending_capacity_rechecked_atomically_after_two_packets_were_admitted(self):
+        self.rt.config.update(max_recommendations=5, max_pending_recommendations=2)
+        self.recommend()
+        original_route = self.rt._route
+        interleaved = False
+        def route(proposal):
+            nonlocal interleaved
+            if proposal['command']['action'] == 'recommend_change' and not interleaved:
+                interleaved = True
+                work = self.rt.observe('competing-capacity', 'input_changed', 0, ['original'])
+                result = self.rt.run_meta(work['work_id'], FakeModel('recommend_change',
+                    {**self.advice, 'instruction': 'Competing second advice'}), self.res)
+                self.assertEqual(result['proposal']['status'], 'applied')
+            return original_route(proposal)
+        work = self.rt.observe('stale-capacity', 'input_changed', 0, ['original'])
+        with patch.object(self.rt, '_route', side_effect=route):
+            outcome = self.rt.run_meta(work['work_id'], FakeModel('recommend_change',
+                {**self.advice, 'instruction': 'Another second advice'}), self.res)
+        self.assertEqual(outcome['proposal']['status'], 'blocked_action')
+        self.assertIn('recommendation_pending', outcome['proposal']['error'])
+        self.assertEqual(len(self.rt.improvements.rows()), 2)
+        self.rt.recover(); self.rt.recover()
+        self.assertEqual(len(self.rt.improvements.rows()), 2)
+
+    def test_execution_keeps_pending_slot_until_review_without_refunding_total(self):
+        self.rt.config.update(max_recommendations=3, max_pending_recommendations=1)
+        self.recommend(); self.lab()
+        row = self.rt.improvements.rows()[0]
+        work = self.store.get('r', 'work', row['tool_work_id'])
+        self.rt.execute_adapter('candidate_test', {'candidates': ['new']},
+            trigger_id=work['id'], work_id=work['id'])
+        before = self.rt.improvements.admission(mode='discovery')
+        self.assertEqual(before['pending_count'], 1)
+        self.assertEqual(before['pending'][0]['status'], 'executed')
+        self.assertFalse(before['allowed'])
+        review = next(w for w in self.c.ready('r') if w['inputs'].get('improvement_review_ids'))
+        result = self.rt.run_meta(review['id'], FakeModel('no_action', {'reason': 'Review the measured result'}), self.res)
+        self.assertEqual(result['proposal']['status'], 'applied')
+        after = self.rt.improvements.admission(mode='discovery')
+        self.assertEqual(after['pending_count'], 0)
+        self.assertEqual(after['remaining'], 2)
+        self.assertEqual(after['total_created'], 1)
+        self.assertTrue(after['allowed'])
+
+    def test_executed_result_review_retains_review_schema_but_no_new_advice(self):
+        self.recommend(); self.lab()
+        row = self.rt.improvements.rows()[0]
+        work = self.store.get('r', 'work', row['tool_work_id'])
+        self.rt.execute_adapter('candidate_test', {'candidates': ['new']},
+            trigger_id=work['id'], work_id=work['id'])
+        review = next(w for w in self.c.ready('r') if w['inputs'].get('improvement_review_ids'))
+        agent, mode, task, options = self.rt._context(review, read_only=True)
+        packet = agent.prepare(mode, task, **options)
+        admission = task['constraints']['research_loop']['recommendation_admission']
+        self.assertEqual(admission['reason'], 'recommendation_result_review_only')
+        schema = packet['envelope']['response_schema']
+        self.assertIn('improvement_reviews', schema['properties'])
+        self.assertNotIn('recommend_change', json.dumps(schema))
+
+    def test_meta_rejection_receives_one_bounded_routing_feedback_turn(self):
+        self.recommend()
+        work = self.rt.observe('conflicting-advice', 'input_changed', 0, ['original'])
+        rejected = self.rt.run_meta(work['work_id'], FakeModel('recommend_change', self.advice), self.res)
+        self.assertEqual(rejected['proposal']['status'], 'rejected')
+        repairs = [w for w in self.c.ready('r') if w['inputs'].get('repair_of') == rejected['proposal']['id']]
+        self.assertEqual(len(repairs), 1)
+        repair = FakeModel('recommend_change', self.advice)
+        second = self.rt.run_meta(repairs[0]['id'], repair, self.res)
+        self.assertEqual(second['proposal']['status'], 'rejected')
+        self.assertEqual(repair.inputs[0]['task']['constraints']['previous_routing_error'], rejected['proposal']['error'])
+        self.assertFalse(any(w['inputs'].get('repair_of') == second['proposal']['id']
+                             for w in self.c.ready('r')))
+        self.assertEqual(len(self.rt.improvements.rows()), 1)
+        self.rt.recover(); self.rt.recover()
+        self.assertEqual(len([w for w in self.store.list('r', 'work') if 'repair_of' in w['inputs']]), 1)
+
+    def test_recommendation_routing_rechecks_quota_inside_creation_transaction(self):
+        self.rt.config['max_recommendations'] = 1
+        original_route = self.rt._route
+        interleaved = False
+        def route(proposal):
+            nonlocal interleaved
+            if proposal['command']['action'] == 'recommend_change' and not interleaved:
+                interleaved = True
+                work = self.rt.observe('other-coordinator', 'input_changed', 0, ['original'])
+                outcome = self.rt.run_meta(work['work_id'], FakeModel('recommend_change', self.advice), self.res)
+                self.assertEqual(outcome['proposal']['status'], 'applied')
+            return original_route(proposal)
+        work = self.rt.observe('initial-coordinator', 'input_changed', 0, ['original'])
+        with patch.object(self.rt, '_route', side_effect=route):
+            outcome = self.rt.run_meta(work['work_id'], FakeModel('recommend_change', self.advice), self.res)
+        self.assertEqual(outcome['proposal']['status'], 'blocked_action')
+        self.assertIn('recommendation_allowance_exhausted', outcome['proposal']['error'])
+        self.assertEqual(len(self.rt.improvements.rows()), 1)
+        self.rt.recover(); self.rt.recover()
+        self.assertEqual(len(self.rt.improvements.rows()), 1)
 
     def test_missing_explicit_lab_response_rejected_before_diagnostic(self):
         self.recommend()
@@ -263,7 +491,7 @@ class ImprovementsTests(unittest.TestCase):
                             {'source':'original measurement'},'original')
         old_work=runtime.enqueue_lab('already-prepared',['original'])
         prepared=runtime.prepare_meta(old_work['id'],self.res)
-        review=runtime.observe('parallel-review','new_evidence',0,['original'])
+        review=runtime.observe('parallel-review','input_changed',0,['original'])
         recommended=runtime.run_meta(review['work_id'],FakeModel('recommend_change',self.advice),self.res)
         self.assertEqual(recommended['proposal']['status'],'applied')
         row=runtime.improvements.rows()[0]
@@ -282,14 +510,15 @@ class ImprovementsTests(unittest.TestCase):
         self.assertEqual(runtime.pending_improvements(),[])
         store.verify_history('parallel')
 
-    def test_existing_ready_lab_can_consume_and_cancel_redundant_notification(self):
+    def test_existing_ready_lab_consumes_coalesced_recommendation_notification(self):
         existing=self.rt.enqueue_lab('already-ready',['original'])
         row,_=self.recommend()
         notifications=[w for w in self.c.ready('r') if w['inputs'].get('recommendation_id')==row['id']]
         self.assertEqual(len(notifications),1)
+        self.assertEqual(notifications[0]['id'], existing['id'])
         out=self.rt.run_lab(existing['id'],FakeModel('no_action',{'reason':'Decline this advice'},decision='decline'),self.res)
         self.assertEqual(out['proposal']['status'],'applied')
-        self.assertEqual(self.store.get('r','work',notifications[0]['id'])['status'],'cancelled')
+        self.assertEqual(self.store.get('r','work',notifications[0]['id'])['status'],'succeeded')
         self.assertFalse([w for w in self.c.ready('r') if w['kind']=='lab'])
 
     def test_concurrent_response_cas_rolls_back_diagnostic_and_dependency(self):
@@ -311,8 +540,8 @@ class ImprovementsTests(unittest.TestCase):
         dependencies=self.store.list('r','dependency')
         with patch.object(self.rt,'_route',side_effect=route):
             outcome,_=self.lab('adopt')
-        self.assertEqual(outcome['proposal']['status'],'blocked_action')
-        self.assertIn('stale',outcome['proposal']['error'])
+        self.assertEqual(outcome['proposal']['status'],'blocked_stale')
+        self.assertIn('dependency changed',outcome['proposal']['error'])
         self.assertEqual(self.rt.improvements.rows()[0]['status'],'declined')
         self.assertEqual(self.store.list('r','work',kind='diagnostic'),[])
         self.assertEqual(self.store.list('r','effect',kind='candidate_test'),[])
@@ -349,10 +578,9 @@ class ImprovementsTests(unittest.TestCase):
         self.assertEqual(self.store.get('r','budget','tool_calls')['spent'],1)
         self.store.verify_history('r')
 
-    def test_recover_legacy_response_transaction_with_none_result(self):
+    def test_recover_response_transaction_with_legacy_none_result(self):
         self.recommend()
         original_mutate=self.rt._mutate
-        original_route=self.rt._route
         def legacy_mutate(key,event,fn,payload):
             if event=='meta_proposal_applied':
                 raise KeyboardInterrupt('after legacy response commit')
@@ -362,15 +590,9 @@ class ImprovementsTests(unittest.TestCase):
                     return None
                 return original_mutate(key,event,discard_result,payload)
             return original_mutate(key,event,fn,payload)
-        def legacy_route(proposal):
-            if proposal['command']['action']!='request_diagnostic':
-                return original_route(proposal)
-            base=identity('object',proposal['id']);key='route:'+proposal['id']
-            payload=proposal['command']['payload']
-            self.c.dependency('r',base,payload['capability_id'],{'status':'pending'},key+':dependency')
-            return self.c.enqueue('r','diagnostic',base,key+':work',inputs={**payload,
-                'issue_id':None,'dependency_id':base,'lab_continuation':True,'source_proposal_id':proposal['id']})
-        with patch.object(self.rt,'_route',side_effect=legacy_route),patch.object(self.rt,'_mutate',side_effect=legacy_mutate),self.assertRaises(KeyboardInterrupt):
+        # Preserve the current decision seal; this compatibility case concerns
+        # the old None response-transaction result, not an unversioned decision.
+        with patch.object(self.rt,'_mutate',side_effect=legacy_mutate),self.assertRaises(KeyboardInterrupt):
             self.lab('adopt')
         row=self.rt.improvements.rows()[0]
         self.assertEqual(row['status'],'adopted')

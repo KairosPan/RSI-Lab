@@ -1,7 +1,7 @@
 import copy
 import unittest
 
-from docking_rsi.packets import (PacketBuilder, acknowledge_page, bind_user_reply, digest,
+from rsi_lab.packets import (PacketBuilder, acknowledge_page, bind_user_reply, digest,
                                  make_evidence, make_question, page_evidence, present_delivery,
                                  validate_page)
 
@@ -13,7 +13,7 @@ def fact(eid='raw', text='Actual tool observation', **kwargs):
 class PacketTests(unittest.TestCase):
     def arguments(self, **changes):
         return {'mode': 'disposition', 'instruction': 'Read delivered evidence only.',
-                'schema': {'type': 'object'}, 'task': {'goal': 'Run docking', 'identity': 'targetA'},
+                'schema': {'type': 'object'}, 'task': {'goal': 'Validate supplied records', 'identity': 'targetA'},
                 'evidence_ids': ['raw'], 'required_evidence_ids': ['raw'], **changes}
 
     def test_plan_and_final_dispatch_are_identical_complete_inputs(self):
@@ -85,7 +85,7 @@ class PacketTests(unittest.TestCase):
         self.assertEqual([p['evidence_id'] for p in result['delivery_pages']], ['raw'])
 
     def test_utf8_pages_reconstruct_original_and_reject_invalid_cursor(self):
-        evidence = fact(text='氢键🙂 and pH')
+        evidence = fact(text='数据🙂 and Δ')
         cursor, parts = 0, []
         while cursor < evidence['content_bytes']:
             page = page_evidence(evidence, cursor=cursor, max_content_bytes=5)
@@ -138,7 +138,7 @@ class DeliveryAndReplyTests(unittest.TestCase):
 
     def test_reply_binds_original_question_and_issue_version_without_guessing(self):
         question = make_question(question_id='q1', issue_id='i1', issue_version=4, question_version=2,
-                                 prompt='Exploratory conditions or exact assay reproduction?', options=['explore', 'reproduce'], trigger_id='e5')
+                                 prompt='Exploratory conditions or exact procedure reproduction?', options=['explore', 'reproduce'], trigger_id='e5')
         reply = {'question_id': 'q1', 'question_version': 2, 'message_id': 'user-message-1', 'answer': 'explore', 'source': 'user'}
         answered = bind_user_reply(question, reply, current_issue_version=4)
         self.assertEqual(answered['status'], 'answered')

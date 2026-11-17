@@ -270,10 +270,10 @@ class LiteratureRuntimeTests(unittest.TestCase):
         self.delegate()
         self.request_tool()
         original_dispatch = self.runtime.controller.dispatch_effect
-        def interrupt_dispatch(run_id, effect_id, executor):
+        def interrupt_dispatch(run_id, effect_id, executor, **guards):
             def interrupted(effect, raw):
                 raise KeyboardInterrupt('Process lost after durable dispatch')
-            return original_dispatch(run_id, effect_id, interrupted)
+            return original_dispatch(run_id, effect_id, interrupted, **guards)
         with patch.object(self.runtime.controller, 'dispatch_effect', side_effect=interrupt_dispatch):
             with self.assertRaises(KeyboardInterrupt):
                 self.execute_tool()
@@ -330,10 +330,10 @@ class LiteratureRuntimeTests(unittest.TestCase):
         earlier = self.ready('literature')['inputs']['evidence_ids'][0]
         self.request_tool()
         original_dispatch = self.runtime.controller.dispatch_effect
-        def fail_dispatch(run_id, effect_id, executor):
+        def fail_dispatch(run_id, effect_id, executor, **guards):
             def failure(effect, raw):
                 return {'status': 'failed_definite', 'actual_costs': {'tool_calls': 1}, 'error': 'Provider unavailable'}
-            return original_dispatch(run_id, effect_id, failure)
+            return original_dispatch(run_id, effect_id, failure, **guards)
         with patch.object(self.runtime.controller, 'dispatch_effect', side_effect=fail_dispatch):
             self.execute_tool()
         self.runtime.recover()

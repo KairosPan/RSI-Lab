@@ -4,8 +4,8 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from docking_rsi.demo import run_demo
-from docking_rsi.store import Store
+from tests.v2.fixtures import run_demo
+from rsi_lab.store import Store
 
 
 class OfflineDemoTests(unittest.TestCase):
@@ -27,7 +27,7 @@ class OfflineDemoTests(unittest.TestCase):
             self.assertEqual(report['costs']['tool_calls']['spent'], 3)
             self.assertTrue(all(row['reserved'] == 0 for row in report['costs'].values()))
             self.assertEqual(report['unreconciled_effect_count'], 0)
-            self.assertFalse(report['docking_executed'])
+            self.assertFalse(report['live_model_executed'])
             marker = json.loads((Path(directory) / 'synthetic_resumed.json').read_bytes())
             self.assertTrue(marker['fixture_only'])
             store = Store(directory)

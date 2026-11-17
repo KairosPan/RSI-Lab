@@ -5,6 +5,7 @@ import tempfile
 import unittest
 
 from rsi_lab import input_view
+from rsi_lab.adapters import Adapter
 from rsi_lab.agent_state import AgentState
 from rsi_lab.controller import Controller
 from rsi_lab.literature_context import (
@@ -12,8 +13,35 @@ from rsi_lab.literature_context import (
     build_literature_context, literature_tool_catalog)
 from rsi_lab.runtime import Runtime
 from rsi_lab.store import Store, digest
-from rsi_domains.literature.adapter import make_adapter as make_legacy_adapter
 from rsi_literature import make_adapters
+
+
+def _legacy_prepare(inputs):
+    return dict(inputs)
+
+
+def _legacy_reservations(packet):
+    return {'tool_calls': 1}
+
+
+def _legacy_execute(effect, packet):
+    return {'status': 'succeeded', 'actual_costs': {'tool_calls': 1}, 'result': {}}
+
+
+def _legacy_publication(effect, receipt):
+    return {'facts': [], 'conclusions': [], 'data': {}}
+
+
+def make_legacy_adapter():
+    """A pre-policy tool sharing the ``literature.`` namespace.
+
+    It carries the identity of the PABLO host's method search, which now lives
+    with that host; the kernel only needs a registered adapter whose manifest
+    declares no literature decision policy.
+    """
+    return Adapter('literature.search', '1.0', 'literature_search',
+        {'scope': 'Offline legacy search fixture without a literature decision policy'},
+        _legacy_prepare, _legacy_reservations, _legacy_execute, _legacy_publication)
 
 
 class LiteratureContextTests(unittest.TestCase):

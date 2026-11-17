@@ -1,10 +1,9 @@
-"""Native RSI control/trial mechanisms and legacy wire compatibility.
+"""Native RSI control/trial mechanisms and package isolation.
 
 The executable here is a numerical fixture. No domain package is needed to
 reserve calls, run paired branches, certify measurements or settle a trial.
 """
 import ast
-import copy
 import json
 from pathlib import Path
 import tempfile
@@ -67,23 +66,6 @@ class GenericMechanismTests(unittest.TestCase):
         trial=TrialEngine(self.store,'neutral').register('trial',spec,key='register')
         self.assertEqual(json.loads(self.store.read_blob(trial['spec_ref']))['schema_version'],'rsi_trial_v2')
 
-    def test_legacy_wire_profile_does_not_mutate_core_or_other_runs(self):
-        from docking_rsi.controller import Controller as LegacyController
-        from docking_rsi.trials import TrialEngine as LegacyTrialEngine, validate_trial_spec as legacy_validate
-        from docking_rsi.store import Store as LegacyStore
-        self.assertIs(LegacyStore,Store)
-        self.assertIs(LegacyController.prepare_effect,Controller.prepare_effect)
-        self.assertIs(LegacyTrialEngine.settle,TrialEngine.settle)
-        legacy=copy.deepcopy(specification());legacy['schema_version']='docking_trial_v2'
-        LegacyController(self.store).initialize('legacy',budgets={'tool_calls':{'limit':1,'hard':True}})
-        self.assertEqual(self.store.run('legacy')['config']['schema_version'],'docking_control_v2')
-        LegacyTrialEngine(self.store,'legacy').register('legacy_trial',legacy,key='legacy_register')
-        self.assertEqual(legacy_validate(legacy),legacy)
-        with self.assertRaises(ValueError):validate_trial_spec(legacy)
-        with self.assertRaises(ValueError):legacy_validate(specification())
-        self.assertEqual(validate_trial_spec(specification())['schema_version'],'rsi_trial_v2')
-        self.store.verify_history('neutral');self.store.verify_history('legacy')
-
     def test_native_numeric_branches_execute_and_settle_without_domain_tools(self):
         spec=specification();engine=TrialEngine(self.store,'neutral')
         engine.register('trial',spec,key='register');engine.start('trial',key='start')
@@ -118,13 +100,10 @@ class GenericMechanismTests(unittest.TestCase):
             for node in ast.walk(tree):
                 if isinstance(node,ast.ImportFrom):
                     target=node.module or ''
-                    self.assertFalse(target.startswith(('docking_rsi','lab_harness','scripts')), (name,target))
+                    self.assertFalse(target.startswith(('rsi_domains', 'tests', 'scripts')), (name,target))
                 elif isinstance(node,ast.Import):
                     for alias in node.names:
-                        self.assertFalse(alias.name.startswith(('docking_rsi','lab_harness','scripts')), (name,alias.name))
-            self.assertNotIn('vina',source.lower())
-            self.assertNotIn('compound',source.lower())
-            self.assertNotIn('docking',source.lower())
+                        self.assertFalse(alias.name.startswith(('rsi_domains', 'tests', 'scripts')), (name,alias.name))
 
 
 if __name__=='__main__':unittest.main()

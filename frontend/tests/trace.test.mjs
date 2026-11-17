@@ -29,7 +29,7 @@ def effect(i,kind,packet,receipt,metadata,status,costs,holds,unknown):
  row('effect',{'id':i,'kind':kind,'packet_ref':blob(packet),'result_ref':blob(receipt),'metadata':metadata,'created_seq':1,'updated_seq':1,'status':status,'actual_costs':costs,'held_reservations':holds,'accounting_unknown':unknown})
 effect(mid,'meta',{'prompt':'Fixture input only <script>alert(1)</script>','model':'fixture'}, {'response':{'command':{'action':'request_capability'}},'usage':{'input_tokens':7,'output_tokens':3}}, {},'succeeded',{'tokens':10,'model_calls':1,'wall_seconds':1},{},False)
 effect(eid,'engineering_model',{'prompt':'Unknown fixture input','model':'fixture'},{'response':None,'error':'Fixture remote status unknown'}, {'build_intent_id':'fixture-intent'},'unknown',{'model_calls':1,'wall_seconds':600},{'tokens':25},True)
-effect(tid,'sensitivity_host_command',{'argv':['fixture-no-execution'],'name':'fixture-tool'}, {'result':{'ok':True},'stdout':'x'*25000}, {'capability_build_id':'fixture-intent'},'succeeded',{'tool_calls':3,'cpu_seconds':0.1,'wall_seconds':0.2},{},False)
+effect(tid,'host_command',{'argv':['fixture-no-execution'],'name':'fixture-tool'}, {'result':{'ok':True},'stdout':'x'*25000}, {'capability_build_id':'fixture-intent'},'succeeded',{'tool_calls':3,'cpu_seconds':0.1,'wall_seconds':0.2},{},False)
 row('proposal',{'id':'fixture-proposal','effect_id':mid,'status':'applied','command':{'action':'request_capability'},'result_ref':blob({'build_intent_id':'fixture-intent'})})
 d.commit()
 if len(sys.argv)>2 and sys.argv[2]=='hold':
@@ -136,7 +136,7 @@ test("orchestration separates saved engineering readiness, scientific issues and
     assert.equal(state.task.plans[0].planHash, state.task.plans[0].planRef);
     assert.deepEqual(state.readiness.execution.readyWorkByKind, { meta_disposition: 1, capability_build: 1 });
     assert.equal(state.readiness.execution.labReadyWorkCount, 0);
-    assert.equal(state.readiness.execution.vinaReadyWorkCount, 0);
+    assert.equal(state.readiness.execution.taskToolReadyWorkCount, 0);
     assert.equal(state.readiness.execution.automaticResumeConfirmed, false);
     assert.equal(state.counts.pendingWorks, 3);
     assert.equal(state.readiness.scientific.status, "unresolved");
@@ -177,6 +177,46 @@ test("detail separates exact request links, missing responses and truncated tool
     const model = await project(f.root, ["--call", "effect_" + "1".repeat(24)]);
     assert.match(model.messages[0].content, /<script>/); // Data stays text; UI must escape it.
     assert.equal(model.messages[0].transportPromptAvailable, false);
+  } finally { await f.close(); }
+});
+
+test("generic adapters and source roles are projected from recorded identities", async () => {
+  const f = await fixture();
+  try {
+    await addOrchestrationFixture(f.root);
+    await exec(python, ["-c", String.raw`
+import sys,json,sqlite3
+from pathlib import Path
+d=sqlite3.connect(Path(sys.argv[1])/'ledger.sqlite3')
+def row(k,v):
+ v.update(created_seq=1,updated_seq=1);d.execute('INSERT INTO v2_'+k+' VALUES(?,?,?)',('fixture-only',v['id'],json.dumps(v)))
+for name,inputs in [('admitted',{'capability_id':'example.measure','capability_version':'v1'}),('direct',{'adapter_id':'example.measure'}),('unidentified',{})]:
+ row('work',{'id':name,'kind':'diagnostic','status':'ready','inputs':inputs})
+tool=json.loads(d.execute('SELECT document FROM v2_effect WHERE id=?',('effect_'+'3'*24,)).fetchone()[0])
+tool['kind']='example_measurement';tool['metadata']['adapter_id']='example.measure'
+d.execute('UPDATE v2_effect SET document=? WHERE id=?',(json.dumps(tool),tool['id']))
+source={**tool,'id':'effect_'+'4'*24,'kind':'custom_read','metadata':{'tool_role':'source','adapter_id':'example.source'}}
+row('effect',source)
+d.commit();d.close()
+`, f.root]);
+    const data = await project(f.root), state = data.labOrchestration;
+    assert.equal(state.readiness.execution.taskToolReadyWorkCount, 2);
+    assert.equal(state.counts.taskToolEffects, 2);
+    assert.equal(state.counts.labModelCalls, 0);
+    assert.equal(state.pendingWorks.find(w => w.id === "direct").capabilityId, "example.measure");
+    assert.equal(state.pendingWorks.find(w => w.id === "unidentified").role, "other");
+    assert.equal(state.pendingWorks.find(w => w.id === "meta-ready").role, "meta");
+    assert.equal(state.pendingWorks.find(w => w.id === "build-ready").role, "engineering");
+    assert.equal(state.stages.find(s => s.id === "task_tools").count, 2);
+    const source = data.calls.find(c => c.id === "effect_" + "4".repeat(24));
+    assert.equal(source.tool.role, "source");
+    assert.equal(source.tool.adapterId, "example.source");
+    const detail = await project(f.root, ["--call", source.id]);
+    assert.equal(detail.tool.role, "source");
+    assert.equal(detail.tool.adapterId, "example.source");
+    const ordinary = data.calls.find(c => c.id === "effect_" + "3".repeat(24));
+    assert.equal(ordinary.tool.role, null);
+    assert.equal(ordinary.tool.adapterId, "example.measure");
   } finally { await f.close(); }
 });
 

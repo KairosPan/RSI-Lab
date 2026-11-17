@@ -37,7 +37,7 @@ flowchart TD
 
 Lab 在现有 `working_memory_delta.rationale_summaries` 中记录一个简短的 `literature_decision`，值为 `delegate`、`use_delivered_evidence`、`local_work`、`await_existing`、`blocked` 或 `not_needed`，附行动理由、当前交付的证据 ID 和已有任务 ID。协议校验决策记录与实际命令、证据和任务身份一致；它不认证科学判断正确。真正的调用仍由模型选择 `request_literature`，没有关键词触发器、强制配额或验收脚本代写的委托。
 
-实现入口为 [`roles.py`](../rsi_lab/roles.py) 的 `LAB_LITERATURE_POLICY` / `literature_decision_record`、[`literature_context.py`](../rsi_lab/literature_context.py) 和 Runtime 的 `_context`。仅启用旧版 `rsi_domains.literature` 检索适配器的运行不要求新增决策记录；策略按显式版本启用，不因 `literature.*` 名称而隐式升级旧接口。自主路由对照与持续优化验证见[验收报告](literature-autonomy-validation.md)。
+实现入口为 [`roles.py`](../rsi_lab/roles.py) 的 `LAB_LITERATURE_POLICY` / `literature_decision_record`、[`literature_context.py`](../rsi_lab/literature_context.py) 和 Runtime 的 `_context`。仅启用旧版 `literature.search` 检索适配器（现随 PABLO 宿主位于 `experiments/pablo/pablo_task/literature/`）的运行不要求新增决策记录；策略按显式版本启用，不因 `literature.*` 名称而隐式升级旧接口。自主路由对照与持续优化验证见[验收报告](literature-autonomy-validation.md)。
 
 Lab 验收的是交付是否满足任务用途。来源材料、反证和未解决问题保留在不可变记录中；未来的调整、拒绝验收或取消命令也必须保留这些材料与 Meta 已获准的审计访问。
 

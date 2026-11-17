@@ -7,17 +7,22 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
+REPO = Path(__file__).resolve().parents[2]
+# The PABLO task package lives with its experiment host, outside the generic kernel tree.
+if str(REPO / 'experiments' / 'pablo') not in sys.path:
+    sys.path.insert(0, str(REPO / 'experiments' / 'pablo'))
+
 from rsi_lab.controller import Controller
 from rsi_lab.runtime import Runtime
 from rsi_lab.store import Store, digest
-from rsi_domains.pablo import adapter, lookup, oracle
+from pablo_task import adapter, lookup, oracle
 
 
-REPO = Path(__file__).resolve().parents[2]
 INITIAL_CSV = Path(os.environ.get('PABLO_INITIAL_CSV', str(
     REPO.parent / 'pablo-meta-experiment/upstream/data/guacamol_init_data.csv')))
 INITIAL_SHA256 = 'ef8b0dd3cda1c3b3f520e21a311d94f0ef324e9ab1bc3ab2385e3b4ee4e5a6c1'

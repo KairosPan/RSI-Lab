@@ -5,10 +5,10 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from docking_rsi.controller import Controller, identity
-from docking_rsi.packets import digest as packet_digest
-from docking_rsi.runtime import Runtime
-from docking_rsi.store import Store
+from rsi_lab.controller import Controller, identity
+from rsi_lab.packets import digest as packet_digest
+from rsi_lab.runtime import Runtime
+from rsi_lab.store import Store
 
 
 class RuntimeAuditTests(unittest.TestCase):
@@ -24,10 +24,10 @@ class RuntimeAuditTests(unittest.TestCase):
             'tokens': {'limit': 100000, 'hard': False},
             'cpu_seconds': {'limit': 1000, 'hard': False},
             'wall_seconds': {'limit': 1000, 'hard': False},
-        }, config={'goal': 'Screen the supplied compounds with docking',
+        }, config={'goal': 'Validate the supplied records',
                    'authorized_sources': ['prepared_inputs'], 'max_open_reviews': 2})
         self.runtime = Runtime(self.store, 'audit')
-        self.control.add_fact('audit', 'receipt', 'raw_fact', {'preparation': 'hydrogens_added'},
+        self.control.add_fact('audit', 'receipt', 'raw_fact', {'preparation': 'records_normalized'},
                               {'source': 'fixture_input'}, 'input')
         self.control.open_issue('audit', 'i', 'condition', 'Condition is unverified', 'input set',
             ['receipt'], ['Condition may be documented elsewhere'], ['Applicable record found'], 'issue')
@@ -173,7 +173,7 @@ class RuntimeAuditTests(unittest.TestCase):
         self.assertEqual(self.store.get('audit', 'budget', 'model_calls')['spent'], 1)
 
     def test_capability_publication_recovers_without_reexecuting_the_accepted_adapter(self):
-        from docking_rsi.demo import fixture_delivery
+        from tests.v2.fixtures import fixture_delivery
         spec, adapter, manifest, artifact = fixture_delivery(Path(self.tmp.name) / 'adapter')
         effect = self.emit(self.command('request_capability', {
             'capability_id': spec['capability_id'], 'purpose': spec['purpose'],
@@ -187,7 +187,7 @@ class RuntimeAuditTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 self.runtime.accept_capability(work['id'], spec, adapter, manifest, artifact)
         self.assertEqual(len(self.store.list('audit', 'capability', status='verified')), 1)
-        with patch('docking_rsi.runtime.execute_acceptance', side_effect=AssertionError('must not execute again')):
+        with patch('rsi_lab.runtime.execute_acceptance', side_effect=AssertionError('must not execute again')):
             self.runtime.recover()
         intent = self.store.get('audit', 'registration', work['inputs']['build_intent_id'])
         self.assertEqual(intent['status'], 'verified')

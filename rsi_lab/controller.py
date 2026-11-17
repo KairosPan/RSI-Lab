@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import tempfile
 import time
 
 from .store import Store, digest, encode
@@ -32,6 +34,42 @@ def request_scope_identity(scope):
     return digest(scope)
 
 
+def publish_envelope(path, value):
+    """Make a receipt envelope visible only once it is complete and durable."""
+    fd, temporary = tempfile.mkstemp(prefix='.tmp-' + path.name + '-', dir=path.parent)
+    published = False
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(encode(value))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        published = True
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if not published:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+
+
+def read_envelope(path):
+    """A missing, torn or incomplete envelope proves nothing and counts as absent."""
+    try:
+        envelope = json.loads(path.read_bytes())
+    except (FileNotFoundError, ValueError):
+        return None
+    if not isinstance(envelope, dict) or any(not isinstance(envelope.get(field), str)
+                                             for field in ('effect_id', 'packet_hash', 'receipt_ref')):
+        return None
+    return envelope
+
+
 class Controller:
     schema_version = 'rsi_control_v2'
 
@@ -48,8 +86,8 @@ class Controller:
                 raise ValueError('Only executable call-count restrictions can be hard in v2')
             if not finite(row.get('settlement_reserve', 0)) or row.get('settlement_reserve', 0) > row['limit']:
                 raise ValueError('Invalid protected disposition/settlement allowance')
-        self.store.create_run(run_id, {'schema_version': self.schema_version, **(config or {}),
-                                      'budgets': budgets, 'max_external': max_external})
+        run_config = {'schema_version': self.schema_version, **(config or {}),
+                      'budgets': budgets, 'max_external': max_external}
         def initialize(tx):
             rows = [tx.insert('budget', name, {**row, 'spent': 0, 'reserved': 0,
                 'overrun': False}) for name, row in budgets.items()]
@@ -57,7 +95,10 @@ class Controller:
                 'value': {'status': 'available', 'available': max_external},
                 'content_hash': digest({'status': 'available', 'available': max_external}), 'revision': 1})
             return rows
-        return self.store.mutate(run_id, 'initialize', 'run_initialized', initialize, payload=budgets)
+        # The run row and its budgets commit together, so a repeated init either
+        # returns the first result or completes a run left without budgets.
+        return self.store.mutate(run_id, 'initialize', 'run_initialized', initialize, payload=budgets,
+                                 run_config=run_config)
 
     def _capacity(self, tx):
         maximum = self.store.run(tx.run_id)['config'].get('max_external', 1)
@@ -68,6 +109,8 @@ class Controller:
             value = {'status': 'available' if available > 0 else 'busy', 'available': available}
             if digest(value) != old['content_hash']:
                 tx.update('dependency', old['id'], {'value': value, 'content_hash': digest(value), 'revision': old['revision'] + 1})
+        from .work_claims import reconcile_all
+        reconcile_all(tx)
 
     def _work(self, tx, issue_id, kind, trigger, *, inputs=None, priority=10):
         if kind not in WORK_KINDS:
@@ -93,6 +136,93 @@ class Controller:
         payload = {'kind': kind, 'trigger': trigger, 'issue_id': issue_id, 'inputs': inputs, 'priority': priority}
         return self.store.mutate(run_id, key, 'work_enqueued',
             lambda tx: self._work(tx, issue_id, kind, trigger, inputs=inputs, priority=priority), payload=payload)
+
+    def lab_scope(self, run_id, inputs):
+        config = self.store.run(run_id)['config']
+        return {'branch_id': inputs.get('branch_id', config.get('branch_id', 'main')),
+                'agent_instance_id': inputs.get('agent_instance_id') or 'lab'}
+
+    def wake_lab(self, tx, trigger, *, inputs=None, priority=10):
+        """Merge only unfrozen, compatible notifications, preserving all evidence."""
+        inputs = json.loads(encode(inputs or {}))
+        scope = self.lab_scope(tx.run_id, inputs)
+        alias = identity('lab_wakeup', scope, trigger)
+        request_hash = digest({'inputs': inputs, 'priority': priority})
+        prior = tx.find('registration', id=alias)
+        if prior:
+            if prior[0].get('request_hash') != request_hash:
+                raise ValueError('Lab wakeup identity reused with different inputs or priority')
+            return tx.get('work', prior[0]['work_id'])
+        aggregate = {'evidence_ids', 'required_evidence_ids', 'source_effect_id', 'recommendation_id',
+                     'source_effect_ids', 'recommendation_ids', 'wakeups', 'branch_id', 'agent_instance_id'}
+        special = {'repair_of', 'retry_of', 'final_review_only', 'allowed_action', 'handoff_id', 'scientific_query',
+                   'batch_interpretation_id'}
+        target = None
+        for work in sorted(tx.find('work', kind='lab', status='ready'), key=lambda w: w['created_seq']):
+            old = work['inputs']
+            if (work.get('effect_id') or work['issue_id'] is not None or special.intersection(set(old) | set(inputs))
+                    or self.lab_scope(tx.run_id, old) != scope or work['priority'] != priority):
+                continue
+            if {k:v for k,v in old.items() if k not in aggregate} != {k:v for k,v in inputs.items() if k not in aggregate}:
+                continue
+            merged = dict(old)
+            for key in ('evidence_ids', 'required_evidence_ids'):
+                merged[key] = list(dict.fromkeys(old.get(key, []) + inputs.get(key, [])))
+            for singular, plural in (('source_effect_id', 'source_effect_ids'), ('recommendation_id', 'recommendation_ids')):
+                values = old.get(plural, []) + inputs.get(plural, [])
+                values += [d[singular] for d in (old, inputs) if d.get(singular)]
+                if values:
+                    merged[plural] = list(dict.fromkeys(values))
+                    merged.setdefault(singular, values[0])
+            merged['wakeups'] = old.get('wakeups', [{'trigger': work['trigger'], 'inputs': old}]) + [
+                {'trigger': trigger, 'inputs': inputs}]
+            target = tx.update('work', work['id'], {'inputs': merged})
+            break
+        if target is None:
+            target = self._work(tx, None, 'lab', identity('lab_notification', scope, trigger),
+                                inputs=inputs, priority=priority)
+        tx.insert('registration', alias, {'kind': 'lab_wakeup', 'trigger': trigger, 'scope': scope,
+                                         'work_id': target['id'], 'request_hash': request_hash})
+        return target
+
+    def diagnostic_lab_scope(self, run_id, tool):
+        inputs = tool['inputs']
+        if inputs.get('lab_scope') is not None:
+            return inputs['lab_scope']
+        if inputs.get('source_proposal_id'):
+            proposal = self.store.get(run_id, 'proposal', inputs['source_proposal_id'])
+            effect = self.store.get(run_id, 'effect', proposal['effect_id'])
+            source = self.store.get(run_id, 'work', effect['work_id'])
+            return self.lab_scope(run_id, source['inputs'])
+        return self.lab_scope(run_id, {})
+
+    def lab_blockers(self, run_id, work):
+        if work['kind'] != 'lab':
+            return []
+        scope = self.lab_scope(run_id, work['inputs'])
+        blocked = []
+        owned_review = any(b['id'] == work['inputs'].get('batch_interpretation_id') and b['scope'] == scope
+                          for b in self.store.list(run_id, 'registration', kind='batch_interpretation_barrier'))
+        for barrier in self.store.list(run_id, 'registration', kind='batch_interpretation_barrier'):
+            if (barrier['scope'] == scope and barrier['status'] != 'interpreted'
+                    and not owned_review):
+                blocked.append(barrier['id'])
+        for tool in self.store.list(run_id, 'work', kind='diagnostic'):
+            inputs = tool['inputs']
+            if not inputs.get('lab_continuation'):
+                continue
+            if self.diagnostic_lab_scope(run_id, tool) != scope:
+                continue
+            effect = self.store.get(run_id, 'effect', tool['effect_id']) if tool.get('effect_id') else None
+            pending = tool['status'] in {'ready', 'leased', 'blocked'}
+            if effect:
+                pending |= effect['status'] in UNSETTLED or bool(effect.get('accounting_unknown'))
+                if effect['status'] == 'succeeded':
+                    pending |= not bool(self.store.list(run_id, 'registration',
+                        id=identity('publication', effect['id']), status='complete'))
+            if pending:
+                blocked.append(tool['id'])
+        return blocked
 
     def add_fact(self, run_id, fact_id, kind, content, provenance, key):
         if kind not in FACT_KINDS or not provenance:
@@ -135,12 +265,15 @@ class Controller:
         self.store.verify_history(run_id)
         result = []
         for work in self.store.list(run_id, 'work', status='ready'):
+            if self.lab_blockers(run_id, work):
+                continue
             if work['issue_id']:
                 issue = self.store.get(run_id, 'issue', work['issue_id'])
                 if issue['status'] != 'open' or any(issue[k] != v for k, v in work['expected_versions'].items()):
                     continue
             result.append(work)
-        return sorted(result, key=lambda w: (w['priority'], w['created_seq'], w['id']))
+        return sorted(result, key=lambda w: (min(w['priority'], 1) if w['kind'] == 'diagnostic' else w['priority'],
+                                              w['created_seq'], w['id']))
 
     def dependency(self, run_id, dependency_id, producer, value, key):
         """Only relevant value/capacity changes advance the dependency revision."""
@@ -185,6 +318,7 @@ class Controller:
                 raise ValueError('Unknown execution must be reconciled, not converted into a free wait')
             for work in tx.find('work', issue_id=issue_id, status='ready'):
                 tx.update('work', work['id'], {'status': 'cancelled', 'outcome_ref': tx.blob({'reason': 'parked_with_dependency'})})
+            self._capacity(tx)
             epoch = 1 + len(tx.find('wait', issue_id=issue_id))
             wid = identity('wait', issue_id, dependency_id, observed_version)
             tx.update('issue', issue_id, {'scheduling_revision': issue['scheduling_revision'] + 1})
@@ -216,6 +350,7 @@ class Controller:
                 if action == 'wake':
                     for work in tx.find('work', issue_id=issue['id'], status='ready'):
                         tx.update('work', work['id'], {'status': 'cancelled'})
+                    self._capacity(tx)
                     updated = tx.update('wait', wait['id'], {'status': 'fired'})
                     self._work(tx, issue['id'], 'meta_disposition', 'dependency:' + dep['id'] + ':' + str(dep['revision']))
                 else:
@@ -334,6 +469,12 @@ class Controller:
             work = tx.get('work', work_id)
             if work['status'] != 'ready':
                 raise ValueError('Work is not eligible for dispatch')
+            if metadata.get('expected_work_version', work['version']) != work['version']:
+                raise ValueError('Work changed after packet preparation; rebuild its request')
+            if self.lab_blockers(run_id, work):
+                raise ValueError('Lab awaits its queued tool execution and publication')
+            if 'decision_dependencies' in metadata:
+                self._validate_decision(run_id, {'metadata': metadata}, raw)
             task_id = work['inputs'].get('literature_task_id')
             if kind == 'literature' or task_id or metadata.get('literature_task_id'):
                 if not task_id or metadata.get('literature_task_id') != task_id:
@@ -426,7 +567,17 @@ class Controller:
             return effect
         return self.store.mutate(run_id, key, 'effect_prepared', apply, payload=payload)
 
-    def dispatch_effect(self, run_id, effect_id, executor):
+    def _validate_decision(self, run_id, effect, raw):
+        from . import decision_dependencies, input_view
+        envelope = json.loads(raw)
+        task = input_view.decode(envelope['prompt'].split('INPUT_DATA_JSON:\n', 1)[1],
+                                 envelope['input_view_mode'])['task']
+        manifest = decision_dependencies.validate_binding(effect, task)
+        if manifest is None:
+            raise decision_dependencies.StaleDecision('legacy_unversioned: prepare a fresh decision before dispatch')
+        decision_dependencies.validate(self.store, run_id, manifest)
+
+    def dispatch_effect(self, run_id, effect_id, executor, *, pre_dispatch_check=None):
         self.store.verify_history(run_id)
         # The dispatch CAS is deliberately not idempotently callable: an already
         # dispatching attempt must reconcile, never invoke its executor twice.
@@ -443,6 +594,13 @@ class Controller:
                 task = tx.get('registration', effect['metadata']['literature_task_id'])
                 if task['status'] != 'active' or task['task_revision'] != effect['metadata']['task_revision']:
                     raise ValueError('Prepared Literature Effect belongs to an inactive or stale task')
+            if pre_dispatch_check is not None:
+                # A trusted runtime guard shares the dispatch CAS transaction;
+                # no publication can insert a new obligation between its read
+                # and the commit. External execution remains outside the lock.
+                pre_dispatch_check(effect, work)
+            if effect['kind'] in {'lab', 'meta'} and effect['metadata'].get('plan_ref'):
+                self._validate_decision(run_id, effect, self.store.read_blob(effect['packet_ref']))
             if work['issue_id']:
                 issue = tx.get('issue', work['issue_id'])
                 if issue['status'] != 'open' or any(issue[k] != v for k, v in work['expected_versions'].items()):
@@ -474,17 +632,7 @@ class Controller:
         # effect binding even if the following SQLite commit is interrupted.
         receipt_ref = self.store.put_blob(receipt)
         envelope = {'effect_id': effect_id, 'packet_hash': effect['packet_hash'], 'receipt_ref': receipt_ref}
-        path = self.store.root / ('receipt_' + effect_id + '.json')
-        with path.open('x') as stream:
-            stream.write(encode(envelope).decode())
-            stream.flush()
-            import os
-            os.fsync(stream.fileno())
-        directory = os.open(self.store.root, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        publish_envelope(self.store.root / ('receipt_' + effect_id + '.json'), envelope)
         return self.settle_effect(run_id, effect_id, receipt_ref, 'settle:' + effect_id)
 
     def cancel_prepared(self, run_id, effect_id, reason, key):
@@ -611,15 +759,33 @@ class Controller:
         for effect in self.store.list(run_id, 'effect'):
             if effect_is_quarantined(effect) or effect['status'] not in {'dispatching', 'unknown'}:
                 continue
-            path = self.store.root / ('receipt_' + effect['id'] + '.json')
-            if path.exists():
-                envelope = json.loads(path.read_bytes())
+            envelope = read_envelope(self.store.root / ('receipt_' + effect['id'] + '.json'))
+            if envelope is not None:
                 if envelope['effect_id'] != effect['id'] or envelope['packet_hash'] != effect['packet_hash']:
                     raise ValueError('Recovery receipt belongs to a different attempt/input')
                 recovered.append(self.settle_effect(run_id, effect['id'], envelope['receipt_ref'], 'settle:' + effect['id']))
             elif effect['status'] == 'dispatching':
                 receipt = self.store.put_blob({'status': 'unknown', 'actual_costs': {}, 'reason': 'blocked_external: no durable receipt/provider query'})
                 recovered.append(self.settle_effect(run_id, effect['id'], receipt, 'recovery_unknown:' + effect['id']))
+        # Also finish known terminal Work transitions that predate claim cleanup.
+        terminal = []
+        for claim in self.store.list(run_id, 'registration', kind='work_identity_claim', status='held'):
+            owners = self.store.list(run_id, 'work', id=claim['owner_work_id'])
+            if not owners:
+                continue
+            work = owners[0]
+            effect = self.store.get(run_id, 'effect', work['effect_id']) if work.get('effect_id') else None
+            ready = effect is None and work['status'] in {'failed', 'cancelled', 'superseded'}
+            if effect and not effect.get('accounting_unknown'):
+                ready |= effect['status'] in {'failed_definite', 'cancelled'} or (
+                    effect['status'] == 'succeeded' and bool(self.store.list(run_id, 'registration',
+                        id=identity('publication', effect['id']), status='complete')))
+            if ready:
+                terminal.append((claim['id'], claim['version']))
+        if terminal:
+            from .work_claims import reconcile_all
+            self.store.mutate(run_id, 'recover-claims:' + digest(sorted(terminal)), 'work_claims_reconciled',
+                reconcile_all, payload={'terminal_claims': sorted(terminal)})
         return recovered
 
     def quarantine_interrupted_model(self, run_id, effect_id, operator_attestation, key):
@@ -734,5 +900,6 @@ class Controller:
             for work in tx.find('work', issue_id=None):
                 if related_work(work) and work['status'] in {'ready', 'blocked'}:
                     tx.update('work', work['id'], {'status': 'cancelled'})
+            self._capacity(tx)
             return tx.update('issue', issue_id, {'status': outcome, 'conclusion_ref': tx.blob(payload)}, expected_version=issue['version'])
         return self.store.mutate(run_id, key, 'issue_closed', apply, payload=payload)

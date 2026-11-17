@@ -12,8 +12,14 @@ import argparse
 import json
 import math
 from pathlib import Path
+import sys
 
-from rsi_domains.pablo.adapter import _ReadStore, read_progress
+# The PABLO task package lives with its experiment host, outside the generic kernel tree.
+PABLO_HOST = Path(__file__).resolve().parents[1] / 'experiments' / 'pablo'
+if str(PABLO_HOST) not in sys.path:
+    sys.path.insert(0, str(PABLO_HOST))
+
+from pablo_task.adapter import _ReadStore, read_progress
 from rsi_lab.controller import Controller, identity
 from rsi_lab.store import Store, digest, encode
 

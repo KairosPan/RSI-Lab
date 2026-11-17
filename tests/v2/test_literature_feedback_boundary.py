@@ -47,7 +47,9 @@ class LiteratureFeedbackBoundaryTests(unittest.TestCase):
 
     def review_work(self):
         self.sequence += 1
-        event = self.runtime.observe('fixture-review-' + str(self.sequence), 'new_evidence', 0, ['original'])
+        # Ordinary new evidence is now subject to the open-review allowance; an
+        # input change always admits the Meta review these fixtures need.
+        event = self.runtime.observe('fixture-review-' + str(self.sequence), 'input_changed', 0, ['original'])
         return self.store.get('r', 'work', event['work_id'])
 
     def plan(self, work):
@@ -58,6 +60,9 @@ class LiteratureFeedbackBoundaryTests(unittest.TestCase):
     def advice(capability='literature.audit'):
         return {'change_kind': 'bounded_check', 'instruction': 'Perform the proposed bounded check',
                 'capability_id': capability, 'capability_version': 'v1',
+                # Every recommendation now freezes a machine-checkable execution contract.
+                'execution_contract_json': json.dumps({'version': 1, 'kind': 'exact_inputs',
+                                                       'inputs': {'candidates': ['new']}}),
                 'expected_outcome': 'An original observation', 'measurement': 'Reported result',
                 'falsifier': 'No supporting observation'}
 

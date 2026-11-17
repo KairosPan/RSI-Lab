@@ -39,7 +39,7 @@ python3.11 -m venv .tools/paper2skill-venv
 
 `--literature-config` 本身会注册当前启用 provider 能执行的文献能力；也可以只传 `--literature-tools` 使用默认宿主配置。`literature-tools` 子命令返回 15 个 provider 的本地配置状态及实际注册的能力 ID。状态为 `configured/needs_configuration/disabled`；未列入 `enabled_providers` 的条目会标记 `enabled=false`。`configured` 仅表示本地检查通过，`live_verified` 不会因配置通过而自动变成 `true`。
 
-新版适配器的 manifest 显式声明 `literature_decision_policy: lab_literature_decision_v1`，启用 Lab 的自主委托上下文和简短决策记录。旧版 `rsi_domains.literature` 检索接口保留原契约；仅注册该旧接口不会增加决策记录要求。
+新版适配器的 manifest 显式声明 `literature_decision_policy: lab_literature_decision_v1`，启用 Lab 的自主委托上下文和简短决策记录。旧版 `literature.search` 检索接口（现随 PABLO 宿主位于 `experiments/pablo/pablo_task/literature/`）保留原契约；仅注册该旧接口不会增加决策记录要求。
 
 默认使用 [`literature-tools.json`](../examples/literature-tools.json)，启用 Europe PMC、PubMed/PMC、OpenAlex、Asta、Paper2Skill、Poppler。主线分类另保留 Unpaywall、GROBID、LangExtract，但因邮箱、服务端点或模型未配置而保持关闭。所有关闭项仍可在目录中查看，模型不能调用。
 

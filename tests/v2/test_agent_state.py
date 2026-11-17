@@ -245,6 +245,29 @@ class AgentStateTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             AgentState(self.store, 'unknown')
 
+    def test_preview_is_the_session_then_created_and_creates_nothing(self):
+        binding = {'model': 'm', 'effort': 'low', 'transport': 't'}
+        before = self.store.verify_history('r')
+        session, memory = self.state.preview_session('lab', agent_instance_id='second', runtime_binding=binding)
+        self.assertEqual(self.store.verify_history('r'), before)
+        created = self.state.ensure_session('lab', agent_instance_id='second', runtime_binding=binding)
+        self.assertEqual(session, {key: created[key] for key in session})
+        self.assertEqual(set(created) - set(session), {'run_id', 'version', 'created_seq', 'updated_seq'})
+        self.assertEqual(memory, self.state.read_working_memory(created['id'], actor_session_id=created['id']))
+
+    def test_preview_of_an_existing_session_is_that_session_and_its_memory(self):
+        self.complete({'next_step': 'continue'})
+        before = self.store.verify_history('r')
+        session, memory = self.state.preview_session('lab')
+        self.assertEqual(self.store.verify_history('r'), before)
+        self.assertEqual(session, self.state.ensure_session('lab'))
+        self.assertEqual(memory, self.state.read_working_memory(session['id'], actor_session_id=session['id']))
+        self.assertEqual(memory['content'], {'next_step': 'continue'})
+        with self.assertRaises(ValueError):
+            self.state.preview_session('lab', runtime_binding={'model': 'other'})
+        with self.assertRaises(ValueError):
+            self.state.preview_session('reviewer')
+
     def test_discard_known_terminal_preserves_memory_and_allows_explicit_rebuild(self):
         self.complete({'next_step': 'preserved'})
         before = self.state.working_memory(self.lab['id'])

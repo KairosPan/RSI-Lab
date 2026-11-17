@@ -10,14 +10,26 @@ and the public capability contracts.
 
 ## Source provenance
 
-The four scoring/lookup files under `rsi_domains/pablo/` used for the original
-validation were copied from RSI-Lab commit
+The four scoring/lookup files used for the original validation lived under
+`rsi_domains/pablo/` and were copied from RSI-Lab commit
 `ed71c7bcdc7c61d9261849a0c6d71b74db03d4d6`. The copied scorer and oracle were also
 byte-identical to the locally frozen PR2 sources. That validation did not enable
-the separate research host or Scientific Memory. The PR also integrates the
-subsequently merged `main` implementation; its research modules are retained.
-The adapter and lookup manifests now additionally expose a closed JSON input
-schema; their scoring, accounting, authorization, and replay algorithms are unchanged.
+the separate research host or Scientific Memory.
+
+After integration with `main`, the PABLO task package lives with its experiment
+host at `experiments/pablo/pablo_task/`; `rsi_domains/pablo/` no longer exists.
+`__init__.py` and `oracle.py` there are byte-identical to the validated files
+below. `adapter.py` and `lookup.py` are `main`'s current versions, which add the
+research host's admission, claim and Harness contracts on top of the validated
+ones; a run that does not enable the Harness keeps the three-field input
+contract described here. The campaign runner, its audit and the recovery helper
+import that package. The recorded 100 + 200 campaign was executed with the
+original files at the validated source commit, not with these later versions,
+and has not been repeated since the integration.
+
+The adapter and lookup manifests additionally expose a closed JSON input schema.
+The scorer's schema also lists the four Harness selection fields, which are
+required exactly when a run enables the Harness.
 
 | Original file | SHA-256 at source commit |
 | --- | --- |
@@ -36,9 +48,9 @@ Read the `smile` and `adip` columns, canonicalize molecular identities, and free
 `{"candidates": [...], "scores": [...]}` in the new run's object store. Initial
 observations do not count toward the 200 new unique evaluations.
 
-Register `rsi_domains.pablo.adapter.make_adapter()` and
-`rsi_domains.pablo.lookup.make_adapter()` alongside the selected literature
-adapters in the current `Runtime`. Freeze these run configuration values before
+With `experiments/pablo` on the import path, register
+`pablo_task.adapter.make_adapter()` and `pablo_task.lookup.make_adapter()`
+alongside the selected literature adapters in the current `Runtime`. Freeze these run configuration values before
 execution:
 
 - `pablo_run_root`: the canonical absolute directory of the new run.
