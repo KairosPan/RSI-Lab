@@ -699,7 +699,8 @@ class Runtime:
         usage as 0, so such a call keeps its reconciliation duty.
         """
         if (self.config.get('unknown_usage_policy', 'hold') != 'charge_reservation'
-                or effect['kind'] not in {'lab', 'meta'} or effect['status'] not in {'succeeded', 'failed_definite'}
+                or effect['kind'] not in {'lab', 'meta', 'literature'}
+                or effect['status'] not in {'succeeded', 'failed_definite'}
                 or not effect.get('accounting_unknown')):
             return effect
         prior = json.loads(self.store.read_blob(effect['result_ref']))
@@ -722,11 +723,11 @@ class Runtime:
         The failed Effect is never dispatched again. The successor's identity
         is fixed by the chain root and attempt, so repeating this is a no-op.
         """
-        if effect['kind'] not in {'lab', 'meta'} or effect['status'] != 'failed_definite':
+        if effect['kind'] not in {'lab', 'meta', 'literature'} or effect['status'] != 'failed_definite':
             return None
         work = self.store.get(self.run_id, 'work', effect['work_id'])
         attempt = work['inputs'].get('retry_attempt', 0) + 1
-        if (work['kind'] not in {'lab', 'meta_discovery', 'meta_disposition'}
+        if (work['kind'] not in {'lab', 'literature', 'meta_discovery', 'meta_disposition'}
                 or attempt > self.config.get('model_failure_retries', 0)):
             return None
         receipt = json.loads(self.store.read_blob(effect['result_ref']))
@@ -1640,7 +1641,8 @@ class Runtime:
         # Opt-in failure policies also cover calls settled before a restart.
         policy_failed = set()
         for effect in self.store.list(self.run_id, 'effect'):
-            if effect['kind'] not in {'lab', 'meta'} or effect['status'] not in {'succeeded', 'failed_definite'}:
+            if (effect['kind'] not in {'lab', 'meta', 'literature'}
+                    or effect['status'] not in {'succeeded', 'failed_definite'}):
                 continue
             if effect['id'] in model_complete:
                 continue

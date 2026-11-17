@@ -62,12 +62,16 @@ def tool(operation):
         prepare, reservations, execute, publication)
 
 
-def model(response, *, protocol_valid=True):
+def model(response, *, protocol_valid=True, failed=False):
     def call(effect, packet):
         envelope = json.loads(packet)
         receipt = {'status': 'succeeded', 'actual_costs': {'model_calls': 1}, 'response': response,
                    'sent_packet_sha256': digest(packet),
                    'sent_prompt_sha256': digest(envelope['prompt'].encode())}
+        if failed:
+            # A provider failure with a certified terminal: nothing was answered.
+            receipt.update(status='failed_definite', response=None, terminal_received=True,
+                           error='Provider refused the request')
         if not protocol_valid:
             # A certified terminal whose native turn nevertheless broke protocol:
             # the operator may discard it, and nothing in it may be applied.
@@ -89,7 +93,8 @@ class LiteratureRecoveryAndOrchestrationTests(unittest.TestCase):
         self.addCleanup(self.store.close)
         self.controller = Controller(self.store)
         self.controller.initialize('r', budgets={'model_calls': {'limit': 64, 'hard': True},
-            'tool_calls': {'limit': 64, 'hard': True}}, config={'execution_mode': 'replay',
+            'tool_calls': {'limit': 64, 'hard': True}, 'tokens': {'limit': 100000, 'hard': False}},
+            config={'execution_mode': 'replay',
                 'goal': 'Resolve the supplied scientific question', 'max_input_bytes': 500000, **config})
         self.runtime = Runtime(self.store, 'r', adapters=[tool('search_papers'), tool('read_document')])
 
@@ -135,6 +140,30 @@ class LiteratureRecoveryAndOrchestrationTests(unittest.TestCase):
     def results(self):
         return [json.loads(self.store.read_blob(fact['content_ref'])) for fact in self.store.list('r', 'fact')
                 if (fact['provenance'] if isinstance(fact['provenance'], dict) else {}).get('producer') == 'literature']
+
+    def test_usage_policy_charges_a_child_call_with_unmeasured_usage(self):
+        self.open(unknown_usage_policy='charge_reservation')
+        self.delegate()
+        child = self.child()
+        # The fixture model reports its call but no token usage.
+        outcome = self.runtime.run_meta(child['id'], model(self.reply(child, 'complete_research', UNRESOLVED)),
+                                        {'model_calls': 1, 'tokens': 10})
+        self.assertFalse(outcome['effect'].get('accounting_unknown'))
+        self.assertEqual(outcome['effect']['actual_costs']['tokens'], 10)
+        self.assertEqual(outcome['proposal']['status'], 'applied', outcome['proposal'])
+        self.assertEqual(self.task()['status'], 'completed')
+
+    def test_a_failed_child_call_is_retried_within_the_allowance(self):
+        self.open(model_failure_retries=1)
+        self.delegate()
+        child = self.child()
+        self.runtime.run_meta(child['id'], model(None, failed=True), RES)
+        retry = self.child()
+        self.assertNotEqual(retry['id'], child['id'])
+        self.assertEqual((retry['inputs']['retry_of'], retry['inputs']['retry_attempt']), (child['id'], 1))
+        self.assertEqual(retry['inputs']['literature_task_id'], self.task()['id'])
+        self.assertEqual(self.task()['status'], 'active')
+        self.assertEqual(self.results(), [])
 
     def test_discarded_child_turn_returns_its_task_to_the_lab_in_the_recovery_that_completes_it(self):
         # Recovery records an Effect complete as soon as its proposal is
