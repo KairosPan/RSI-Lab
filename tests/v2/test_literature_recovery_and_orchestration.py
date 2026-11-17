@@ -48,8 +48,12 @@ def reservations(packet):
 def execute(effect, packet):
     if SWITCH['fail_execute']:
         return {'status': 'failed_definite', 'actual_costs': {'tool_calls': 1}, 'error': 'Provider unavailable'}
+    text = 'This synthetic experiment reports a matched control.'
+    passage = {'document_id': 'fixture-paper', 'document_version': digest(b'fixture-document-v1'),
+               'source_sha256': digest(b'synthetic-article-original'), 'locator': 'paragraph:1', 'text': text,
+               'kind': 'paragraph', 'char_range': [0, len(text)], 'byte_range': [0, len(text.encode())]}
     return {'status': 'succeeded', 'actual_costs': {'tool_calls': 1},
-            'result': {'status': 'ok', 'data': {'fixture': 'Offline synthetic adapter result'},
+            'result': {'status': 'ok', 'data': {'passages': [passage]},
                        'provenance': {'fixture': True, 'attempt_count': 0},
                        'coverage': {'synthetic_fixture': True}, 'continuation': None, 'errors': []}}
 
@@ -98,10 +102,10 @@ class LiteratureRecoveryAndOrchestrationTests(unittest.TestCase):
                 'goal': 'Resolve the supplied scientific question', 'max_input_bytes': 500000, **config})
         self.runtime = Runtime(self.store, 'r', adapters=[tool('search_papers'), tool('read_document')])
 
-    def reply(self, work, action, payload):
+    def reply(self, work, action, payload, cited=()):
         mode = 'literature' if work['kind'] == 'literature' else 'lab'
         command = {'mode': mode, 'action': action, 'issue_id': None,
-            'expected_versions': self.runtime.versions(None), 'evidence_ids': [],
+            'expected_versions': self.runtime.versions(None), 'evidence_ids': list(cited),
             'payload': copy.deepcopy(payload)}
         memory = {}
         if mode == 'literature':
@@ -164,6 +168,64 @@ class LiteratureRecoveryAndOrchestrationTests(unittest.TestCase):
         self.assertEqual(retry['inputs']['literature_task_id'], self.task()['id'])
         self.assertEqual(self.task()['status'], 'active')
         self.assertEqual(self.results(), [])
+
+    ORCHESTRATED = {'orchestration': {'no_result_steps': 2, 'max_changes': 2}}
+
+    def delegation_step(self):
+        steps = self.runtime.orchestration.steps()
+        self.assertEqual(len(steps), 1)
+        return steps[0]['outcome'], steps[0]['reason_code']
+
+    def complete_citing(self, fact_id):
+        child = self.child()
+        self.assertIn(fact_id, child['inputs']['required_evidence_ids'])
+        result = {'answer': 'The delivered source bears on the question.', 'coverage_status': 'partial',
+                  'stop_reason': 'The delivered source was read', 'limitations': ['One source only'],
+                  'claims': [{'statement': 'The source was delivered and read.', 'evidence_ids': [fact_id],
+                              'limitations': ['Offline fixture']}]}
+        done = self.runtime.run_meta(child['id'], model(self.reply(child, 'complete_research', result, [fact_id])), RES)
+        self.assertEqual(done['proposal']['status'], 'applied', done['proposal'])
+
+    def test_a_pending_delegation_is_an_unfinished_step(self):
+        self.open(**self.ORCHESTRATED)
+        self.delegate()
+        self.assertEqual(self.delegation_step(), ('unfinished', None))
+        self.assertIsNone(self.runtime.orchestration.signal())
+
+    def test_research_that_returns_an_original_is_a_new_result(self):
+        self.open(**self.ORCHESTRATED)
+        self.delegate()
+        self.execute_tool(self.request_tool())
+        original = next(fid for fid in self.child()['inputs']['required_evidence_ids']
+                        if self.store.get('r', 'fact', fid)['provenance'].get('delivery_kind') == 'source_excerpt')
+        self.complete_citing(original)
+        self.assertEqual(self.delegation_step(), ('new_result', 'research_result'))
+
+    def test_research_that_ends_unresolved_is_no_result(self):
+        self.open(**self.ORCHESTRATED)
+        self.delegate()
+        child = self.child()
+        self.runtime.run_meta(child['id'], model(self.reply(child, 'complete_research', UNRESOLVED)), RES)
+        self.assertEqual(self.delegation_step(), ('no_result', 'research_unresolved'))
+
+    def test_a_result_citing_only_a_tool_failure_is_no_result(self):
+        self.open(**self.ORCHESTRATED)
+        self.delegate()
+        tool_work = self.request_tool()
+        SWITCH['fail_execute'] = True
+        failed = self.execute_tool(tool_work)['effect']
+        self.assertEqual(failed['status'], 'failed_definite')
+        # A claim may not cite a failure receipt, but the command can: the
+        # returned result is then a summary of something that is not a source.
+        child = self.child()
+        receipt = child['inputs']['required_evidence_ids'][0]
+        done = self.runtime.run_meta(child['id'], model(self.reply(child, 'complete_research', UNRESOLVED,
+                                                                    [receipt])), RES)
+        self.assertEqual(done['proposal']['status'], 'applied', done['proposal'])
+        returned = next(fact for fact in self.store.list('r', 'fact')
+                        if fact['provenance'].get('producer') == 'literature')
+        self.assertEqual(returned['provenance']['summary_of'], [receipt])
+        self.assertEqual(self.delegation_step(), ('no_result', 'research_unresolved'))
 
     def returned_to_lab(self):
         return [work for work in self.controller.ready('r')

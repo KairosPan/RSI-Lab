@@ -134,6 +134,8 @@ class Orchestration:
         if proposal['status'] in STOPPED_PROPOSALS:
             return 'no_result', 'proposal_' + proposal['status'], proposal.get('error')
         action = (proposal.get('command') or {}).get('action')
+        if action == 'request_literature':
+            return self._delegation_outcome(ledger, pid)
         if action != 'request_diagnostic':
             return 'no_result', action or 'no_command', None
         work = ledger.one('work', identity('work', None, 'diagnostic', identity('object', pid)))
@@ -167,6 +169,31 @@ class Orchestration:
             if fact and fact['created_seq'] == seq and first_seen.get(fact['content_ref']) == seq:
                 return 'new_result', 'new_result', None
         return 'no_result', 'repeated_result' if content['facts'] + content['conclusions'] else 'no_facts', None
+
+    def _delegation_outcome(self, ledger, pid):
+        """A delegation is judged like a tool request: by what its research returned.
+
+        New once a returned result summarizes at least one original source
+        fact; unfinished while the child task is still active; otherwise the
+        research ended without delivering a source.
+        """
+        from .literature_reading import ORIGINALS
+        task = ledger.one('registration', identity('literature_task', pid))
+        if task is None:
+            return 'unfinished', None, None
+        last = None
+        for fid in task.get('result_ids', []):
+            last = ledger.one('fact', fid)
+            provenance = last['provenance'] if last and isinstance(last['provenance'], dict) else {}
+            for source_id in provenance.get('summary_of', []):
+                source = ledger.one('fact', source_id)
+                origin = source['provenance'] if source and isinstance(source['provenance'], dict) else {}
+                if origin.get('delivery_kind') in ORIGINALS:
+                    return 'new_result', 'research_result', None
+        if task['status'] == 'active':
+            return 'unfinished', None, None
+        content = ledger.read(last['content_ref']) if last else {}
+        return 'no_result', 'research_unresolved', content.get('stop_reason') if isinstance(content, dict) else None
 
     def _record(self, ledger, effect, outcome, code, reason):
         command = {}
