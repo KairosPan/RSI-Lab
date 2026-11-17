@@ -810,9 +810,10 @@ class UnchangedRunTests(unittest.TestCase):
         rt.feature_report()
         executor = Scripted({'lab': lambda d: ('propose_issue', ISSUE), 'disposition': lambda d: CLOSE})
         rt.run_until_wait(executor, RES, max_steps=12)
-        # The current no-orchestration baseline includes decision dependencies.
+        # The current no-orchestration baseline includes decision dependencies,
+        # and the Lab request carries the literature decision policy.
         self.assertEqual([e['packet_hash'] for e in by_seq(store.list('r', 'effect'))],
-                         ['6a92b964b7d817973c1e34f98c471e06137358fe34d1562957f184760528527f',
+                         ['95d507fe5590341c314e5652feffa1e4c39bc6dac7279d6d961264560587c951',
                           '889273ceb15ca270fe5d7f4ad8abc4deeb3e6515d8a1d2be4fc4f32b8634b365'])
         store.verify_history('r')
 

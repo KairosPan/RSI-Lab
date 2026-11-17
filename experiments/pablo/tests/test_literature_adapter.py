@@ -330,6 +330,18 @@ class LiteratureAdapterTests(unittest.TestCase):
         self.assertEqual(result['status'], 'unknown')
         self.assertEqual(len(self.store.list(self.run, 'fact')), 1)
 
+    def test_method_search_does_not_opt_the_lab_into_the_literature_decision_contract(self):
+        # This search shares the literature.* namespace with the delegated
+        # Literature tools. A run that registers only it keeps the earlier Lab
+        # contract: no decision record is required and the tool stays callable.
+        registered = adapter.make_adapter()
+        self.assertEqual(registered.adapter_id, 'literature.search')
+        self.assertNotIn('literature_decision_policy', registered.descriptor()['manifest'])
+        _, mode, task, _ = self.runtime._context(self.runtime.enqueue_lab('method-search-only'))
+        self.assertEqual(mode, 'lab')
+        self.assertIn('literature.search', task['capability_catalog'])
+        self.assertNotIn('literature_context', task)
+
 
 if __name__ == '__main__':
     unittest.main()

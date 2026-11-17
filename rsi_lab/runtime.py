@@ -10,7 +10,7 @@ from datetime import datetime
 import json
 import time
 
-from .controller import Controller, identity
+from .controller import Controller, identity, effect_holds_execution, effect_is_quarantined
 from .store import digest, encode
 from .packets import PacketBuilder, make_evidence, present_delivery
 from .roles import MetaAgent, discovery_trigger, initial_review_receipt, validate_command
@@ -20,6 +20,7 @@ from .agent_state import AgentState
 from .session_context import read_native_snapshot, build_effective_context
 from .transport import _json as transport_json
 from .call_recovery import recover_codex_receipt, RecoveryBlocked
+from . import images
 from .improvements import ImprovementLoop, enabled
 from .research_policy import normalize_research_policy
 from .driver_report import build_report
@@ -145,7 +146,13 @@ class Runtime:
             publication = json.loads(read(registration['publication_ref']))
             for source in publication['facts'] + publication['conclusions']:
                 fact = row('fact', source['id'])
-                if (digest(read(fact['content_ref'])) != digest(source['content'])
+                content = source['content']
+                if isinstance(content, dict) and content.get('format') == 'rsi_image_evidence_v1':
+                    # Image evidence is published as an immutable reference; its
+                    # pixels are a separate content-addressed blob, verified here.
+                    content = images.image_reference(content)
+                    read(content['blob_ref'])
+                if (digest(read(fact['content_ref'])) != digest(content)
                         or fact['kind'] != source['kind'] or fact['provenance'] != source['provenance']):
                     raise ValueError('Completed publication differs from immutable source evidence')
         else:
@@ -305,18 +312,25 @@ class Runtime:
     def _context(self, work, orchestration=None, *, read_only=False):
         """Build the visible context and its dependency manifest in one snapshot."""
         if not read_only:
-            role = 'lab' if work['kind'] == 'lab' else 'meta'
+            role = work['kind'] if work['kind'] in {'lab', 'literature'} else 'meta'
+            if role == 'literature':
+                # Refuse a stale or foreign delegation before any child session exists.
+                self._literature_task(work)
             self.agents.ensure_session(role,
                 agent_instance_id=work['inputs'].get('agent_instance_id'),
                 branch_id=work['inputs'].get('branch_id', self.config.get('branch_id', 'main')),
                 runtime_binding={'model': self.config.get('model', 'gpt-6-astra'),
                     'effort': self.config.get('effort', 'medium'), 'transport': 'codex_exec_text_v1'})
-            if self.scientific_memory:
+            if self.scientific_memory and role != 'literature':
                 self.scientific_memory.ensure_question()
         with self.store.read_snapshot():
             if orchestration is not None and digest(orchestration) != digest(self.orchestration.snapshot()):
                 raise decision_dependencies.StaleDecision('Orchestration changed while building the decision context')
             agent, mode, task, options = self._build_context(work, orchestration, read_only=True)
+            if mode == 'literature':
+                # The delegated child is bound to its task revision. Research-state
+                # decision dependencies belong to its Lab and Meta owners.
+                return agent, mode, task, options
             selectors = list(work['inputs'].get('decision_dependency_selectors', []))
             selectors.extend(self.batch_interpretations.dependencies(work))
             for adapter in self.adapters.by_id.values():
@@ -335,7 +349,7 @@ class Runtime:
         """
         issue_id = work['issue_id']
         issue = self.store.get(self.run_id, 'issue', issue_id) if issue_id else None
-        mode = 'lab' if work['kind'] == 'lab' else 'discovery' if work['kind'] == 'meta_discovery' else 'disposition'
+        mode = work['kind'] if work['kind'] in {'lab', 'literature'} else 'discovery' if work['kind'] == 'meta_discovery' else 'disposition'
         evidence_ids = work['inputs'].get('evidence_ids', issue['evidence_ids'] if issue else [])
         if self.orchestration and orchestration is None:
             orchestration = self.orchestration.snapshot()
@@ -346,10 +360,23 @@ class Runtime:
         catalog = {}
         for fact in self.store.list(self.run_id, 'fact'):
             provenance = fact['provenance'] if isinstance(fact['provenance'], dict) else {}
-            catalog[fact['id']] = make_evidence(fact['id'], self.store.read_blob(fact['content_ref']).decode(),
+            content = self.store.read_blob(fact['content_ref']).decode()
+            image = None
+            try:
+                parsed = json.loads(content)
+            except (ValueError, UnicodeError):
+                parsed = None
+            if isinstance(parsed, dict) and parsed.get('format') == 'rsi_image_evidence_ref_v1':
+                image = images.validate_image_reference(parsed)
+                # A reference in a catalog is not visual delivery. Only the
+                # admitted immutable blob may later become a CLI attachment.
+                self.store.read_blob(image['blob_ref'])
+                # Preserve the exact immutable source-reference text/hash for
+                # scientific-memory provenance; pixels are delivered separately.
+            catalog[fact['id']] = make_evidence(fact['id'], content,
                 kind='summary' if provenance.get('delivery_kind') == 'summary' else fact['kind'],
                 source=encode(fact['provenance']).decode(), version=fact['version'],
-                summary_of=provenance.get('summary_of', []))
+                summary_of=provenance.get('summary_of', []), image=image)
         task = {'goal': self.config.get('goal', 'Investigate task prerequisites and continue the frozen task plan'),
             'issue_id': issue_id, 'expected_versions': self.versions(issue_id),
             'run_id': self.run_id, 'capability_catalog': self.capability_catalog(),
@@ -360,51 +387,71 @@ class Runtime:
                 'authorized_source_contracts': self.config.get('authorized_source_contracts', {}),
                 'waiting': self.store.list(self.run_id, 'wait', issue_id=issue_id) if issue_id else []}}
         required = list(work['inputs'].get('required_evidence_ids', []))
-        adapter_context = {}
-        for aid, adapter in sorted(self.adapters.by_id.items()):
-            if adapter.context is not None:
-                value = adapter.context(self.store, self.run_id)
-                if not isinstance(value, dict):
-                    raise ValueError('Adapter context must be a JSON object')
-                adapter_context[aid] = value
-        if adapter_context:
-            raw_context = encode(adapter_context)
-            if len(raw_context) > 65536:
-                raise ValueError('Adapter context exceeds its 64 KiB bound')
-            task['constraints']['adapter_context'] = json.loads(raw_context)
-        if self.orchestration and mode == 'lab':
-            task['capability_catalog'] = self.orchestration.lab_catalog(task['capability_catalog'],
-                                                                        orchestration['settings'])
-            task['constraints']['orchestration'] = self.orchestration.lab_constraints(orchestration)
-        elif self.orchestration:
-            # Where the request carries the current signal it is never paged
-            # or omitted; elsewhere Meta is not shown an identity it cannot cite.
-            citable = orchestration['signal_id'] in evidence_ids
-            task['constraints']['orchestration'] = self.orchestration.meta_constraints(orchestration, citable)
-            if citable:
-                required.append(orchestration['signal_id'])
-        if self.config.get('research_features'):
-            task['constraints']['research_features'] = self.config['research_features']
-        if self.research_policy:
-            task['constraints']['research_policy'] = self.research_policy
-        if self.improvements:
-            loop_context, loop_required = self.improvements.context(work,mode)
-            task['constraints']['research_loop'] = loop_context
-            required.extend(loop_required)
-        batch_context = self.batch_interpretations.context(work)
-        if batch_context:
-            task['constraints']['batch_interpretation'] = batch_context
-            required.extend(batch_context['required_evidence_ids'])
-            if batch_context['phase'] == 'interpretation':
-                task['constraints']['interpretation_only'] = True
+        batch_context = None
+        if mode == 'literature':
+            delegated = self._literature_task(work)
+            # Acquired history is a cache, not an ever-growing model request.
+            # Exact requested originals remain mandatory; capacity recovery
+            # explicitly records any batch split before admitting a model.
+            evidence_ids = list(required)
+            task['literature_task'] = {**delegated, 'evidence_ids': list(required),
+                'cached_evidence_count': len(delegated['evidence_ids']),
+                'remaining': self._literature_remaining(delegated)}
+            from .literature_reading import reading_state
+            task['reading_state'] = reading_state(self.store, self.run_id, delegated, required)
+            task['reading_state']['deferred_from_this_work_count'] = len(
+                work['inputs'].get('deferred_evidence_ids', []))
+            task['goal'] = delegated['question']
+            task['capability_catalog'] = self._literature_capability_catalog(delegated)
+        else:
+            # Scientific interpretation and Meta/Lab recommendation governance
+            # remain with their authorized top-level roles. The child receives
+            # only its delegated scope, source evidence and private memory.
+            adapter_context = {}
+            for aid, adapter in sorted(self.adapters.by_id.items()):
+                if adapter.context is not None:
+                    value = adapter.context(self.store, self.run_id)
+                    if not isinstance(value, dict):
+                        raise ValueError('Adapter context must be a JSON object')
+                    adapter_context[aid] = value
+            if adapter_context:
+                raw_context = encode(adapter_context)
+                if len(raw_context) > 65536:
+                    raise ValueError('Adapter context exceeds its 64 KiB bound')
+                task['constraints']['adapter_context'] = json.loads(raw_context)
+            if self.orchestration and mode == 'lab':
+                task['capability_catalog'] = self.orchestration.lab_catalog(task['capability_catalog'],
+                                                                            orchestration['settings'])
+                task['constraints']['orchestration'] = self.orchestration.lab_constraints(orchestration)
+            elif self.orchestration:
+                # Where the request carries the current signal it is never paged
+                # or omitted; elsewhere Meta is not shown an identity it cannot cite.
+                citable = orchestration['signal_id'] in evidence_ids
+                task['constraints']['orchestration'] = self.orchestration.meta_constraints(orchestration, citable)
+                if citable:
+                    required.append(orchestration['signal_id'])
+            if self.config.get('research_features'):
+                task['constraints']['research_features'] = self.config['research_features']
+            if self.research_policy:
+                task['constraints']['research_policy'] = self.research_policy
+            if self.improvements:
+                loop_context, loop_required = self.improvements.context(work,mode)
+                task['constraints']['research_loop'] = loop_context
+                required.extend(loop_required)
+            batch_context = self.batch_interpretations.context(work)
+            if batch_context:
+                task['constraints']['batch_interpretation'] = batch_context
+                required.extend(batch_context['required_evidence_ids'])
+                if batch_context['phase'] == 'interpretation':
+                    task['constraints']['interpretation_only'] = True
+                    task['capability_catalog'] = {}
+                    # An interpretation turn must not consume pending advice by
+                    # declining/defering it merely because execution is disabled.
+                    if self.improvements:
+                        task['constraints']['research_loop']['recommendations'] = []
+            if work['inputs'].get('final_review_only'):
+                task['constraints']['final_review_only'] = True
                 task['capability_catalog'] = {}
-                # An interpretation turn must not consume pending advice by
-                # declining/defering it merely because execution is disabled.
-                if self.improvements:
-                    task['constraints']['research_loop']['recommendations'] = []
-        if work['inputs'].get('final_review_only'):
-            task['constraints']['final_review_only'] = True
-            task['capability_catalog'] = {}
         if self.config.get('task_plan_id'):
             from .plans import load_task_plan
             try:
@@ -417,7 +464,7 @@ class Runtime:
             task['dependencies'] = self.store.list(self.run_id, 'dependency')
         else:
             task['trigger'] = work['inputs'].get('trigger', {})
-        role = 'lab' if mode == 'lab' else 'meta'
+        role = mode if mode in {'lab', 'literature'} else 'meta'
         owner = dict(agent_instance_id=work['inputs'].get('agent_instance_id'),
             branch_id=work['inputs'].get('branch_id', self.config.get('branch_id', 'main')),
             runtime_binding={'model': self.config.get('model', 'gpt-6-astra'),
@@ -427,7 +474,7 @@ class Runtime:
         else:
             session = self.agents.ensure_session(role, **owner)
             memory = self.agents.read_working_memory(session['id'], actor_session_id=session['id'])
-        if self.scientific_memory:
+        if self.scientific_memory and role in {'lab', 'meta'}:
             # Only trusted host Work can specify a query. This owner's private
             # plan provides retrieval hints, never shared facts or authority.
             # Do not inspect the other role's memory or put hint text in the
@@ -464,6 +511,17 @@ class Runtime:
             'role': role, 'memory_revision': memory['revision'], 'working_memory': memory['content'],
             'memory_authority': 'private_unverified_working_state',
             'committed_turn': session['committed_turn']}
+        if mode == 'lab':
+            from .literature_context import build_literature_context
+            literature_context = build_literature_context(self.store, self.run_id, session,
+                                                          task['capability_catalog'])
+            if literature_context is not None:
+                task['literature_context'] = literature_context
+                # Lab commissions research; the child receives operation and
+                # provider schemas and chooses how to do that research.
+                if literature_context.get('delegation_version'):
+                    task['capability_catalog'] = {cid: row for cid, row in task['capability_catalog'].items()
+                                                  if not cid.startswith('literature.')}
         if work['inputs'].get('handoff_id'):
             if read_only and not self.store.list(self.run_id, 'agent_session', id=session['id']):
                 # The real call creates this session first. A session that new
@@ -472,7 +530,9 @@ class Runtime:
                 raise ValueError('Only the current recipient can read an accepted handoff')
             task['agent_state']['handoff'] = self.agents.handoff_payload(
                 work['inputs']['handoff_id'], actor_session_id=session['id'])
-        agent = self.meta_agent_factory(self.packet_builder_factory(catalog, max_input_bytes=self.config.get('max_input_bytes', 131072)),
+        agent = self.meta_agent_factory(self.packet_builder_factory(catalog, max_input_bytes=self.config.get('max_input_bytes', 131072),
+            max_image_bytes=self.config.get('max_image_bytes', images.MAX_TOTAL_IMAGE_BYTES),
+            max_images=self.config.get('max_images', images.MAX_IMAGES)),
                           model=self.config.get('model', 'gpt-6-astra'), effort=self.config.get('effort', 'medium'))
         options = {'evidence_ids': evidence_ids,
                    'required_evidence_ids': list(dict.fromkeys(required))}
@@ -484,7 +544,7 @@ class Runtime:
                     or reservations['tokens'] <= 0 or reservations['wall_seconds'] <= 0):
                 raise ValueError('Real Meta invocation needs one hard call reservation and explicit soft token/time estimates')
         work = self.store.get(self.run_id, 'work', work_id)
-        if work['kind'] not in {'lab', 'meta_discovery', 'meta_disposition', 'disposition'} or work['status'] != 'ready':
+        if work['kind'] not in {'lab', 'literature', 'meta_discovery', 'meta_disposition', 'disposition'} or work['status'] != 'ready':
             raise ValueError('An eligible Lab or Meta Work is required')
         if self.controller.lab_blockers(self.run_id, work):
             raise ValueError('Lab awaits its queued tool execution and publication')
@@ -497,6 +557,8 @@ class Runtime:
                 {'work_id':work_id,'scientific_memory':task['scientific_memory']})
         planned = agent.prepare(mode, task, **options)
         if planned['status'] != 'ready':
+            if mode == 'literature':
+                return self._recover_literature_capacity(work, planned, reservations)
             return self._mutate('context-block:' + work_id, 'packet_unrepresentable',
                 lambda tx: tx.update('work', work_id, {'status': 'blocked', 'outcome_ref': tx.blob(planned)}),
                 {'work_id': work_id, 'plan': planned})
@@ -528,42 +590,76 @@ class Runtime:
         context = build_effective_context(packet['envelope_bytes'], session_id=session['id'],
             owner=session['owner'], snapshot=snapshot,
             working_memory_revision=task['agent_state']['memory_revision'],
-            max_input_bytes=self.config.get('max_effective_context_bytes', self.config.get('max_input_bytes', 131072)))
+            max_input_bytes=self.config.get('max_effective_context_bytes', self.config.get('max_input_bytes', 131072)),
+            max_image_bytes=self.config.get('max_effective_image_bytes', images.MAX_HISTORY_IMAGE_BYTES))
         if context['status'] != 'ready':
+            if mode == 'literature':
+                if snapshot is not None and not session.get('active_turn_id'):
+                    self.agents.rebuild_session(session['id'],
+                        'Literature observable history reached its configured capacity; originals remain in the owned cache.',
+                        'literature-context-rebuild:' + work_id + ':' + session['id'])
+                    return self.prepare_meta(work_id, reservations)
+                return self._recover_literature_capacity(work, context, reservations)
             return self._mutate('session-context-block:' + work_id, 'packet_unrepresentable',
                 lambda tx: tx.update('work', work_id, {'status': 'blocked', 'outcome_ref': tx.blob(context)}),
                 {'work_id': work_id, 'context': context})
+        delegation_metadata = {}
+        if mode == 'lab' and task.get('literature_context', {}).get('delegation_version'):
+            from .literature_context import LITERATURE_DELEGATION_VERSION, literature_tool_catalog
+            delegation_context = task['literature_context']
+            lab_catalog = self.capability_catalog()
+            if orchestration:
+                # The delegation is pinned to the catalog this Lab request was
+                # built from: a tool Meta disabled for the Lab is not handed to
+                # the Lab's child either.
+                lab_catalog = self.orchestration.lab_catalog(lab_catalog, orchestration['settings'])
+            snapshot = literature_tool_catalog(lab_catalog)
+            if (delegation_context['delegation_version'] != LITERATURE_DELEGATION_VERSION
+                    or digest(snapshot) != delegation_context['tool_catalog_sha256']):
+                raise ValueError('Literature tool catalog changed during Lab request preparation')
+            delegation_metadata = {'literature_delegation_version': LITERATURE_DELEGATION_VERSION,
+                'literature_tool_catalog_sha256': digest(snapshot),
+                'literature_tool_catalog_ref': self.store.put_blob(snapshot)}
         plan_ref = self.store.put_blob({key: value for key, value in packet.items() if key != 'envelope_bytes'})
-        kind = 'lab' if mode == 'lab' else 'meta'
+        kind = mode if mode in {'lab', 'literature'} else 'meta'
         return self.controller.prepare_effect(self.run_id, work_id, kind, packet['envelope_bytes'], reservations,
             'prepare-agent:' + work_id, metadata={'mode': mode, 'plan_ref': plan_ref, 'issue_id': work['issue_id'],
+                **delegation_metadata,
+                **({'literature_task_id': work['inputs']['literature_task_id'],
+                    'task_revision': work['inputs']['task_revision']} if mode == 'literature' else {}),
                 'expected_work_version': work['version'],
-                'decision_dependencies': task['decision_dependencies'],
+                # Only Lab and Meta decisions are bound to research-state dependencies.
+                **({'decision_dependencies': task['decision_dependencies']}
+                   if 'decision_dependencies' in task else {}),
                 'agent_session_id': session['id'], 'agent_session': session,
                 'expected_session_head': session['committed_turn'],
                 'expected_memory_revision': task['agent_state']['memory_revision'],
-                **({'research_features': self.config['research_features']} if self.config.get('research_features') else {}),
-                **({'research_policy': self.research_policy} if self.research_policy else {}),
+                **({'research_features': task['constraints']['research_features']}
+                   if task['constraints'].get('research_features') else {}),
+                **({'research_policy': task['constraints']['research_policy']}
+                   if task['constraints'].get('research_policy') else {}),
                 **({'recommendation_admission': task['constraints']['research_loop']['recommendation_admission']}
                    if 'recommendation_admission' in task['constraints'].get('research_loop', {}) else {}),
                 **({'final_review_only':True} if task['constraints'].get('final_review_only') else {}),
                 **({'interpretation_only': True} if task['constraints'].get('interpretation_only') else {}),
                 # The executor recomputes the response schema from this record.
-                **({'orchestration': self.orchestration.metadata(mode, orchestration)} if orchestration else {}),
+                **({'orchestration': self.orchestration.metadata(mode, orchestration)}
+                   if orchestration and mode != 'literature' else {}),
                 'context_ref': self.store.put_blob(context), 'effective_context_hash': context['effective_context_hash'],
-                'max_effective_context_bytes': context['max_input_bytes']})
+                'max_effective_context_bytes': context['max_input_bytes'],
+                'max_effective_image_bytes': context['max_image_bytes']})
 
     def run_meta(self, work_id, executor, reservations):
         work = self.store.get(self.run_id, 'work', work_id)
         if work['status'] == 'leased' and work.get('effect_id'):
             effect = self.store.get(self.run_id, 'effect', work['effect_id'])
-            if effect['kind'] not in {'meta', 'lab'} or effect['status'] != 'prepared':
+            if effect['kind'] not in {'meta', 'lab', 'literature'} or effect['status'] != 'prepared':
                 raise ValueError('An already dispatched or unknown invocation must be reconciled, never resent')
             if effect['reservations'] != reservations:
                 raise ValueError('Prepared invocation must retain its original resource reservation')
         else:
             effect = self.prepare_meta(work_id, reservations)
-        if effect.get('status') == 'blocked':
+        if effect.get('status') in {'blocked', 'cancelled'}:
             return {'work': effect, 'proposal': None}
         try:
             effect = self.controller.dispatch_effect(self.run_id, effect['id'], executor)
@@ -655,6 +751,288 @@ class Runtime:
             raise ValueError('Lab executor requires Lab-owned Work')
         return self.run_meta(work_id, executor, reservations)
 
+    def run_literature(self, work_id, executor, reservations):
+        if self.store.get(self.run_id, 'work', work_id)['kind'] != 'literature':
+            raise ValueError('Literature executor requires Lab-delegated Literature Work')
+        return self.run_meta(work_id, executor, reservations)
+
+    def _literature_task(self, work):
+        task = self.store.get(self.run_id, 'registration', work['inputs']['literature_task_id'])
+        if (task.get('kind') != 'literature_task' or task['status'] != 'active'
+                or task['task_revision'] != work['inputs']['task_revision']
+                or work['inputs'].get('agent_instance_id') != task['agent_instance_id']
+                or work['inputs'].get('branch_id') != task['branch_id'] or work['issue_id'] is not None):
+            raise ValueError('Work is outside its active delegated Literature task')
+        parent = self.store.get(self.run_id, 'agent_owner', task['parent_owner_id'])
+        if parent['scope']['role'] != 'lab' or parent['scope']['branch_id'] != task['branch_id']:
+            raise ValueError('Literature task lacks its authentic Lab owner')
+        return task
+
+    def _literature_remaining(self, task):
+        effects = [e for e in self.store.list(self.run_id, 'effect')
+                   if e['metadata'].get('literature_task_id') == task['id']]
+        remaining = {'steps': task['max_steps'] - len(effects)}
+        for resource in ('model_calls', 'tool_calls'):
+            remaining[resource] = task['max_' + resource] - sum(
+                e.get('actual_costs', {}).get(resource, 0) + e.get('held_reservations', {}).get(resource, 0)
+                for e in effects)
+        return remaining
+
+    def _literature_capability_catalog(self, task):
+        """Expose only the child's immutable admission, never a later expansion."""
+        catalog = self.capability_catalog()
+        selected = {cid: row for cid, row in catalog.items()
+                    if task['capability_versions'].get(cid) == row['version']}
+        version = task.get('delegation_version')
+        if version is None:
+            return selected
+        from .literature_context import LITERATURE_DELEGATION_VERSION
+        if version != LITERATURE_DELEGATION_VERSION:
+            raise ValueError('Unsupported Literature task delegation version')
+        snapshot = json.loads(self.store.read_blob(task['capability_catalog_ref']))
+        if (digest(snapshot) != task['capability_catalog_sha256']
+                or {cid: row['version'] for cid, row in snapshot.items()} != task['capability_versions']):
+            raise ValueError('Literature task tool catalog does not match its pinned admission')
+        return {cid: row for cid, row in selected.items() if snapshot.get(cid) == row}
+
+    def _literature_work(self, tx, task, trigger, required_evidence_ids=None):
+        selected = task['evidence_ids'] if required_evidence_ids is None else required_evidence_ids
+        return self.controller._work(tx, None, 'literature', trigger,
+            inputs={'literature_task_id': task['id'], 'task_revision': task['task_revision'],
+                'agent_instance_id': task['agent_instance_id'], 'branch_id': task['branch_id'],
+                'evidence_ids': list(selected), 'required_evidence_ids': list(selected)})
+
+    def _recover_literature_capacity(self, work, failed_plan, reservations):
+        """Split a source batch before execution, or return an explicit limit.
+
+        All cached facts and receipts survive. Deferred originals remain unread
+        until an authenticated future request delivers them; no model/tool call
+        or resource charge is fabricated by this local replan.
+        """
+        task = self._literature_task(work)
+        required = list(work['inputs'].get('required_evidence_ids', []))
+        attempts = []
+        count = len(required) // 2
+        while count:
+            selected = required[:count]
+            deferred = list(dict.fromkeys(required[count:] + work['inputs'].get('deferred_evidence_ids', [])))
+            inputs = {**work['inputs'], 'evidence_ids': selected,
+                      'required_evidence_ids': selected, 'deferred_evidence_ids': deferred}
+            candidate = {**work, 'inputs': inputs}
+            agent, mode, preview_task, options = self._context(candidate)
+            proposed = agent.prepare(mode, preview_task, **options)
+            effective_limit = self.config.get('max_effective_context_bytes', self.config.get('max_input_bytes', 131072))
+            fits = proposed['status'] == 'ready' and proposed['input_bytes'] <= effective_limit
+            attempts.append({'required_count': count, 'status': proposed['status'],
+                             'input_bytes': proposed.get('input_bytes'), 'fits_empty_native_context': fits})
+            if fits:
+                key = 'literature-capacity-replan:' + work['id'] + ':' + str(work['version'])
+                def replan(tx):
+                    current = tx.get('work', work['id'])
+                    if current != work or current.get('effect_id') or current['status'] != 'ready':
+                        raise ValueError('Literature work changed during local capacity planning')
+                    reg = {'kind': 'literature_capacity_replan', 'task_id': task['id'],
+                        'work_id': work['id'], 'original_work_ref': tx.blob(work),
+                        'failed_plan_ref': tx.blob(failed_plan), 'selected_evidence_ids': selected,
+                        'deferred_evidence_ids': deferred, 'attempts': attempts,
+                        'planned_packet_sha256': proposed['packet_sha256'],
+                        'models_executed': 0, 'tools_executed': 0}
+                    tx.insert('registration', identity('literature_capacity_replan', key), reg)
+                    return tx.update('work', work['id'], {'inputs': inputs})
+                self._mutate(key, 'literature_capacity_replanned', replan,
+                    {'work_id': work['id'], 'selected_evidence_ids': selected,
+                     'deferred_evidence_ids': deferred, 'failed_plan_sha256': digest(failed_plan)})
+                return self.prepare_meta(work['id'], reservations)
+            count //= 2
+        reason = 'The smallest complete requested source or task cannot fit the configured Literature context.'
+        key = 'literature-capacity-stop:' + work['id'] + ':' + str(work['version'])
+        def stop(tx):
+            current = tx.get('work', work['id'])
+            if current != work or current.get('effect_id') or current['status'] != 'ready':
+                raise ValueError('Literature work changed before its capacity disposition')
+            result = {'answer': 'Research could not complete within the source-reading capacity.',
+                'coverage_status': 'unresolved', 'stop_reason': 'source_context_capacity',
+                'limitations': [reason, 'Cached originals remain available; no omitted source was marked as read.'],
+                'claims': []}
+            returned = self._publish_research(tx, task, result, [], key, complete=True)
+            tx.insert('registration', identity('literature_capacity_stop', key), {
+                'kind': 'literature_capacity_stop', 'task_id': task['id'], 'work_id': work['id'],
+                'original_work_ref': tx.blob(work), 'failed_plan_ref': tx.blob(failed_plan),
+                'attempts': attempts, 'lab_work_id': returned['lab_work_id'],
+                'models_executed': 0, 'tools_executed': 0})
+            return tx.update('work', work['id'], {'status': 'cancelled',
+                'outcome_ref': tx.blob({'reason': reason, 'resolution': 'unresolved_returned_to_lab', **returned})})
+        return self._mutate(key, 'literature_capacity_returned_to_lab', stop,
+                            {'work_id': work['id'], 'failed_plan_sha256': digest(failed_plan)})
+
+    def recover_literature_work(self, work_id):
+        """Reopen only a certified pre-dispatch capacity block for local planning."""
+        self.store.verify_history(self.run_id)
+        work = self.store.get(self.run_id, 'work', work_id)
+        if work['kind'] != 'literature' or work['status'] != 'blocked' or work.get('effect_id'):
+            raise ValueError('Only undispatched capacity-blocked Literature work may be reopened')
+        outcome = json.loads(self.store.read_blob(work['outcome_ref']))
+        if (outcome.get('status') not in {'packet_unrepresentable', 'blocked_capacity'}
+                or not outcome.get('max_input_bytes')):
+            raise ValueError('Literature recovery cannot reinterpret an execution or integrity failure as capacity')
+        task = self._literature_task(work)
+        related = [e for e in self.store.list(self.run_id, 'effect')
+                   if e.get('metadata', {}).get('literature_task_id') == task['id']]
+        if any(e['status'] in {'prepared', 'dispatching', 'unknown'} or e.get('accounting_unknown') for e in related):
+            raise ValueError('Literature execution must be reconciled before capacity recovery')
+        for session in self.store.list(self.run_id, 'agent_session'):
+            if (session['agent_instance_id'] == task['agent_instance_id']
+                    and session['branch_id'] == task['branch_id']
+                    and (session.get('active_turn_id') or session['status'] == 'recovery_required')):
+                raise ValueError('Literature owner must be quiescent before capacity recovery')
+        key = 'literature-capacity-reopen:' + work_id + ':' + str(work['version'])
+        def reopen(tx):
+            if tx.get('work', work_id) != work:
+                raise ValueError('Literature blocked work changed before recovery')
+            tx.insert('registration', identity('literature_capacity_reopen', key), {
+                'kind': 'literature_capacity_reopen', 'task_id': task['id'], 'work_id': work_id,
+                'original_work_ref': tx.blob(work), 'original_outcome_ref': work['outcome_ref'],
+                'models_executed': 0, 'tools_executed': 0,
+                'resolution': 'Replan the same cached originals under existing context and resource limits'})
+            return tx.update('work', work_id, {'status': 'ready'})
+        return self._mutate(key, 'literature_capacity_reopened', reopen,
+                            {'work_id': work_id, 'original_outcome_ref': work['outcome_ref']})
+
+    def _record_literature_read(self, effect):
+        if effect['kind'] != 'literature':
+            return
+        task = self.store.get(self.run_id, 'registration', effect['metadata']['literature_task_id'])
+        from .literature_reading import source_rows, certified_reads
+        _, certificates = certified_reads(self.store, self.run_id, task,
+                                          source_rows(self.store, self.run_id, task))
+        selected = next((value for value in certificates if value['effect_id'] == effect['id']), None)
+        if selected is not None:
+            key = 'literature-read-receipt:' + effect['id']
+            self._mutate(key, 'literature_originals_read', lambda tx: tx.insert('registration',
+                identity('literature_read_receipt', effect['id']), {
+                    'kind': 'literature_read_receipt', 'task_id': task['id'], **selected,
+                    'authority': 'Authenticated original delivery; not current-turn citation authority'}),
+                {'task_id': task['id'], 'effect_id': effect['id'], 'result_ref': effect['result_ref']})
+
+    def _end_literature(self, work, trigger, reason):
+        def finish(tx):
+            task = self._literature_task(work)
+            result = {'answer': 'Research stopped with an unresolved result.', 'coverage_status': 'unresolved',
+                'stop_reason': reason, 'limitations': [reason], 'claims': []}
+            return self._publish_research(tx, task, result, [], trigger, complete=True)
+        return self._mutate('literature-stop:' + trigger, 'literature_stopped', finish,
+            {'work_id': work['id'], 'reason': reason})
+
+    def _publish_research(self, tx, task, result, evidence_ids, trigger, *, complete):
+        if result.get('claims'):
+            cited = {fid for claim in result['claims'] for fid in claim['evidence_ids']}
+            evidence_ids = [fid for fid in evidence_ids if fid in cited]
+        fid = identity('research_result', trigger)
+        tx.insert('fact', fid, {'kind': 'source_statement', 'content_ref': tx.blob(result),
+            'provenance': {'delivery_kind': 'summary' if evidence_ids else 'research_status',
+                **({'summary_of': evidence_ids} if evidence_ids else {}),
+                'literature_task_id': task['id'], 'producer': 'literature',
+                'authority': 'research_interpretation_not_validation', 'trigger': trigger}})
+        parent = tx.get('agent_owner', task['parent_owner_id'])
+        work = self.controller._work(tx, None, 'lab', 'research:' + trigger,
+            inputs={'agent_instance_id': parent['scope']['agent_instance_id'],
+                'branch_id': parent['scope']['branch_id'], 'literature_result_task_id': task['id'],
+                'evidence_ids': [fid] + evidence_ids, 'required_evidence_ids': [fid] + evidence_ids})
+        updated = tx.update('registration', task['id'], {
+            'status': 'completed' if complete else 'active', 'task_revision': task['task_revision'] + 1,
+            'result_ids': task['result_ids'] + [fid], 'last_result_work_id': work['id']})
+        if not complete:
+            self._literature_work(tx, updated, 'research-update:' + trigger, required_evidence_ids=evidence_ids)
+        return {'task_id': task['id'], 'result_id': fid, 'lab_work_id': work['id'], 'complete': complete}
+
+    def _route_literature(self, proposal):
+        command = proposal['command']
+        action, payload = command['action'], command['payload']
+        effect = self.store.get(self.run_id, 'effect', proposal['effect_id'])
+        source_work = self.store.get(self.run_id, 'work', effect['work_id'])
+        key = 'route:' + proposal['id']
+        def route(tx):
+            if action == 'request_literature':
+                parent = tx.get('agent_session', effect['metadata']['agent_session_id'])
+                if command['mode'] != 'lab' or parent['role'] != 'lab' or effect['kind'] != 'lab':
+                    raise ValueError('Only Lab can own and delegate a Literature task')
+                catalog = self.capability_catalog()
+                from .literature_context import LITERATURE_DELEGATION_VERSION
+                metadata = effect['metadata']
+                delegation_version = metadata.get('literature_delegation_version')
+                admission = {}
+                if delegation_version == LITERATURE_DELEGATION_VERSION:
+                    snapshot = json.loads(self.store.read_blob(metadata['literature_tool_catalog_ref']))
+                    planned = json.loads(self.store.read_blob(metadata['plan_ref']))
+                    context = planned['task']['literature_context']
+                    if (not snapshot or 'capability_ids' in payload
+                            or context.get('delegation_version') != delegation_version
+                            or digest(snapshot) != metadata['literature_tool_catalog_sha256']
+                            or digest(snapshot) != context['tool_catalog_sha256']
+                            or any(not cid.startswith('literature.') or catalog.get(cid) != row
+                                   for cid, row in snapshot.items())):
+                        raise ValueError('Literature delegation no longer matches its admitted tool catalog')
+                    versions = {cid: row['version'] for cid, row in snapshot.items()}
+                    admission = {'delegation_version': delegation_version, 'tool_selection_owner': 'literature',
+                        'capability_catalog_ref': metadata['literature_tool_catalog_ref'],
+                        'capability_catalog_sha256': metadata['literature_tool_catalog_sha256']}
+                elif delegation_version is None:
+                    # Historical requests retain their original Lab-selected
+                    # subset. Replaying them must not grant new permissions.
+                    versions = {cid: catalog[cid]['version'] for cid in payload['capability_ids']}
+                else:
+                    raise ValueError('Unsupported Literature delegation version')
+                tid = identity('literature_task', proposal['id'])
+                task = tx.insert('registration', tid, {**payload, 'kind': 'literature_task',
+                    **admission,
+                    'status': 'active', 'task_revision': 1, 'parent_owner_id': parent['owner_id'],
+                    'parent_session_id': parent['id'], 'parent_work_id': effect['work_id'],
+                    'parent_effect_id': effect['id'], 'agent_instance_id': 'literature:' + tid,
+                    'branch_id': parent['branch_id'], 'capability_versions': versions,
+                    'max_steps': payload['max_model_calls'] + payload['max_tool_calls'],
+                    'evidence_ids': command['evidence_ids'], 'result_ids': []})
+                work = self._literature_work(tx, task, 'delegated:' + proposal['id'])
+                return {'task_id': tid, 'work_id': work['id']}
+            task = self._literature_task(source_work)
+            if (effect['kind'] != 'literature' or effect['metadata'].get('literature_task_id') != task['id']
+                    or command['task_id'] != task['id'] or command['task_revision'] != task['task_revision']):
+                raise ValueError('Literature result targets another task or stale revision')
+            remaining = self._literature_remaining(task)
+            if action == 'read_cached_evidence':
+                if remaining['model_calls'] < 1 or remaining['steps'] < 1:
+                    result = {'answer': 'Research ended before another source-reading turn could be admitted.',
+                        'coverage_status': 'unresolved', 'stop_reason': 'task_budget_exhausted',
+                        'limitations': ['Cached sources are available but no model reading allowance remains.'], 'claims': []}
+                    return self._publish_research(tx, task, result, [], proposal['id'], complete=True)
+                from .literature_reading import select_cached
+                selected = select_cached(self.store, self.run_id, task, payload)
+                updated = tx.update('registration', task['id'], {'task_revision': task['task_revision'] + 1})
+                next_work = self._literature_work(tx, updated, 'cached-sources:' + proposal['id'],
+                                                required_evidence_ids=selected)
+                tx.insert('registration', identity('literature_cached_read', proposal['id']), {
+                    'kind': 'literature_cached_read', 'task_id': task['id'], 'proposal_id': proposal['id'],
+                    'selection': payload, 'selected_evidence_ids': selected, 'work_id': next_work['id'],
+                    'external_calls': 0, 'authority': 'Scheduled originals; not proof of model delivery'})
+                return {'task_id': task['id'], 'work_id': next_work['id'], 'selected_evidence_ids': selected}
+            if action == 'request_diagnostic':
+                if remaining['model_calls'] < 1 or remaining['steps'] < 2:
+                    result = {'answer': 'Research ended before another tool and reading turn could be admitted.',
+                        'coverage_status': 'unresolved', 'stop_reason': 'task_budget_exhausted',
+                        'limitations': ['No further model turn remains to inspect new tool evidence.'], 'claims': []}
+                    return self._publish_research(tx, task, result, [], proposal['id'], complete=True)
+                if (not payload['capability_id'].startswith('literature.') or
+                        task['capability_versions'].get(payload['capability_id']) != payload['capability_version']
+                        or payload['capability_id'] not in self._literature_capability_catalog(task)):
+                    raise ValueError('Tool is outside the delegated Literature capabilities')
+                updated = tx.update('registration', task['id'], {'task_revision': task['task_revision'] + 1})
+                return self.controller._work(tx, None, 'diagnostic', 'literature-tool:' + proposal['id'],
+                    inputs={**payload, 'literature_task_id': task['id'], 'task_revision': updated['task_revision'],
+                        'agent_instance_id': task['agent_instance_id'], 'branch_id': task['branch_id'],
+                        'source_proposal_id': proposal['id']})
+            return self._publish_research(tx, task, payload, command['evidence_ids'], proposal['id'],
+                complete=action == 'complete_research' or remaining['model_calls'] < 1 or remaining['steps'] < 1)
+        return self._mutate(key, 'literature_action_routed', route, {'proposal_id': proposal['id']})
+
     def _commit_agent_turn(self, effect, receipt):
         turn_id = effect.get('metadata', {}).get('agent_turn_id')
         if not turn_id:
@@ -668,6 +1046,7 @@ class Runtime:
         if (receipt.get('sent_packet_sha256') != effect['packet_hash']
                 or receipt.get('sent_prompt_sha256') != digest(json.loads(self.store.read_blob(effect['packet_ref']))['prompt'].encode('utf-8'))):
             raise ValueError('Turn receipt does not certify its admitted input')
+        self._verify_image_receipt(effect, receipt)
         if receipt.get('protocol_valid') is False:
             raise ValueError('Runtime protocol violation requires session reconciliation')
         if receipt.get('synthetic') and self.config.get('execution_mode') == 'live':
@@ -705,6 +1084,13 @@ class Runtime:
         return self._mutate('commit-agent-turn:' + turn_id, 'agent_turn_committed', commit,
             {'turn_id': turn_id, 'terminal_ref': effect['result_ref']})
 
+    def _verify_image_receipt(self, effect, receipt):
+        request = json.loads(self.store.read_blob(effect['packet_ref']))
+        expected = request.get('image_attachments', [])
+        if expected and receipt.get('image_delivery_verified') is not True:
+            raise ValueError('Image evidence requires a verified attachment delivery')
+        return images.verify_image_transport(self.store.root / 'calls' / effect['id'], expected, receipt)
+
     def _block_agent_turn(self, effect, reason):
         turn_id = effect.get('metadata', {}).get('agent_turn_id')
         if not turn_id:
@@ -724,20 +1110,32 @@ class Runtime:
         self.store.verify_history(self.run_id)
         pid = identity('proposal', effect_id)
         existing = self.store.list(self.run_id, 'proposal', id=pid)
-        if existing and existing[0]['status'] in TERMINAL_PROPOSALS:
-            self._record_completion(self.store.get(self.run_id, 'effect', effect_id), 'model')
-            return existing[0]
         effect = self.store.get(self.run_id, 'effect', effect_id)
-        if effect['kind'] not in {'lab', 'meta'} or effect['status'] != 'succeeded' or effect.get('accounting_unknown'):
+        if effect_is_quarantined(effect):
+            raise ValueError('An isolated interrupted model response can never publish a proposal')
+        if existing and existing[0]['status'] in TERMINAL_PROPOSALS:
+            if existing[0]['status'] == 'rejected' and effect['kind'] == 'literature':
+                self._end_literature(self.store.get(self.run_id, 'work', effect['work_id']),
+                    pid, existing[0]['error'])
+            # The completion record follows every phase-specific postprocessing step.
+            self._record_completion(effect, 'model')
+            return existing[0]
+        if effect['kind'] not in {'lab', 'meta', 'literature'} or effect['status'] != 'succeeded' or effect.get('accounting_unknown'):
             raise ValueError('Only certified, cost-reconciled Meta responses can act')
         turn_id = effect.get('metadata', {}).get('agent_turn_id')
         if turn_id and self.store.get(self.run_id, 'agent_turn', turn_id)['status'] == 'rejected':
-            return self._mutate('discard-proposal:' + pid, 'agent_proposal_discarded',
+            discarded = self._mutate('discard-proposal:' + pid, 'agent_proposal_discarded',
                 lambda tx: tx.update('proposal', pid, {'status': 'rejected', 'error': 'Agent turn explicitly discarded'})
                 if tx.find('proposal', id=pid) else tx.insert('proposal', pid, {
                     'effect_id': effect_id, 'issue_id': effect['issue_id'], 'status': 'rejected',
                     'command': None, 'error': 'Agent turn explicitly discarded', 'delivery_ref': None,
                     'result_ref': None, 'initial_review_ref': None}), {'effect_id': effect_id})
+            if effect['kind'] == 'literature':
+                # The caller records this Effect complete next, and a completed
+                # Effect is not replayed: return the child's task to its Lab now.
+                self._end_literature(self.store.get(self.run_id, 'work', effect['work_id']),
+                    pid, discarded['error'])
+            return discarded
         packet = json.loads(self.store.read_blob(effect['metadata']['plan_ref']))
         packet['envelope_bytes'] = self.store.read_blob(effect['packet_ref'])
         if digest(packet['envelope_bytes']) != packet['packet_sha256']:
@@ -745,20 +1143,27 @@ class Runtime:
         receipt = json.loads(self.store.read_blob(effect['result_ref']))
         if receipt.get('protocol_valid') is False:
             raise ValueError('Completed invocation violated its runtime/session protocol; reconcile before use')
+        self._verify_image_receipt(effect, receipt)
         pages = present_delivery(packet, effect_id=effect_id,
             sent_packet_sha256=receipt.get('sent_packet_sha256'), sent_prompt_sha256=receipt.get('sent_prompt_sha256'),
-            receipt_ref=effect['receipt_ref'])
+            receipt_ref=effect['receipt_ref'], sent_image_manifest=receipt.get('sent_image_manifest'),
+            sent_image_manifest_sha256=receipt.get('sent_image_manifest_sha256'),
+            image_delivery_verified=receipt.get('image_delivery_verified', False))
         self._commit_agent_turn(effect, receipt)
+        self._record_literature_read(effect)
         if not existing:
             response = receipt.get('response')
             request = None
             command = response.get('command', {}) if isinstance(response, dict) else {}
             stale_error = False
+            manifest = None
             try:
-                manifest = decision_dependencies.validate_binding(effect, packet['task'])
-                if manifest is None:
-                    raise decision_dependencies.StaleDecision('legacy_unversioned: a new research decision is required')
-                decision_dependencies.validate(self.store, self.run_id, manifest)
+                if effect['kind'] != 'literature':
+                    # A delegated child answers to its task revision, checked when it is routed.
+                    manifest = decision_dependencies.validate_binding(effect, packet['task'])
+                    if manifest is None:
+                        raise decision_dependencies.StaleDecision('legacy_unversioned: a new research decision is required')
+                    decision_dependencies.validate(self.store, self.run_id, manifest)
                 if not isinstance(command, dict):
                     raise ValueError('Meta command must be a closed JSON object')
                 if command.get('action') in {'narrow_request', 'replan_request'}:
@@ -776,7 +1181,8 @@ class Runtime:
                     self._admit_tool_inputs(validated['payload'], packet=packet, cited=validated['evidence_ids'])
                 if validated['action'] == 'propose_lab_settings':
                     self.orchestration.admit(validated)
-                research_response = self.improvements.validate(response,packet) if self.improvements else {}
+                research_response = (self.improvements.validate(response,packet)
+                    if self.improvements and effect['kind'] in {'lab', 'meta'} else {})
                 work = self.store.get(self.run_id, 'work', effect['work_id'])
                 allowed = work['inputs'].get('allowed_action')
                 action_map = {'replan': 'replan_request', 'ask_user': 'ask_user', 'close_unresolved': 'close_issue',
@@ -791,7 +1197,7 @@ class Runtime:
                 stale_error = isinstance(exc, decision_dependencies.StaleDecision)
             def admit(tx):
                 current_error, stale = error, stale_error
-                if current_error is None:
+                if current_error is None and manifest is not None:
                     try:
                         decision_dependencies.validate(self.store, self.run_id, manifest)
                     except decision_dependencies.StaleDecision as exc:
@@ -799,7 +1205,8 @@ class Runtime:
                 result = tx.insert('proposal', pid, {'effect_id': effect_id, 'issue_id': effect['issue_id'],
                     'status': 'blocked_stale' if stale else 'rejected' if current_error else 'admitted',
                     'command': validated, 'error': current_error,
-                    **({'research_response':research_response} if self.improvements else {}),
+                    **({'research_response':research_response}
+                       if self.improvements and effect['kind'] in {'lab', 'meta'} else {}),
                     'delivery_ref': tx.blob(pages), 'result_ref': None,
                     'initial_review_ref': tx.blob(initial_review_receipt(packet, response, effect_id=effect_id,
                         response_ref=effect['receipt_ref'])) if not current_error and effect['metadata']['mode'] == 'discovery' and not effect['metadata'].get('agent_session_id') else None})
@@ -809,6 +1216,9 @@ class Runtime:
             proposal = self._mutate('admit:' + pid, 'meta_proposal_admitted', admit,
                                    {'effect_id': effect_id, 'receipt_ref': effect['receipt_ref']})
             if proposal['status'] != 'admitted':
+                if effect['kind'] == 'literature':
+                    self._end_literature(self.store.get(self.run_id, 'work', effect['work_id']),
+                        pid, proposal['error'])
                 return proposal
         else:
             proposal = existing[0]
@@ -829,9 +1239,9 @@ class Runtime:
         # admitted and can be resumed without either reissuing a call or guessing.
         try:
             result = self._route(proposal)
-            if self.improvements:
+            if self.improvements and effect['kind'] in {'lab', 'meta'}:
                 self.improvements.apply_responses(proposal,result)
-            if self.scientific_memory:
+            if self.scientific_memory and effect['kind'] in {'lab', 'meta'}:
                 self.scientific_memory.apply_updates(effect,packet,receipt.get('response'))
             self.batch_interpretations.settle_review(effect, packet)
         except (ValueError, KeyError, TypeError) as exc:
@@ -904,6 +1314,10 @@ class Runtime:
         an older dependency snapshot on crash recovery.
         """
         effect = self.store.get(self.run_id, 'effect', proposal['effect_id'])
+        if effect['kind'] == 'literature':
+            # The child's actions carry no research-state decision to seal:
+            # _route_literature holds each one to its exact task revision.
+            return self._route_command(proposal)
         packet = json.loads(self.store.read_blob(effect['metadata']['plan_ref']))
         manifest = decision_dependencies.validate_binding(effect, packet['task'])
         seal_id = identity('decision_commit', proposal['id'])
@@ -948,6 +1362,8 @@ class Runtime:
     def _route_command(self, proposal):
         command, key = proposal['command'], 'route:' + proposal['id']
         action, p, iid = command['action'], command['payload'], command['issue_id']
+        if action == 'request_literature' or command['mode'] == 'literature':
+            return self._route_literature(proposal)
         base = identity('object', proposal['id'])
         event_time = self.store.db.execute('SELECT created_at FROM events WHERE run_id=? AND seq=?',
             (self.run_id, proposal['created_seq'])).fetchone()[0]
@@ -992,6 +1408,10 @@ class Runtime:
             wait = self._park(iid, dep, key + ':park', deadline=deadline, expiry='ask_user')
             return {'build_intent_id': intent['id'], 'work_id': work['id'], 'wait_id': wait['id']}
         if action == 'request_diagnostic':
+            if command['mode'] == 'lab' and p['capability_id'].startswith('literature.'):
+                effect = self.store.get(run, 'effect', proposal['effect_id'])
+                if effect['metadata'].get('literature_delegation_version') is not None:
+                    raise ValueError('Lab delegates research questions; Literature selects and calls its tools')
             source_work = self.store.get(run, 'work', self.store.get(run, 'effect', proposal['effect_id'])['work_id'])
             inputs = {**p, 'issue_id': iid, 'dependency_id': base,
                 **({'lab_continuation': True, 'source_proposal_id': proposal['id'],
@@ -1176,7 +1596,8 @@ class Runtime:
         agent_recovery, errors = [], []
         completion_index = self._completion_index()
         model_complete = {e['id'] for e in self.store.list(self.run_id, 'effect')
-                          if e['kind'] in {'lab', 'meta'} and self._completion_recorded(e, 'model', completion_index)}
+                          if e['kind'] in {'lab', 'meta', 'literature'}
+                          and self._completion_recorded(e, 'model', completion_index)}
         # One failing item must not abort the whole recovery. Its stored state
         # is left untouched and the failure is reported for the operator.
         def failed(stage, item_id, exc):
@@ -1193,7 +1614,9 @@ class Runtime:
         # The outer receipt may be absent even though the CLI already completed.
         # Recover only this attempt's owned durable journal; never resend input.
         for effect in self.store.list(self.run_id, 'effect'):
-            if effect['kind'] not in {'lab', 'meta'} or not effect.get('metadata', {}).get('agent_session_id'):
+            if effect_is_quarantined(effect):
+                continue
+            if effect['kind'] not in {'lab', 'meta', 'literature'} or not effect.get('metadata', {}).get('agent_session_id'):
                 continue
             if effect['id'] in model_complete:
                 continue
@@ -1257,7 +1680,8 @@ class Runtime:
                 except Exception as exc:
                     failed('trial', trial['id'], exc)
         for effect in [e for e in self.store.list(self.run_id, 'effect')
-                       if e['kind'] in {'meta', 'lab'} and e['status'] in {'succeeded', 'failed_definite'}]:
+                       if e['kind'] in {'meta', 'lab', 'literature'} and e['status'] in {'succeeded', 'failed_definite'}
+                       and not effect_is_quarantined(e)]:
             if effect['id'] in model_complete:
                 # Preserve the existing report shape without re-entering a
                 # public API that repeats full history verification.
@@ -1283,8 +1707,22 @@ class Runtime:
             except Exception as exc:
                 failed('agent_effect', effect['id'], exc)
         self.controller.tick(self.run_id)
+        capacity_recovery = []
+        for work in self.store.list(self.run_id, 'work', status='blocked'):
+            if work['kind'] != 'literature' or work.get('effect_id') or not work.get('outcome_ref'):
+                continue
+            # Like every other stage: a child that cannot be reopened yet (for
+            # example while a related call is unreconciled) is reported, and
+            # the rest of the recovery and the driver still proceed.
+            try:
+                outcome = json.loads(self.store.read_blob(work['outcome_ref']))
+                if outcome.get('status') in {'packet_unrepresentable', 'blocked_capacity'} and outcome.get('max_input_bytes'):
+                    capacity_recovery.append(self.recover_literature_work(work['id']))
+            except Exception as exc:
+                failed('literature_capacity', work['id'], exc)
         return {'effects': effects, 'proposals': proposals, 'adapter_results': adapter_results,
-                'agent_recovery': agent_recovery, 'errors': errors}
+                'agent_recovery': agent_recovery, 'errors': errors,
+                'literature_capacity_recovery': capacity_recovery}
 
     def execute_adapter(self, adapter_id, inputs, *, trigger_id, work_id=None):
         adapter = self.adapters.get(adapter_id)
@@ -1352,13 +1790,28 @@ class Runtime:
             'adapter_descriptor_sha256': digest(descriptor), 'adapter_descriptor_ref': self.store.put_blob(descriptor),
             'issue_id': work['inputs'].get('issue_id'), 'dependency_id': work['inputs'].get('dependency_id'),
             'trigger_id': trigger_id}
+        if work['inputs'].get('literature_task_id'):
+            task = self._literature_task(work)
+            if adapter_id not in self._literature_capability_catalog(task):
+                raise ValueError('Literature tool differs from its pinned task admission')
+            metadata.update(literature_task_id=task['id'], task_revision=task['task_revision'])
         if self.config.get('task_plan_id'):
             from .plans import load_task_plan
             plan = load_task_plan(self.store, self.run_id, self.config['task_plan_id'])
             metadata['task_plan_id'] = self.config['task_plan_id']
             metadata['task_plan_sha256'] = digest(plan)
-        effect = self.controller.prepare_effect(self.run_id, work['id'], adapter.effect_kind, packet, reservations,
-            'adapter-effect:' + adapter_id + ':' + trigger_id, metadata=metadata)
+        try:
+            effect = self.controller.prepare_effect(self.run_id, work['id'], adapter.effect_kind, packet, reservations,
+                'adapter-effect:' + adapter_id + ':' + trigger_id, metadata=metadata)
+        except ValueError as exc:
+            if metadata.get('literature_task_id') and ('Literature task budget' in str(exc) or
+                    'Literature task step' in str(exc)):
+                result = self._end_literature(work, 'admission:' + work['id'], str(exc))
+                blocked = self._mutate('literature-budget-block:' + work['id'], 'literature_work_budget_blocked',
+                    lambda tx: tx.update('work', work['id'], {'status': 'blocked', 'outcome_ref': tx.blob(result)}),
+                    {'work_id': work['id']})
+                return {'work': blocked, 'result': result}
+            raise
         current = self.store.get(self.run_id, 'effect', effect['id'])
         self.adapters.resolve(current)
         if current['status'] == 'prepared':
@@ -1402,6 +1855,10 @@ class Runtime:
             raise ValueError('The executable adapter requires verified artifact acceptance before use')
 
     def _settled_adapter_effect(self, current):
+        if current['status'] == 'failed_definite' and not current.get('accounting_unknown'):
+            # A delegated child must read its tool's definite failure, on first
+            # execution and on a resumed prepared Effect alike.
+            self._literature_tool_failure(current)
         if current['status'] != 'succeeded' or current.get('accounting_unknown'):
             if self.improvements:
                 self.improvements.failed_execution(current)
@@ -1442,6 +1899,21 @@ class Runtime:
             work_claims.reconcile_all(tx)
             if lab_inputs is not None:
                 self.controller._work(tx, None, 'lab', 'tool-rejected:' + work_id, inputs=lab_inputs)
+            if inputs.get('literature_task_id'):
+                # A delegated child's tool has no dependency or Lab continuation
+                # to wake. Its refusal goes back to the child that requested it,
+                # in this same commit, as an execution observation like a failed
+                # tool: never paper evidence, and never a silently lost request.
+                task = self._literature_task(work)
+                fid = identity('tool_rejection', work_id)
+                tx.insert('fact', fid, {'kind': 'source_statement',
+                    'content_ref': tx.blob({'kind': 'ToolResult', 'status': 'rejected_before_execution',
+                        'adapter_id': inputs['capability_id'], 'reason': reason}),
+                    'provenance': {'work_id': work_id, 'stage': 'adapter_prepare',
+                        'authority': 'execution_receipt_not_paper_evidence'}})
+                updated = tx.update('registration', task['id'], {'task_revision': task['task_revision'] + 1,
+                    'evidence_ids': task['evidence_ids'] + [fid]})
+                self._literature_work(tx, updated, 'tool-rejected:' + work_id, required_evidence_ids=[fid])
             return failed
         failed = self._mutate('diagnostic-rejected:' + work_id, 'diagnostic_rejected', apply,
                               {'work_id': work_id, 'reason': reason})
@@ -1497,22 +1969,48 @@ class Runtime:
                 if (not isinstance(row, dict) or set(row) != {'id','kind','content','provenance'}
                         or not isinstance(row['provenance'], dict) or not row['provenance']):
                     raise ValueError('Adapter evidence needs exact identity, kind, content and provenance')
+                if isinstance(row['content'], dict) and row['content'].get('format') == 'rsi_image_evidence_v1':
+                    if row['kind'] != 'source_statement':
+                        raise ValueError('Rendered image evidence must remain a source statement')
+                    images.validate_image_content(row['content'])
             if any(r['kind'] not in {'raw_fact','source_statement'} for r in publication['facts']):
                 raise ValueError('Inferences cannot be published as raw task evidence')
             if any(r['kind'] not in {'validation','hypothesis'} for r in publication['conclusions']):
                 raise ValueError('Adapter conclusions must retain their interpretive identity')
             if len({r['id'] for r in rows}) != len(rows):
                 raise ValueError('Duplicate evidence identities in adapter publication')
+            raw_publication = publication
             covered = work_claims.normalize(adapter.completed_identities(effect, publication)) if adapter.completed_identities else []
             semantic_description = adapter.progress(json.loads(encode(effect)), json.loads(encode(publication))) if adapter.progress else None
             def publish(tx):
+                nonlocal publication
+                source_reads = []
+                if adapter_id.startswith('literature.'):
+                    from .literature_sources import canonicalize_publication, source_identity_registration
+                    publication, source_reads = canonicalize_publication(
+                        self.store, self.run_id, effect, raw_publication)
+                rows = publication['facts'] + publication['conclusions']
                 for row in rows:
                     old = tx.find('fact', id=row['id'])
-                    doc = {'kind': row['kind'], 'content_ref': tx.blob(row['content']), 'provenance': row['provenance']}
+                    content = row['content']
+                    if isinstance(content, dict) and content.get('format') == 'rsi_image_evidence_v1':
+                        image = images.image_reference(content)
+                        if tx.blob(images.decoded_image_bytes(content)) != image['blob_ref']:
+                            raise ValueError('Image blob identity changed during publication')
+                        content = image
+                    doc = {'kind': row['kind'], 'content_ref': tx.blob(content), 'provenance': row['provenance']}
                     if old and any(old[0][key] != value for key,value in doc.items()):
                         raise ValueError('Adapter tried to replace immutable evidence identity')
                     if not old:
                         tx.insert('fact', row['id'], doc)
+                for read in source_reads:
+                    index = source_identity_registration(read)
+                    prior = tx.find('registration', id=index['id'])
+                    if prior and any(prior[0].get(key) != value for key, value in index.items()):
+                        raise ValueError('Canonical source index changed during publication')
+                    if not prior:
+                        tx.insert('registration', index['id'], {k: v for k, v in index.items() if k != 'id'})
+                    tx.insert('registration', read['id'], {k: v for k, v in read.items() if k != 'id'})
                 iid = effect.get('metadata',{}).get('issue_id')
                 if iid:
                     issue = tx.get('issue',iid)
@@ -1523,7 +2021,10 @@ class Runtime:
                 return tx.insert('registration', publication_id, {'kind':'adapter_publication','effect_id':effect['id'],
                     'adapter_id':adapter.adapter_id, 'status':'published', 'publication_ref':tx.blob(publication),
                     'adapter_version': adapter.version, 'semantic_description': semantic_description,
-                    'covered_claim_identities': covered})
+                    'covered_claim_identities': covered,
+                    **({'original_publication_ref': tx.blob(raw_publication),
+                        'source_read_ids': [read['id'] for read in source_reads],
+                        'source_identity_policy': 'literature_source_identity_v1'} if source_reads else {})})
             self._mutate('adapter-publication:' + effect['id'], 'adapter_evidence_published', publish,
                          {'effect_id':effect['id'],'publication_sha256':digest(publication)})
         dep_id = effect.get('metadata',{}).get('dependency_id')
@@ -1541,6 +2042,16 @@ class Runtime:
                 {'status':'completed','effect_id':effect['id']}, 'adapter-dependency:' + effect['id'])
             self.controller.tick(self.run_id)
         source_work = self.store.get(self.run_id, 'work', effect['work_id'])
+        if source_work['inputs'].get('literature_task_id'):
+            def continue_research(tx):
+                task = self._literature_task(source_work)
+                ids = list(dict.fromkeys(task['evidence_ids'] + [r['id'] for r in publication['facts']]))
+                updated = tx.update('registration', task['id'], {'evidence_ids': ids,
+                    'task_revision': task['task_revision'] + 1})
+                return self._literature_work(tx, updated, 'literature-result:' + effect['id'],
+                    required_evidence_ids=[r['id'] for r in publication['facts']])
+            self._mutate('literature-continuation:' + effect['id'], 'literature_tool_delivered',
+                continue_research, {'effect_id': effect['id']})
         if source_work['inputs'].get('lab_continuation') and interpretation is None:
             ids = semantic['canonical_evidence_ids'] if semantic else [r['id'] for r in publication['facts'] + publication['conclusions']]
             inputs = {'evidence_ids': ids, 'required_evidence_ids': ids, 'source_effect_id': effect['id'],
@@ -1548,7 +2059,9 @@ class Runtime:
             self._mutate('lab-continuation:' + effect['id'], 'lab_notification',
                 lambda tx: self.controller.wake_lab(tx, 'result:' + effect['id'], inputs=inputs),
                 {'effect_id': effect['id'], 'inputs': inputs})
-        if publication['facts'] and (semantic is None or semantic['is_new_result']):
+        # A delegated child's source reads return to its Lab; they do not each wake Meta.
+        if (publication['facts'] and not source_work['inputs'].get('literature_task_id')
+                and (semantic is None or semantic['is_new_result'])):
             batch = semantic['batch_index'] if semantic else len(self.store.list(self.run_id, 'registration', kind='adapter_publication'))
             event = 'semantic:' + semantic['semantic_key'] if semantic else 'adapter:' + effect['id']
             ids = semantic['canonical_evidence_ids'] if semantic else [r['id'] for r in publication['facts']]
@@ -1559,6 +2072,25 @@ class Runtime:
             work_claims.reconcile_all, {'effect_id': effect['id']})
         self._record_completion(effect, 'adapter')
         return publication['data']
+
+    def _literature_tool_failure(self, effect):
+        if not effect['metadata'].get('literature_task_id'):
+            return None
+        work = self.store.get(self.run_id, 'work', effect['work_id'])
+        def failed(tx):
+            task = self._literature_task(work)
+            fid = identity('tool_failure', effect['id'])
+            tx.insert('fact', fid, {'kind': 'source_statement',
+                'content_ref': tx.blob({'kind': 'ToolResult', 'status': 'failed_definite',
+                    'adapter_id': effect['metadata']['adapter_id'],
+                    'receipt': json.loads(self.store.read_blob(effect['result_ref']))}),
+                'provenance': {'effect_id': effect['id'], 'receipt_ref': effect['result_ref'],
+                    'authority': 'execution_receipt_not_paper_evidence'}})
+            updated = tx.update('registration', task['id'], {'task_revision': task['task_revision'] + 1,
+                'evidence_ids': task['evidence_ids'] + [fid]})
+            return self._literature_work(tx, updated, 'tool-failure:' + effect['id'], required_evidence_ids=[fid])
+        return self._mutate('literature-tool-failure:' + effect['id'], 'literature_tool_failed',
+            failed, {'effect_id': effect['id']})
 
     def pending_improvements(self):
         """Public host query for bounded final result-review drain; no mutations."""
@@ -1578,6 +2110,18 @@ class Runtime:
         """Internal recovery after this invocation has verified the full history."""
         verified_blobs = {} if verified_blobs is None else verified_blobs
         results = []
+        for effect in self.store.list(self.run_id, 'effect', status='failed_definite'):
+            if effect['metadata'].get('literature_task_id') and effect['metadata'].get('adapter_id') and not effect.get('accounting_unknown'):
+                # Isolated like the publications below: one child whose task has
+                # moved on must not abort the recovery of everything else.
+                try:
+                    self._literature_tool_failure(effect)
+                except (ValueError, KeyError) as exc:
+                    results.append({'effect_id': effect['id'], 'status': 'blocked_adapter', 'reason': str(exc)})
+                except Exception as exc:
+                    if errors is None:
+                        raise
+                    errors.append(recovery_error('adapter', effect['id'], exc))
         for effect in self.store.list(self.run_id, 'effect', status='succeeded'):
             if not (effect.get('metadata',{}).get('adapter_id') or effect['kind'] in self.adapters.legacy):
                 continue
@@ -1641,15 +2185,18 @@ class Runtime:
                 'adapter_publications_pending':self.pending_adapter_publications(),
                 'effects_requiring_reconciliation': [e for e in self.store.list(self.run_id, 'effect')
                     if e['status'] in {'dispatching', 'unknown'} or e.get('accounting_unknown')],
+                'isolated_model_obligations': [e for e in self.store.list(self.run_id, 'effect')
+                    if effect_is_quarantined(e)],
                 'budgets': self.store.list(self.run_id, 'budget'),
+                'literature_tasks': self.store.list(self.run_id, 'registration', kind='literature_task'),
                 'agent_sessions': self.store.list(self.run_id, 'agent_session'),
                 'agent_turns': self.store.list(self.run_id, 'agent_turn'),
                 **({'orchestration': self.orchestration.status()} if self.orchestration else {})}
 
     def _agent_available(self, work):
-        if work['kind'] not in {'lab', 'meta_discovery', 'meta_disposition', 'disposition'}:
+        if work['kind'] not in {'lab', 'literature', 'meta_discovery', 'meta_disposition', 'disposition'}:
             return True
-        role = 'lab' if work['kind'] == 'lab' else 'meta'
+        role = work['kind'] if work['kind'] in {'lab', 'literature'} else 'meta'
         agent = work['inputs'].get('agent_instance_id', role)
         branch = work['inputs'].get('branch_id', self.config.get('branch_id', 'main'))
         owners = self.store.list(self.run_id, 'agent_owner')
@@ -1665,7 +2212,7 @@ class Runtime:
         if any(w['status'] in {'waiting', 'disposition_due', 'disposed'}
                for w in self.store.list(self.run_id, 'wait')):
             return False
-        return all(w['kind'] in {'lab', 'meta_discovery', 'meta_disposition', 'disposition'}
+        return all(w['kind'] in {'lab', 'literature', 'meta_discovery', 'meta_disposition', 'disposition'}
                    and not self._agent_available(w) for w in self.controller.ready(self.run_id))
 
     def finalize(self, reason):
@@ -1766,7 +2313,9 @@ class Runtime:
             if self.store.list(self.run_id, 'registration', id='run_lifecycle', status='finalizing'):
                 outcome, reason = 'finalizing', 'New agent turns are stopped; durable recovery remains available'
                 break
-            unresolved = [e for e in self.store.list(self.run_id, 'effect') if e['status'] in {'dispatching','unknown'}]
+            # An isolated interrupted model call keeps its accounting duty but no execution lease.
+            unresolved = [e for e in self.store.list(self.run_id, 'effect')
+                          if e['status'] in {'dispatching','unknown'} and effect_holds_execution(e)]
             # A prepared Effect holds a lease and was never dispatched: resume
             # it before new Work. One no adapter here can run is reported.
             prepared = self.store.list(self.run_id, 'effect', status='prepared')
@@ -1774,7 +2323,7 @@ class Runtime:
             for candidate in prepared:
                 if candidate['id'] in blocking_ids:
                     continue
-                if candidate['kind'] not in {'lab', 'meta'}:
+                if candidate['kind'] not in {'lab', 'meta', 'literature'}:
                     # A refused acceptance may be a host problem a restart
                     # fixes, so the Effect is held, never cancelled, for it.
                     try:
@@ -1793,7 +2342,7 @@ class Runtime:
                 work = self.store.get(self.run_id, 'work', effect['work_id'])
             else:
                 work = next((w for w in self.controller.ready(self.run_id) if w['id'] not in selected and (
-                             (w['kind'] in {'lab','meta_discovery','meta_disposition','disposition'} and self._agent_available(w))
+                             (w['kind'] in {'lab','literature','meta_discovery','meta_disposition','disposition'} and self._agent_available(w))
                              or (w['kind']=='diagnostic' and w['inputs'].get('capability_id') in self.adapters.by_id))),None)
             if work is None:
                 outcome, reason = self._driver_wait_status(unresolved, blocking, skipped, recovery_errors)
@@ -1801,7 +2350,7 @@ class Runtime:
             selected.add(work['id'])
             steps += 1
             try:
-                if effect is not None and effect['kind'] not in {'lab', 'meta'}:
+                if effect is not None and effect['kind'] not in {'lab', 'meta', 'literature'}:
                     result = self.resume_adapter_effect(effect)
                 elif work['kind']=='diagnostic':
                     result = self.execute_adapter(work['inputs']['capability_id'],

@@ -11,6 +11,8 @@ from pathlib import Path
 
 from . import recommendation_contracts as contracts
 from .controller import identity
+from .literature_context import (
+    LITERATURE_DECISION_POLICY_VERSION, LITERATURE_DELEGATION_VERSION, literature_tool_catalog)
 from .store import digest, encode
 
 
@@ -82,15 +84,31 @@ class ImprovementLoop:
                   for r in selected]
         admission = self.admission(mode=mode, result_review=bool(selected) and mode != 'lab',
                     final_review=bool(work['inputs'].get('final_review_only')), rows=rows)
-        return {'recommendations': public if mode == 'lab' else [],
+        context = {'recommendations': public if mode == 'lab' else [],
                 'improvement_reviews': public if mode != 'lab' else [],
                 'recommendation_allowance': admission['remaining'],
                 'recommendation_admission': admission,
-                'causal_benefit': 'not_established_without_a_controlled_comparison'}, required
+                'causal_benefit': 'not_established_without_a_controlled_comparison'}
+        catalog = literature_tool_catalog(self.runtime.capability_catalog())
+        if any(row['descriptor'].get('manifest', {}).get('literature_decision_policy') ==
+               LITERATURE_DECISION_POLICY_VERSION for row in catalog.values()):
+            # Freeze the Lab execution boundary in this review packet. Replaying
+            # an older packet must not acquire today's recommendation policy.
+            context['lab_literature_delegation_version'] = LITERATURE_DELEGATION_VERSION
+        return context, required
 
     @staticmethod
     def _delivered(packet):
         return {p['evidence_id'] for p in packet['delivery_pages'] if p['complete_source']}
+
+    @staticmethod
+    def _validate_recommendation_target(command, scope):
+        version = scope.get('lab_literature_delegation_version')
+        if version not in (None, LITERATURE_DELEGATION_VERSION):
+            raise ValueError('Unsupported Lab literature recommendation boundary')
+        if (version == LITERATURE_DELEGATION_VERSION
+                and command['payload']['capability_id'].startswith('literature.')):
+            raise ValueError('Literature tools are not Lab recommendation targets; propose an evidence-backed research gap')
 
     def validate(self, response, packet):
         mode = packet['envelope']['mode']
@@ -99,6 +117,7 @@ class ImprovementLoop:
         command = response['command']
         action = command['action']
         if action == 'recommend_change':
+            self._validate_recommendation_target(command, scope)
             admitted = scope.get('recommendation_admission')
             current = self.admission(mode=mode, result_review=bool(scope['improvement_reviews']),
                 final_review=bool(packet['task']['constraints'].get('final_review_only')))
@@ -147,6 +166,10 @@ class ImprovementLoop:
 
     def recommend(self, proposal):
         command = proposal['command']
+        effect = self.store.get(self.run_id, 'effect', proposal['effect_id'])
+        packet = json.loads(self.store.read_blob(effect['metadata']['plan_ref']))
+        self._validate_recommendation_target(command,
+            packet['task'].get('constraints', {}).get('research_loop', {}))
         rid = identity('recommendation', proposal['id'])
         fid = identity('recommendation_statement', rid)
         def apply(tx):

@@ -1,0 +1,18 @@
+{
+  "goal": "根据已登记的论文材料，委托 Literature 读取相关段落并按需查看页面图表，返回带原文证据的结论和阅读范围。",
+  "execution_mode": "live",
+  "model": "gpt-6-astra",
+  "effort": "medium",
+  "max_input_bytes": 131072,
+  "max_effective_context_bytes": 524288,
+  "max_images": 4,
+  "max_image_bytes": 4194304,
+  "max_effective_image_bytes": 16777216,
+  "model_reservation": {"model_calls": 1, "tokens": 24000, "wall_seconds": 240},
+  "budgets": {
+    "model_calls": {"limit": 8, "hard": true},
+    "tool_calls": {"limit": 40, "hard": true},
+    "tokens": {"limit": 200000, "hard": false},
+    "wall_seconds": {"limit": 1800, "hard": false}
+  }
+}

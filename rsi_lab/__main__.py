@@ -39,13 +39,17 @@ def main(argv=None):
     p.add_argument('--root',required=True);p.add_argument('--run',default='run1')
     p.add_argument('--adapter-factory',action='append',default=[],
         help='Trusted installed Python factory, explicitly chosen by the operator; may be repeated')
+    p.add_argument('--literature-tools', action='store_true',
+        help='Register the literature tool bundle for Lab-owned Literature subagents')
+    p.add_argument('--literature-config',
+        help='Host-owned literature configuration JSON; credentials are environment variable names only')
     sub=p.add_subparsers(dest='command',required=True)
     q=sub.add_parser('init');q.add_argument('--config',required=True)
-    for name in ('status','features','recover','tick'):sub.add_parser(name)
+    for name in ('status','features','recover','tick','literature-tools'):sub.add_parser(name)
     q=sub.add_parser('register-plan');q.add_argument('--plan',required=True)
     q=sub.add_parser('adapter-run');q.add_argument('--adapter',required=True)
     q.add_argument('--inputs',required=True);q.add_argument('--event',required=True)
-    for name in ('meta-step', 'lab-step'):
+    for name in ('meta-step', 'lab-step', 'literature-step'):
         q=sub.add_parser(name);q.add_argument('--work',required=True)
     q=sub.add_parser('lab-start');q.add_argument('--event',required=True)
     q.add_argument('--evidence',action='append',default=[])
@@ -64,10 +68,19 @@ def main(argv=None):
     q.add_argument('--page',type=int,default=0);q.add_argument('--kind',choices=['raw','summary','pointer'],default='raw')
     args=p.parse_args(argv)
     adapters=[load_adapter_factory(ref) for ref in args.adapter_factory]
+    literature_config = read(args.literature_config) if args.literature_config else {}
+    if args.literature_tools or args.literature_config:
+        from rsi_literature import make_adapters
+        adapters.extend(make_adapters(Path(args.root) / 'literature', literature_config))
     store=Store(args.root)
     try:
         controller=Controller(store)
-        if args.command=='init':
+        if args.command=='literature-tools':
+            from rsi_literature.catalog import provider_catalog
+            result={'providers':provider_catalog(literature_config),
+                'registered_capabilities':[a.adapter_id for a in adapters if a.adapter_id.startswith('literature.')],
+                'configuration_check_only':True}
+        elif args.command=='init':
             config=read(args.config)
             # The config is immutable once stored; refuse what Runtime would later reject.
             for check in (unknown_usage_policy,model_failure_retries,model_timeout,orchestration_config):check(config)
@@ -116,8 +129,9 @@ def main(argv=None):
                 if config.get('execution_mode') not in {'live','role_recall'}:
                     raise ValueError('Real model execution needs a prospectively configured live or role_recall run')
                 executor=CodexExecutor(store.root/'calls',timeout_seconds=model_timeout(config))
-                if args.command in {'meta-step','lab-step'}:
-                    run_step=runtime.run_lab if args.command=='lab-step' else runtime.run_meta
+                if args.command in {'meta-step','lab-step','literature-step'}:
+                    run_step={'lab-step':runtime.run_lab, 'meta-step':runtime.run_meta,
+                        'literature-step':runtime.run_literature}[args.command]
                     result=run_step(args.work,executor,config['model_reservation'])
                 else:
                     result=runtime.run_until_wait(executor,config['model_reservation'],max_steps=args.max_steps)

@@ -1,4 +1,6 @@
-"""Audited, text-only Codex transport. Call admission belongs to the controller.
+"""Audited Codex transport with bounded evidence images.
+
+Call admission belongs to the controller. Image inputs do not enable tools.
 
 This module makes no calls on import. Every invocation retains raw evidence,
 including failed attempts, and never automatically retries or switches models.
@@ -19,6 +21,8 @@ import time
 import uuid
 
 from .journal import JournalWriter, read_journal, raw_stream
+from .images import (MAX_IMAGES, attachment_manifest, decoded_image_bytes, image_manifest_sha256,
+                     validate_image_attachment)
 import base64
 
 DISABLED_FEATURES = (
@@ -27,7 +31,8 @@ DISABLED_FEATURES = (
     "view_image", "goals", "sleep_tool",
 )
 ARTIFACTS = frozenset({"invocation.json", "prompt.txt", "schema.json", "events.jsonl",
-                       "stderr.log", "response.json", "raw_response.txt", "usage.json", "transport_result.json", "journal.jsonl"})
+                       "stderr.log", "response.json", "raw_response.txt", "usage.json", "transport_result.json", "journal.jsonl",
+                       "images", "images.json"})
 PREAMBLE = (
     "Return only one JSON object matching the supplied response schema. Use only the supplied "
     "task and evidence. Do not use tools, read files, browse, delegate, or inspect your environment.\n\n"
@@ -194,7 +199,7 @@ def _session_options(session):
             'explicit_codex_home': session.get('codex_home') is not None}
 
 
-def _command(folder, model, effort, cwd, session):
+def _command(folder, model, effort, cwd, session, image_paths=()):
     command = ['codex', '--no-daemon', '--ask-for-approval', 'never', 'exec',
                '--sandbox', 'read-only', '-C', cwd]
     if session and session['provider_thread_id']:
@@ -209,10 +214,36 @@ def _command(folder, model, effort, cwd, session):
     for feature in DISABLED_FEATURES:
         command.extend(['--disable', feature])
     command.extend(['--enable', 'skip_host_skill_discovery'])
+    for path in image_paths:
+        command.extend(['-i', str(path)])
     if session and session['provider_thread_id']:
         command.append(session['provider_thread_id'])
     command.append('-')
     return command
+
+
+def _archive_images(folder, images, manifest):
+    """Write only validated bytes to fresh host-chosen files before dispatch."""
+    image_folder = folder / 'images'
+    image_folder.mkdir(mode=0o700)
+    files = []
+    for index, attachment in enumerate(images):
+        path = image_folder / f'image-{index:03d}.png'
+        raw = decoded_image_bytes(attachment)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        files.append({'attachment_id': attachment['attachment_id'], 'path': str(path),
+                      'sha256': hashlib.sha256(raw).hexdigest(), 'bytes': len(raw)})
+    directory = os.open(image_folder, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+    _write_json(folder / 'images.json', {'manifest': manifest, 'files': files})
+    return [record['path'] for record in files]
 
 
 def _stream_process(process, prompt, journal, folder, timeout):
@@ -300,8 +331,8 @@ def _stream_process(process, prompt, journal, folder, timeout):
 
 
 def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, timeout=300,
-           *, session=None, journal_metadata=None) -> dict:
-    """Run one admitted text-only request and durably capture it as it happens.
+           *, session=None, journal_metadata=None, images=None) -> dict:
+    """Run one admitted request and durably capture text and optional PNG inputs.
 
     A session binding opts into persistent create/resume. Calls without a binding
     remain explicitly ephemeral for compatibility with one-shot validators.
@@ -318,6 +349,13 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
         raise ValueError('Unsupported reasoning effort')
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
         raise ValueError('Timeout must be positive and finite')
+    if images is None:
+        images = []
+    if not isinstance(images, list) or len(images) > MAX_IMAGES:
+        raise ValueError('Images must be a bounded list of validated attachments')
+    images = [validate_image_attachment(record, with_data=True) for record in images]
+    image_manifest = attachment_manifest(images)
+    image_digest = image_manifest_sha256(images) if images else None
     binding = _session_options(session)
     folder = Path(folder)
     if folder.is_symlink():
@@ -349,13 +387,17 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
     invocation = {'backend': 'codex', 'model': model, 'effort': effort,
                   'timeout_seconds': timeout, 'started_at_unix': time.time(), 'dispatched': False,
                   'session': binding}
+    if images:
+        invocation.update(requested_image_manifest=image_manifest,
+                          requested_image_manifest_sha256=image_digest)
     try:
         if binding:
             cwd = binding['workspace']
         else:
             temporary = tempfile.TemporaryDirectory(prefix='rsi-codex-')
             cwd = temporary.name
-        command = _command(folder, model, effort, cwd, binding)
+        image_paths = _archive_images(folder, images, image_manifest) if images else []
+        command = _command(folder, model, effort, cwd, binding, image_paths)
         invocation.update(command=command, cwd=cwd)
         _write_json(folder / 'invocation.json', invocation)
         journal = JournalWriter(folder / 'journal.jsonl', {
@@ -368,6 +410,9 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
                                    start_new_session=True)
         execution_status = 'unknown'
         invocation['dispatched'] = True
+        if images:
+            invocation.update(sent_image_manifest=image_manifest,
+                              sent_image_manifest_sha256=image_digest)
         _write_json(folder / 'invocation.json', invocation)
         returncode, timed_out, partial_tail = _stream_process(process, sent_prompt, journal, folder, timeout)
         captured = read_journal(folder / 'journal.jsonl')
@@ -497,6 +542,8 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
                   'journal': journal_snapshot, 'dispatched': invocation['dispatched'],
                   'native_session_ref': native_session_ref, 'native_session_sha256': native_session_sha256,
                   'native_session_error': native_session_error}
+        if images and invocation['dispatched']:
+            result.update(sent_image_manifest=image_manifest, sent_image_manifest_sha256=image_digest)
         invocation.update(finished_at_unix=time.time(), returncode=returncode)
         _write_json(folder / 'invocation.json', invocation)
         with (folder / 'raw_response.txt').open('xb') as stream:

@@ -118,6 +118,12 @@ def publication(effect, receipt):
 def make_adapter():
     return Adapter(ADAPTER_ID, VERSION, EFFECT_KIND,
         {'domain': 'molecular_optimization', 'scope': 'Exact canonical lookup over ALL inherited and current observations and pending scores; no oracle calls',
+         'input_schema': {'type': 'object', 'additionalProperties': False,
+             'required': ['run_root', 'run_id', 'candidates'],
+             'properties': {'run_root': {'type': 'string', 'minLength': 1},
+                 'run_id': {'type': 'string', 'minLength': 1},
+                 'candidates': {'type': 'array', 'minItems': 1, 'maxItems': 100,
+                     'items': {'type': 'string', 'maxLength': 4096}}}},
          'input_contract': {'run_root': 'frozen absolute run root', 'run_id': 'current run',
                             'candidates': '1 to 100 SMILES strings'},
          'output_contract': 'Per-input canonical identity, prior score and ordinal, pending identity or not_seen_at_snapshot',

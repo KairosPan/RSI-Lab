@@ -466,6 +466,16 @@ def publication(effect, receipt):
 def make_adapter():
     return Adapter(adapter_id=ADAPTER_ID, version=VERSION, effect_kind=EFFECT_KIND,
         manifest={'domain': 'molecular_optimization', 'scope': 'Evaluate up to twenty candidate SMILES against the frozen hidden objective',
+                  # Closed over both contracts: the selection fields are required
+                  # exactly when the run enables the Harness (see input_contract).
+                  'input_schema': {'type': 'object', 'additionalProperties': False,
+                      'required': ['run_root', 'run_id', 'candidates'],
+                      'properties': {'run_root': {'type': 'string', 'minLength': 1},
+                          'run_id': {'type': 'string', 'minLength': 1},
+                          'candidates': {'type': 'array', 'minItems': 1, 'maxItems': MAX_CANDIDATES,
+                              'items': {'type': 'string', 'maxLength': 4096}},
+                          **{name: {'type': 'string', 'minLength': 1, 'maxLength': 4096}
+                             for name in sorted(METHOD_INPUT_FIELDS)}}},
                   'input_contract': {'run_root': 'exact frozen absolute run directory', 'run_id': 'exact run identity',
                                      'candidates': 'one to twenty SMILES strings',
                                      'harness_enabled_required_fields': sorted(METHOD_INPUT_FIELDS)},

@@ -1,0 +1,7 @@
+# Core literature SDK and PDF reader, validated with Python 3.11.
+# Native HTTP providers and the ledger remain standard-library only.
+# Poppler is a separate system dependency, not a Python package:
+# macOS: brew install poppler; Debian/Ubuntu: apt-get install poppler-utils.
+# Required executables: pdftotext, pdfinfo, pdftoppm (PATH or host-configured paths).
+pypdf==7.1.0
+langextract==1.7.2

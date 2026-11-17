@@ -1,6 +1,6 @@
-# Lab / Meta 持久会话、工作记忆与执行日志
+# Lab / Meta / Literature 持久会话、工作记忆与执行日志
 
-通用 `rsi_lab.Runtime` 把 Lab 与 Meta 接到同一 Work/Effect 控制面，同时为两者保存独立的持久 Codex 会话和工作记忆。模型输出受控命令，Controller 校验后执行已注册工具；模型不能直接修改账本、执行工具或认证科学结论。
+通用 `rsi_lab.Runtime` 把 Lab、Meta 与 Lab 委托的 Literature 子 agent 接到同一 Work/Effect 控制面，为各自保存独立的持久 Codex 会话和工作记忆。模型输出受控命令，Controller 校验后执行已注册工具；模型不能直接修改账本、执行工具或认证科学结论。文献工具配置与子任务协议见 [Literature 工具使用说明](literature-tools.md)。
 
 本页描述当前实现。完整目标契约、长期科研记忆和后续验收见[系统设计 §9](system-design.html#persistent-agent-sessions)。系统设计中的 PS01–PS12 是验收要求，不代表当前 CLI 后端已满足所有底层能力。
 
@@ -10,7 +10,7 @@
 
 | 层 | 保存内容 | 权威与共享范围 |
 | --- | --- | --- |
-| 原生 Codex 会话 | 对话消息、原生历史和可观察运行信息 | Lab 与 Meta 各用精确的 `provider_thread_id`，不使用 `--last`，也不续接对方 thread。原生文件由 Codex 保存，不作为预算或已执行状态的权威 |
+| 原生 Codex 会话 | 对话消息、原生历史和可观察运行信息 | 每个 Lab、Meta 和 Literature 实例各用精确的 `provider_thread_id`，不使用 `--last`，也不续接对方 thread。原生文件由 Codex 保存，不作为预算或已执行状态的权威 |
 | Agent 工作记忆 | 目标引用、计划、尝试、理由摘要、暂定假设、未决问题、下一步和相关来源引用 | SQLite 中追加不可变修订，按 task/run/branch/agent owner 归属；会话重建保留当前 head。内容标记为 `unverified_working_state` |
 | 执行日志 | 每次调用的原始 stdout/stderr、事件、输入、输出、错误、用量和终态 | `calls/<effect_id>/journal.jsonl` 保存逐条持久事件与 hash 链；模型无权确认水位或改写旧事件 |
 | 共享执行账本 | Work、Effect、Wait、真实回执、来源事实和资源消耗 | `ledger.sqlite3` 与 `objects/`；控制器是唯一写入入口，恢复与去重以这些状态为准 |
@@ -25,12 +25,12 @@
 1. `enqueue_lab(...)` 或 `lab-start` 创建初始 Lab Work。Meta 在已登记观察事件、问题和等待处置边界获得自己的 Work。
 2. 准备模型调用时，Runtime 读取所属 agent 的当前工作记忆，构造本轮 packet，核对原生历史前缀和容量，并预约资源。
 3. Controller 领取唯一 session turn。并发或过期调用不能越过 session head、fence 或工作记忆 revision 检查。
-4. Codex 初次调用创建持久会话；以后使用同一精确 thread 续接。正常 Lab/Meta 调用不使用 `--ephemeral`。
+4. Codex 初次调用创建持久会话；以后使用同一精确 thread 续接。正常 Lab/Meta/Literature 调用不使用 `--ephemeral`。
 5. 调用原始事件逐条落盘。已完成执行、JSON/命令是否合法、工作记忆增量是否合法分别处理。
 6. 子 Effect 结算后，由父 turn 的幂等提交推进 session head、接纳合法工作记忆增量并释放会话写入权。空增量保持原 head；非法增量保留旧状态和拒绝原因。
-7. Lab 可以请求已注册的诊断/科学适配器。控制器执行工具、登记来源事实，再创建 Lab continuation。新来源也可触发 Meta 观察工作。
+7. Lab 可以请求已注册的诊断/科学适配器。控制器执行工具、登记来源事实，再创建 Lab continuation。新来源也可触发 Meta 观察工作。Lab 委托的 Literature 任务则先在子 agent 内接收工具结果，向父 Lab 交付阶段或完成结果；子任务的每次读取不自动触发 Meta。
 
-`run-until-wait` 是有步数上限的合作式驱动器：推进当时可运行的 Lab、Meta 和已注册 diagnostic，遇到依赖、资源限制、未知调用或无工作时返回。宿主在新输入、真实结果或 deadline 到达后再次调用；它不是隐藏的后台 daemon，也不会因为等待或 `no_action` 就自动宣布科学任务成功。单个 Work 在派发前被拒绝（例如预算不足）时，驱动器把它记入结果的 `skipped` 并继续处理其他 Work，本次调用不再选它；Work 的 Effect 已经派发之后才出错（例如工具结果发布失败）时，改为记入 `step_errors`（含 `work_id`、`effect_id` 和 `reason`），它不影响返回状态；每次跳过、取消和恢复都计入步数上限。选择新 Work 之前，驱动器先处理所有 `prepared` Effect：Lab/Meta 调用照常派发，本 Runtime 能解析适配器且其能力通过接纳检查的工具调用按已持久保存的输入派发（不再调用 `prepare`）；没有可用适配器或能力未通过接纳检查的记入 `prepared_blocking` 并保持原状，本次调用不再选它，因为接纳失败可能是宿主配置问题，修正后仍可派发；派发本身被拒（例如问题版本已过期）且仍处于 `prepared` 的 Effect 以拒绝原因取消并记入 `cancelled_prepared`；`dispatching` 或 `unknown` 的 Effect 永不重新派发。开头的恢复中单项失败不会中断其余恢复，失败项记入 `recovery_errors`。无事可做时，状态依次取 `finalizing`、`blocked_external`、`blocked_prepared`（存在 `prepared_blocking`）、`blocked_admission`（存在 `skipped`，`reason` 为第一条跳过原因）、`blocked_adapter`、`blocked_recovery`（存在 `recovery_errors`），否则为 `awaiting_producer_or_deadline` 或 `quiescent`。步数上限用尽时状态为 `step_limit_reached`，若此前有 Work 被跳过，`reason` 为第一条跳过原因。Lab 提案在接纳时被拒绝或路由时被阻止，会在同一事务中得到一次修复 Lab Work，其输入带 `routing_error` 和 `repair_of`；修复 Work 自身不再获得修复。工具输入在执行时才被适配器拒绝的 diagnostic 会失败并通知其依赖，Lab 发起的请求同样回到 Lab 并带上拒绝原因。
+`run-until-wait` 是有步数上限的合作式驱动器：推进当时可运行的 Lab、Meta、Literature 和已注册 diagnostic，遇到依赖、资源限制、未知调用或无工作时返回。宿主在新输入、真实结果或 deadline 到达后再次调用；它不是隐藏的后台 daemon，也不会因为等待或 `no_action` 就自动宣布科学任务成功。单个 Work 在派发前被拒绝（例如预算不足）时，驱动器把它记入结果的 `skipped` 并继续处理其他 Work，本次调用不再选它；Work 的 Effect 已经派发之后才出错（例如工具结果发布失败）时，改为记入 `step_errors`（含 `work_id`、`effect_id` 和 `reason`），它不影响返回状态；每次跳过、取消和恢复都计入步数上限。选择新 Work 之前，驱动器先处理所有 `prepared` Effect：Lab/Meta/Literature 调用照常派发，本 Runtime 能解析适配器且其能力通过接纳检查的工具调用按已持久保存的输入派发（不再调用 `prepare`）；没有可用适配器或能力未通过接纳检查的记入 `prepared_blocking` 并保持原状，本次调用不再选它，因为接纳失败可能是宿主配置问题，修正后仍可派发；派发本身被拒（例如问题版本已过期）且仍处于 `prepared` 的 Effect 以拒绝原因取消并记入 `cancelled_prepared`；`dispatching` 或 `unknown` 的 Effect 永不重新派发。开头的恢复中单项失败不会中断其余恢复，失败项记入 `recovery_errors`。无事可做时，状态依次取 `finalizing`、`blocked_external`、`blocked_prepared`（存在 `prepared_blocking`）、`blocked_admission`（存在 `skipped`，`reason` 为第一条跳过原因）、`blocked_adapter`、`blocked_recovery`（存在 `recovery_errors`），否则为 `awaiting_producer_or_deadline` 或 `quiescent`。步数上限用尽时状态为 `step_limit_reached`，若此前有 Work 被跳过，`reason` 为第一条跳过原因。Lab 提案在接纳时被拒绝或路由时被阻止，会在同一事务中得到一次修复 Lab Work，其输入带 `routing_error` 和 `repair_of`；修复 Work 自身不再获得修复。工具输入在执行时才被适配器拒绝的 diagnostic 会失败并通知其依赖，Lab 发起的请求同样回到 Lab 并带上拒绝原因。
 
 `run-until-wait` 的结果还带有只读取账本得出的 `report`：
 
@@ -43,7 +43,7 @@
 
 原本会报告 `quiescent` 时，或原本会报告 `awaiting_producer_or_deadline`、但没有处于 `waiting`、`disposition_due` 或 `disposed` 的等待，且每个就绪 Work 都是其 agent 会话不空闲、驱动器因此不会选择的 Lab/Meta Work 时，只要上述 `attention` 中有任何一项非空，状态改为 `stalled`，`reason` 为第一项非空条目的名称（按 `stalled_issues`、`stopped_lab`、`sessions_requiring_recovery`、`capacity_blocked_work` 的顺序）。`quiescent` 因此只表示干净结束：没有待执行的工作，也没有无人负责的义务。其他状态不变。
 
-Lab 和 Meta 的工具权限由本轮命令模式与已注册能力决定，不来自会话里曾出现的文字。当前 Lab 命令为 `request_diagnostic`、`propose_issue` 和 `no_action`。Meta 的 discovery/disposition 模式仍使用明确命令集合。
+各角色的工具权限由本轮命令模式与已注册能力决定，不来自会话里曾出现的文字。当前 Lab 命令为 `request_literature`、`request_diagnostic`、`propose_issue` 和 `no_action`。新版 Lab 将问题、用途、范围、交付物及预算委托给 Literature，不选择具体文献工具或通过 diagnostic 绕过子 agent。Controller 固定当时完整的可用文献目录；Literature 自主选择其中的工具，并向父 Lab 发布阶段结果或完成结果。历史任务保持原工具权限。Meta 的 discovery/disposition 模式仍使用明确命令集合。
 
 ## 运行入口
 
@@ -59,7 +59,7 @@ Lab 和 Meta 的工具权限由本轮命令模式与已注册能力决定，不�
   "model": "YOUR_MODEL_ID",
   "effort": "medium",
   "max_external": 1,
-  "max_input_bytes": 65536,
+  "max_input_bytes": 131072,
   "max_effective_context_bytes": 262144,
   "max_working_memory_bytes": 16384,
   "model_reservation": {
@@ -100,7 +100,7 @@ python3 -m rsi_lab --root runs/my-task --run main status
 | `lab-start` | 为一次明确触发创建 Lab Work，可指定本轮所需的已登记证据 |
 | `lab-step` | 只推进指定 Lab Work 的一次模型决策 |
 | `meta-step` | 推进指定 Meta Work；Inspector/Worker 模式使用 Meta 自己的会话 |
-| `run-until-wait --max-steps 20` | 推进就绪的 Lab/Meta/工具工作后返回，保留尚未完成的义务 |
+| `run-until-wait --max-steps 20` | 推进就绪的 Lab/Meta/Literature/工具工作后返回，保留尚未完成的义务 |
 | `status` | 查看会话、turn、待执行/阻塞工作、预算和需要对账的 Effect |
 | `features` | 只读地打印这次运行启用了哪些科研功能、加载了哪些适配器、各模式下模型可用的动作；见 [启动前检查](rsi-lab-core.md#启动前检查) |
 | `recover` | 摄取持久回执，或从所属调用日志恢复已知终态；补做幂等发布/提议处理，不盲目重发未知调用 |
@@ -159,6 +159,10 @@ Scientific Memory 的领域身份及经验解释继续通过 `scientific_identit
 若进程已记录终态但尚未写入外层 Effect 回执，恢复器可以从该 Effect 独有的调用目录和逐事件日志重建回执。它核对实际 prompt/schema、session/turn/fence、原生 thread、事件前缀和已保存的结果，保留原响应而不重新请求模型。缺少 wall-time 等实际测量时，仅结算有依据的费用，并保留缺失项目的预算预约与对账义务。原生日志证明了模型终态，却没有证明旧 CLI writer 已退出时，owner 继续锁定，必须先确认停止并隔离旧 writer，不能直接续接或重建。
 
 未知 Effect 保留许可和预算责任，阻塞与其冲突的动作。session lease 到期、进程消失或原生文件缺失都不是重新发送同一 prompt 的许可。先对账，再恢复或显式重建；重建不重做已经成功的工具调用。没有可靠对账能力时，系统保留未知状态。
+
+用户主动暂停可能在 CLI 已开始请求、但尚未记录回答和用量时中断模型。针对这一个边界，可信操作员可以调用 `Controller.quarantine_interrupted_model`：核验原始暂停记录、已退出的所属进程、确切请求与禁用原生工具的命令、持久中断日志、未改写的原生前缀，以及确实没有回答或工具活动。它仅隔离该模型调用的执行许可；Effect 仍为 `unknown`，只结算已测得的调用次数和时间，未知 token 不填零、其预约不释放。普通工具调用、缺失记录、仍有 writer 或已有回答均不能使用这条路径。
+
+隔离会保留原 Effect、packet 和审计证明，取消旧 Work、拒绝旧 turn 的输出，并从同一 owner 当前已提交的记忆建立新会话。自动恢复与提议处理永久跳过隔离调用；后续真实费用回执仍可对账。后续科研工作必须生成新的 Work 和请求，不能重发旧 packet。实验宿主可以允许这种已认证的隔离义务继续占用预算而不占物理执行槽，但必须分别报告“评分与复核已完成”和“费用尚待核对”；后者存在时不得宣称完整工作流已结清。
 
 checkpoint 固定当前 owner、session head、工作记忆 revision、context manifest 和账本位置。会话重建创建新的 session 身份并记录 lineage，工作记忆 owner/head 保持连续；旧 session 只读保留。
 
@@ -222,7 +226,7 @@ python3 -m rsi_lab --root runs/my-task --run main lab-start --event after-timeou
 
 每次续接前核验指定原生 rollout 的 `session_meta.id`、独立工作目录和已登记的字节前缀。只按确切 thread 文件名定位，不扫描其他聊天内容。原生历史缩短、改写、截断、出现不支持的 compaction 或原生工具项目时，要求显式处置/重建。
 
-容量按完整可观察 rollout 原始字节加本轮请求信封计量，包含历史和本轮工作记忆，而不是只数新增 prompt。`max_effective_context_bytes` 控制该容量；未配置时沿用 `max_input_bytes`，默认 131,072 B。整个原始历史含审计元数据，计量因此可能比实际保留的模型消息更保守。
+容量覆盖完整可观察 rollout 与本轮请求信封，包含历史和本轮工作记忆，而不是只数新增 prompt。文本计量扣除已验证图像的 base64 载荷，以 `max_effective_context_bytes` 限制；未配置时沿用 `max_input_bytes`，默认 131,072 B。解码后的图像字节另受 `max_image_bytes`（本轮）与 `max_effective_image_bytes`（历史加本轮）限制。原始历史仍含审计元数据，文本计量因此可能比实际保留的模型消息更保守。
 
 CLI rollout 不是每次 provider 请求完整输入的认证副本，所以记录明确包含：
 

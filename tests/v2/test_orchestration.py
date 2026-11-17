@@ -352,7 +352,8 @@ class SignalTests(unittest.TestCase):
         rt.enqueue_lab('lab-1')
         rt.run_meta(rt.controller.ready('r')[0]['id'],
                     Scripted({'lab': lambda d: ('request_diagnostic', diag({'wrong': 1}))}), RES)
-        rt.packet_builder_factory = lambda catalog, max_input_bytes: PacketBuilder(catalog, max_input_bytes=300)
+        rt.packet_builder_factory = lambda catalog, max_input_bytes, **image_limits: PacketBuilder(
+            catalog, max_input_bytes=300, **image_limits)
         out = rt.run_until_wait(Scripted({}), RES, max_steps=5)
         self.assertEqual(out['report']['attention']['capacity_blocked_work'][0]['kind'], 'lab')
         self.assertEqual(signals(store), [])
@@ -454,9 +455,11 @@ class UnchangedWithoutOrchestrationTests(unittest.TestCase):
                              'disposition': lambda d: CLOSE})
         rt.run_until_wait(executor, RES, max_steps=12)
         effects = by_seq(store.list('r', 'effect'))
-        # Baseline now includes research dependency manifests in every request.
+        # Baseline now includes research dependency manifests in every request,
+        # and every Lab request carries the literature decision policy and the
+        # request_literature action. The Meta request is unchanged by them.
         self.assertEqual([e['packet_hash'] for e in effects],
-                         ['6a92b964b7d817973c1e34f98c471e06137358fe34d1562957f184760528527f',
+                         ['95d507fe5590341c314e5652feffa1e4c39bc6dac7279d6d961264560587c951',
                           '889273ceb15ca270fe5d7f4ad8abc4deeb3e6515d8a1d2be4fc4f32b8634b365'])
         for effect in effects:
             self.assertNotIn('orchestration', effect['metadata'])
@@ -945,7 +948,8 @@ class SettlementTests(unittest.TestCase):
     def test_a_capacity_block_during_the_trial_reverts_at_once(self):
         from rsi_lab.packets import PacketBuilder
         store, controller, rt, issue, change = published_trial(self)
-        rt.packet_builder_factory = lambda catalog, max_input_bytes: PacketBuilder(catalog, max_input_bytes=300)
+        rt.packet_builder_factory = lambda catalog, max_input_bytes, **image_limits: PacketBuilder(
+            catalog, max_input_bytes=300, **image_limits)
         rt.run_until_wait(Scripted({'disposition': lambda d: CLOSE}), RES, max_steps=2)
         self.assert_settled(store, rt, change['id'], 'reverted', 'lab_stopped')
         store.verify_history('r')
