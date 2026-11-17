@@ -1191,7 +1191,9 @@ class Runtime:
                     current_versions=self.versions(effect['issue_id']),
                     authorized_sources=self.config.get('authorized_sources', []),
                     capabilities=capabilities, request=request)
-                if validated['action'] == 'request_diagnostic':
+                # A child's refused inputs reach it as an execution observation
+                # it can correct; rejecting here would end its whole task.
+                if validated['action'] == 'request_diagnostic' and effect['kind'] != 'literature':
                     self._admit_tool_inputs(validated['payload'], packet=packet, cited=validated['evidence_ids'])
                 if validated['action'] == 'propose_lab_settings':
                     self.orchestration.admit(validated)

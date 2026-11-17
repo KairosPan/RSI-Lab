@@ -38,6 +38,8 @@ SWITCH = {'refuse_prepare': False, 'fail_execute': False}
 def prepare(inputs):
     if SWITCH['refuse_prepare']:
         raise ValueError('Provider was disabled after this request was admitted')
+    if inputs.get('refuse'):
+        raise ValueError('The reader refuses these inputs')
     return dict(inputs)
 
 
@@ -226,6 +228,22 @@ class LiteratureRecoveryAndOrchestrationTests(unittest.TestCase):
                         if fact['provenance'].get('producer') == 'literature')
         self.assertEqual(returned['provenance']['summary_of'], [receipt])
         self.assertEqual(self.delegation_step(), ('no_result', 'research_unresolved'))
+
+    def test_child_tool_inputs_refused_by_the_adapter_return_to_the_child(self):
+        self.open()
+        self.delegate()
+        child = self.child()
+        refused = {**READ, 'inputs_json': json.dumps({'refuse': True})}
+        outcome = self.runtime.run_meta(child['id'], model(self.reply(child, 'request_diagnostic', refused)), RES)
+        self.assertEqual(outcome['proposal']['status'], 'applied', outcome['proposal'])
+        work = next(row for row in self.controller.ready('r') if row['kind'] == 'diagnostic')
+        result = self.runtime.execute_adapter('literature.read_document', {'refuse': True},
+                                              trigger_id=work['id'], work_id=work['id'])
+        self.assertEqual(result['rejected'], 'The reader refuses these inputs')
+        self.assertEqual(self.task()['status'], 'active')
+        fact = self.store.get('r', 'fact', self.child()['inputs']['required_evidence_ids'][0])
+        self.assertEqual(json.loads(self.store.read_blob(fact['content_ref']))['status'], 'rejected_before_execution')
+        self.assertEqual(self.results(), [])
 
     def returned_to_lab(self):
         return [work for work in self.controller.ready('r')
