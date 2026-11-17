@@ -1,6 +1,6 @@
 # Literature：Lab 的文献研究子 agent
 
-状态：运行时与首批工具桥已实现，2026-11-15；本文同时保留明确标注的后续设计。当前闭环是 `Lab.request_literature → 独立 Literature 会话 → 已注册工具 → Literature 续轮 → 阶段/最终结果与原文 → 原 Lab`，包含子任务额度、版本检查、来源交付与恢复。当前定义 13 个文献能力及 15 个 provider 条目（9 个主线、6 个可选）；实际工具目录只注册启用 provider 能执行的操作；条目可能需要凭证、模型或宿主部署，不表示全部已真实联网验收。
+状态：运行时、首批工具桥及证据复用与容量恢复已实现，2026-11-16；本文同时保留明确标注的后续设计。当前闭环是 `Lab.request_literature → 独立 Literature 会话 → 已注册工具 → Literature 续轮 → 阶段/最终结果与原文 → 原 Lab`，包含子任务额度、版本检查、来源交付与恢复。当前定义 13 个文献能力及 15 个 provider 条目（9 个主线、6 个可选）；实际工具目录只注册启用 provider 能执行的操作；条目可能需要凭证、模型或宿主部署，不表示全部已真实联网验收。
 
 可运行命令、精确 payload、provider 条件及实测边界见[文献工具使用说明](literature-tools.md)。本文第 6 节区分已实现与拟议命令。更丰富的 EvidenceBundle、任务修订/取消、Meta→Lab 补查需求对象和科学支持关系属于目标设计，不能作为当前 API 字段提交。
 
@@ -157,9 +157,15 @@ Controller 另保存真实 `effect_id`、请求指纹、回执及其 hash、可�
 
 ### 4.3 跨轮、跨角色的证据交付
 
-保留当前“只有本轮实际交付的来源可用于本轮原文引用”的边界。工具续轮将新工具事实标为必要交付；旧来源仍在目录/请求集合中，可经现有 paged/narrowed 策略显式延后。需要引用旧原文时，必须确保它在本轮实际交付，必要时重新读取。历史工作记忆帮助找回片段，本身不充当来源。
+保留“只有本轮实际交付的完整原文可支持本轮研究 claim”的边界。原文身份绑定文档、版本、来源 hash、定位及完整片段内容 hash；重复读取复用原文事实，每次工具回执、原始 publication 和独立读取记录仍分别保存。旧版按调用生成的事实可映射到最早的相同原文，不改写历史事实或 provenance。
 
-Lab 接收子任务结果时，Controller 同时要求交付该批判断依赖的原文。Meta 核查材料时通过自己的授权 packet 获得对应原文与回执，不继承 Lab 的阅读记录。当前必要来源超出 packet 容量会阻塞，不能静默删除；自动拆分完整 EvidenceBundle 仍是扩展目标。一次交付认证的是对应片段，不是整份文档。
+`task.reading_state` 提供当前任务的缓存文档、原文数量、已认证交付和未读数量，以及有界来源索引。已读覆盖由实际请求、完整页面和执行回执核对得出，跨同 owner 的会话重建保留；索引与历史记忆都不授予当前引用权。请求只携带本轮选中的来源，完整历史留在缓存。
+
+Literature 使用 `read_cached_evidence` 按原文 ID，或文档 ID 加查询，从自己任务的缓存选择最多 16 个原文片段。Controller 将它们交给下一轮模型，无需再次调用外部工具；只有真实交付之后才可引用。多篇比较应同时取回相关支持段落，避免为恢复引用而逐篇重复全文读取。跨任务的缓存指针、摘要、工具状态和部分交付都不能直接成为研究 claim 的依据。
+
+Literature 单批来源超限时，Controller 记录原工作、失败计划及选中/延后来源，再按实际请求大小缩小本批；延后原文保留在缓存，未读数量不会因此减少。原生会话历史超限可在同 owner 下重建。若连一个完整来源或最小任务都无法容纳，则取消尚未派发的子工作，向原 Lab 返回明确的 `unresolved` 状态，不伪造模型调用或阅读完成。旧版留下的派发前容量阻塞可通过 `recover_literature_work` 重新规划；未知执行、来源损坏和会话对账失败不能走此路径。
+
+Lab 接收子任务结果时，Controller 交付研究 claims 实际引用的原文，不附带未引用的背景目录。Meta 仍通过自己的授权 packet 核查材料，不继承 Lab 的阅读记录。自动拆分任意父级 EvidenceBundle 尚不是统一保证；一次交付认证的是对应片段，不是整份文档。
 
 出处验证与科学支持判断分开：hash/offset 能证明片段来自哪个版本，不能自动证明它支持某个结论。模型抽取与综合保留推断身份，不因进入 ledger 就升级为已验证科学事实。
 
@@ -211,6 +217,7 @@ Meta 发起核查应说明要核查的命题、可能的问题以及能区分解
 | 发起方 | 命令 | 状态 | Controller 行为或目标 |
 | --- | --- | --- | --- |
 | Lab | `request_literature` | **已实现** | 创建子任务及 Literature Work，固定父 Lab、branch、子实例、能力版本、额度与返回目标；可不关联 issue |
+| Literature | `read_cached_evidence` | **已实现** | 在本任务缓存中选择原文，安排下一轮完整交付；不调用 provider，不把缓存命中当成模型已读 |
 | Literature | `request_diagnostic` | **已实现** | 仅调用本任务固定版本的 `literature.*` 能力；已知工具结果回同一子任务 |
 | Literature | `publish_research_update` / `complete_research` | **已实现** | 校验本轮实际交付的证据引用，发布带来源依赖的解释性结果；更新可继续，完成则结束本次委托 |
 | 所属 Lab | `revise_literature_task` / `cancel_literature_task` | **拟议** | 需验证父子关系、任务 revision，保留已有材料及未结算义务 |
@@ -219,6 +226,8 @@ Meta 发起核查应说明要核查的命题、可能的问题以及能区分解
 | Literature | `propose_issue` | **拟议** | 该动作目前只在 Lab/Meta 既有模式内可用，尚未授权给 Literature |
 
 当前委托 payload 恰好包含 `question/intended_use/scope/deliverables/capability_ids/max_model_calls/max_tool_calls`。两种结果动作恰好包含 `answer/coverage_status/stop_reason/limitations/claims`；claim 字段为 `statement/evidence_ids/limitations`。`purpose/seed_papers/deadline/evidence_requirements` 等第 2 节目标字段不能直接加入当前闭合 schema。
+
+缓存读取 payload 恰好包含 `evidence_ids/document_ids/query/limit`。前两个数组可为空，`query` 可为空字符串，但至少一个选择字段非空；`limit` 为 1–16，两个 ID 数组各至多 16 项。明确的原文 ID 按指定身份读取；否则按文档范围与查询选择片段。payload 中的 ID 是待取指针，命令外层 `evidence_ids` 仍只允许引用当前实际交付的来源。
 
 Literature 命令外层绑定 `task_id/task_revision`，沿用 session head、工作记忆 revision 和 Effect 提交检查。引用必须在本轮实际交付；claim 引用还须包含在命令的 `evidence_ids` 中。工具 continuation 回同一 Literature 子任务，结果 continuation 回所属 Lab，身份均由真实委托推导。通用 handoff 不能创建绕过 Lab 委托的 Literature 任务。
 

@@ -201,15 +201,16 @@ Literature是Lab的子agent，拥有独立session、工作记忆及多步循环�
 
 以上只是payload示例，不能直接当作完整命令提交。完整命令还有 `mode/action/issue_id/expected_versions/evidence_ids/payload`；Literature命令额外携带当前 `task_id/task_revision`，持久响应另有 `working_memory_delta`。
 
-Literature当前仅有三个动作：
+Literature当前有四个动作：
 
 | 动作 | 行为 |
 | --- | --- |
 | `request_diagnostic` | payload为 `capability_id/capability_version/inputs_json`；只允许此任务固定版本的 `literature.*` 能力；结果回同一子agent |
 | `publish_research_update` | 向父Lab交付阶段结果与原文来源，并安排子agent继续研究 |
+| `read_cached_evidence` | 从本任务缓存按证据ID、文档ID和查询选择最多16个原文，交给下一轮；不重复联网读取，缓存命中不等于模型已读 |
 | `complete_research` | 向父Lab交付结果并完成本次任务，不证明科研目标已达成 |
 
-两种结果动作的payload为 `answer/coverage_status/stop_reason/limitations/claims`；每个claim为 `statement/evidence_ids/limitations`。`coverage_status` 仅取 `sufficient_for_requested_use/partial/unresolved`。引用必须在本轮确实交付，claim引用也必须包含在命令的 `evidence_ids` 中。最终结果作为带 `summary_of` 来源关系的解释性事实保存，原文依赖一并交付Lab。
+两种结果动作的payload为 `answer/coverage_status/stop_reason/limitations/claims`；每个claim为 `statement/evidence_ids/limitations`。`coverage_status` 仅取 `sufficient_for_requested_use/partial/unresolved`。引用必须在本轮确实交付，claim引用也必须包含在命令的 `evidence_ids` 中。有来源的结果作为带 `summary_of` 来源关系的解释性事实保存，所引用原文一并交付Lab；没有来源的未完成通知保存为 `research_status`，不冒充证据摘要。
 
 工具续轮只将新工具事实列为必要交付，旧证据仍保留在目录/请求集合中，可通过现有 `paged/narrowed` 策略显式延后。延后的片段没有本轮引用资格；形成判断时须确保需要的原文再次实际交付，必要时重读。历史记忆或目录指针不能替代原文。
 

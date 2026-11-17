@@ -152,7 +152,17 @@ class Runtime:
         required = list(work['inputs'].get('required_evidence_ids', []))
         if mode == 'literature':
             delegated = self._literature_task(work)
-            task['literature_task'] = {**delegated, 'remaining': self._literature_remaining(delegated)}
+            # Acquired history is a cache, not an ever-growing model request.
+            # Exact requested originals remain mandatory; capacity recovery
+            # explicitly records any batch split before admitting a model.
+            evidence_ids = list(required)
+            task['literature_task'] = {**delegated, 'evidence_ids': list(required),
+                'cached_evidence_count': len(delegated['evidence_ids']),
+                'remaining': self._literature_remaining(delegated)}
+            from .literature_reading import reading_state
+            task['reading_state'] = reading_state(self.store, self.run_id, delegated, required)
+            task['reading_state']['deferred_from_this_work_count'] = len(
+                work['inputs'].get('deferred_evidence_ids', []))
             task['goal'] = delegated['question']
             task['capability_catalog'] = {cid: desc for cid, desc in task['capability_catalog'].items()
                 if delegated['capability_versions'].get(cid) == desc['version']}
@@ -254,6 +264,8 @@ class Runtime:
                 {'work_id':work_id,'scientific_memory':task['scientific_memory']})
         planned = agent.prepare(mode, task, **options)
         if planned['status'] != 'ready':
+            if mode == 'literature':
+                return self._recover_literature_capacity(work, planned, reservations)
             return self._mutate('context-block:' + work_id, 'packet_unrepresentable',
                 lambda tx: tx.update('work', work_id, {'status': 'blocked', 'outcome_ref': tx.blob(planned)}),
                 {'work_id': work_id, 'plan': planned})
@@ -288,6 +300,13 @@ class Runtime:
             max_input_bytes=self.config.get('max_effective_context_bytes', self.config.get('max_input_bytes', 131072)),
             max_image_bytes=self.config.get('max_effective_image_bytes', images.MAX_HISTORY_IMAGE_BYTES))
         if context['status'] != 'ready':
+            if mode == 'literature':
+                if snapshot is not None and not session.get('active_turn_id'):
+                    self.agents.rebuild_session(session['id'],
+                        'Literature observable history reached its configured capacity; originals remain in the owned cache.',
+                        'literature-context-rebuild:' + work_id + ':' + session['id'])
+                    return self.prepare_meta(work_id, reservations)
+                return self._recover_literature_capacity(work, context, reservations)
             return self._mutate('session-context-block:' + work_id, 'packet_unrepresentable',
                 lambda tx: tx.update('work', work_id, {'status': 'blocked', 'outcome_ref': tx.blob(context)}),
                 {'work_id': work_id, 'context': context})
@@ -319,7 +338,7 @@ class Runtime:
                 raise ValueError('Prepared invocation must retain its original resource reservation')
         else:
             effect = self.prepare_meta(work_id, reservations)
-        if effect.get('status') == 'blocked':
+        if effect.get('status') in {'blocked', 'cancelled'}:
             return {'work': effect, 'proposal': None}
         effect = self.controller.dispatch_effect(self.run_id, effect['id'], executor)
         if effect['status'] in {'succeeded', 'failed_definite'}:
@@ -375,25 +394,141 @@ class Runtime:
         return remaining
 
     def _literature_work(self, tx, task, trigger, required_evidence_ids=None):
+        selected = task['evidence_ids'] if required_evidence_ids is None else required_evidence_ids
         return self.controller._work(tx, None, 'literature', trigger,
             inputs={'literature_task_id': task['id'], 'task_revision': task['task_revision'],
                 'agent_instance_id': task['agent_instance_id'], 'branch_id': task['branch_id'],
-                'evidence_ids': task['evidence_ids'], 'required_evidence_ids':
-                    task['evidence_ids'] if required_evidence_ids is None else required_evidence_ids})
+                'evidence_ids': list(selected), 'required_evidence_ids': list(selected)})
+
+    def _recover_literature_capacity(self, work, failed_plan, reservations):
+        """Split a source batch before execution, or return an explicit limit.
+
+        All cached facts and receipts survive. Deferred originals remain unread
+        until an authenticated future request delivers them; no model/tool call
+        or resource charge is fabricated by this local replan.
+        """
+        task = self._literature_task(work)
+        required = list(work['inputs'].get('required_evidence_ids', []))
+        attempts = []
+        count = len(required) // 2
+        while count:
+            selected = required[:count]
+            deferred = list(dict.fromkeys(required[count:] + work['inputs'].get('deferred_evidence_ids', [])))
+            inputs = {**work['inputs'], 'evidence_ids': selected,
+                      'required_evidence_ids': selected, 'deferred_evidence_ids': deferred}
+            candidate = {**work, 'inputs': inputs}
+            agent, mode, preview_task, options = self._context(candidate)
+            proposed = agent.prepare(mode, preview_task, **options)
+            effective_limit = self.config.get('max_effective_context_bytes', self.config.get('max_input_bytes', 131072))
+            fits = proposed['status'] == 'ready' and proposed['input_bytes'] <= effective_limit
+            attempts.append({'required_count': count, 'status': proposed['status'],
+                             'input_bytes': proposed.get('input_bytes'), 'fits_empty_native_context': fits})
+            if fits:
+                key = 'literature-capacity-replan:' + work['id'] + ':' + str(work['version'])
+                def replan(tx):
+                    current = tx.get('work', work['id'])
+                    if current != work or current.get('effect_id') or current['status'] != 'ready':
+                        raise ValueError('Literature work changed during local capacity planning')
+                    reg = {'kind': 'literature_capacity_replan', 'task_id': task['id'],
+                        'work_id': work['id'], 'original_work_ref': tx.blob(work),
+                        'failed_plan_ref': tx.blob(failed_plan), 'selected_evidence_ids': selected,
+                        'deferred_evidence_ids': deferred, 'attempts': attempts,
+                        'planned_packet_sha256': proposed['packet_sha256'],
+                        'models_executed': 0, 'tools_executed': 0}
+                    tx.insert('registration', identity('literature_capacity_replan', key), reg)
+                    return tx.update('work', work['id'], {'inputs': inputs})
+                self._mutate(key, 'literature_capacity_replanned', replan,
+                    {'work_id': work['id'], 'selected_evidence_ids': selected,
+                     'deferred_evidence_ids': deferred, 'failed_plan_sha256': digest(failed_plan)})
+                return self.prepare_meta(work['id'], reservations)
+            count //= 2
+        reason = 'The smallest complete requested source or task cannot fit the configured Literature context.'
+        key = 'literature-capacity-stop:' + work['id'] + ':' + str(work['version'])
+        def stop(tx):
+            current = tx.get('work', work['id'])
+            if current != work or current.get('effect_id') or current['status'] != 'ready':
+                raise ValueError('Literature work changed before its capacity disposition')
+            result = {'answer': 'Research could not complete within the source-reading capacity.',
+                'coverage_status': 'unresolved', 'stop_reason': 'source_context_capacity',
+                'limitations': [reason, 'Cached originals remain available; no omitted source was marked as read.'],
+                'claims': []}
+            returned = self._publish_research(tx, task, result, [], key, complete=True)
+            tx.insert('registration', identity('literature_capacity_stop', key), {
+                'kind': 'literature_capacity_stop', 'task_id': task['id'], 'work_id': work['id'],
+                'original_work_ref': tx.blob(work), 'failed_plan_ref': tx.blob(failed_plan),
+                'attempts': attempts, 'lab_work_id': returned['lab_work_id'],
+                'models_executed': 0, 'tools_executed': 0})
+            return tx.update('work', work['id'], {'status': 'cancelled',
+                'outcome_ref': tx.blob({'reason': reason, 'resolution': 'unresolved_returned_to_lab', **returned})})
+        return self._mutate(key, 'literature_capacity_returned_to_lab', stop,
+                            {'work_id': work['id'], 'failed_plan_sha256': digest(failed_plan)})
+
+    def recover_literature_work(self, work_id):
+        """Reopen only a certified pre-dispatch capacity block for local planning."""
+        self.store.verify_history(self.run_id)
+        work = self.store.get(self.run_id, 'work', work_id)
+        if work['kind'] != 'literature' or work['status'] != 'blocked' or work.get('effect_id'):
+            raise ValueError('Only undispatched capacity-blocked Literature work may be reopened')
+        outcome = json.loads(self.store.read_blob(work['outcome_ref']))
+        if (outcome.get('status') not in {'packet_unrepresentable', 'blocked_capacity'}
+                or not outcome.get('max_input_bytes')):
+            raise ValueError('Literature recovery cannot reinterpret an execution or integrity failure as capacity')
+        task = self._literature_task(work)
+        related = [e for e in self.store.list(self.run_id, 'effect')
+                   if e.get('metadata', {}).get('literature_task_id') == task['id']]
+        if any(e['status'] in {'prepared', 'dispatching', 'unknown'} or e.get('accounting_unknown') for e in related):
+            raise ValueError('Literature execution must be reconciled before capacity recovery')
+        for session in self.store.list(self.run_id, 'agent_session'):
+            if (session['agent_instance_id'] == task['agent_instance_id']
+                    and session['branch_id'] == task['branch_id']
+                    and (session.get('active_turn_id') or session['status'] == 'recovery_required')):
+                raise ValueError('Literature owner must be quiescent before capacity recovery')
+        key = 'literature-capacity-reopen:' + work_id + ':' + str(work['version'])
+        def reopen(tx):
+            if tx.get('work', work_id) != work:
+                raise ValueError('Literature blocked work changed before recovery')
+            tx.insert('registration', identity('literature_capacity_reopen', key), {
+                'kind': 'literature_capacity_reopen', 'task_id': task['id'], 'work_id': work_id,
+                'original_work_ref': tx.blob(work), 'original_outcome_ref': work['outcome_ref'],
+                'models_executed': 0, 'tools_executed': 0,
+                'resolution': 'Replan the same cached originals under existing context and resource limits'})
+            return tx.update('work', work_id, {'status': 'ready'})
+        return self._mutate(key, 'literature_capacity_reopened', reopen,
+                            {'work_id': work_id, 'original_outcome_ref': work['outcome_ref']})
+
+    def _record_literature_read(self, effect):
+        if effect['kind'] != 'literature':
+            return
+        task = self.store.get(self.run_id, 'registration', effect['metadata']['literature_task_id'])
+        from .literature_reading import source_rows, certified_reads
+        _, certificates = certified_reads(self.store, self.run_id, task,
+                                          source_rows(self.store, self.run_id, task))
+        selected = next((value for value in certificates if value['effect_id'] == effect['id']), None)
+        if selected is not None:
+            key = 'literature-read-receipt:' + effect['id']
+            self._mutate(key, 'literature_originals_read', lambda tx: tx.insert('registration',
+                identity('literature_read_receipt', effect['id']), {
+                    'kind': 'literature_read_receipt', 'task_id': task['id'], **selected,
+                    'authority': 'Authenticated original delivery; not current-turn citation authority'}),
+                {'task_id': task['id'], 'effect_id': effect['id'], 'result_ref': effect['result_ref']})
 
     def _end_literature(self, work, trigger, reason):
         def finish(tx):
             task = self._literature_task(work)
             result = {'answer': 'Research stopped with an unresolved result.', 'coverage_status': 'unresolved',
                 'stop_reason': reason, 'limitations': [reason], 'claims': []}
-            return self._publish_research(tx, task, result, task['evidence_ids'], trigger, complete=True)
+            return self._publish_research(tx, task, result, [], trigger, complete=True)
         return self._mutate('literature-stop:' + trigger, 'literature_stopped', finish,
             {'work_id': work['id'], 'reason': reason})
 
     def _publish_research(self, tx, task, result, evidence_ids, trigger, *, complete):
+        if result.get('claims'):
+            cited = {fid for claim in result['claims'] for fid in claim['evidence_ids']}
+            evidence_ids = [fid for fid in evidence_ids if fid in cited]
         fid = identity('research_result', trigger)
         tx.insert('fact', fid, {'kind': 'source_statement', 'content_ref': tx.blob(result),
-            'provenance': {'delivery_kind': 'summary', 'summary_of': evidence_ids,
+            'provenance': {'delivery_kind': 'summary' if evidence_ids else 'research_status',
+                **({'summary_of': evidence_ids} if evidence_ids else {}),
                 'literature_task_id': task['id'], 'producer': 'literature',
                 'authority': 'research_interpretation_not_validation', 'trigger': trigger}})
         parent = tx.get('agent_owner', task['parent_owner_id'])
@@ -436,6 +571,22 @@ class Runtime:
                     or command['task_id'] != task['id'] or command['task_revision'] != task['task_revision']):
                 raise ValueError('Literature result targets another task or stale revision')
             remaining = self._literature_remaining(task)
+            if action == 'read_cached_evidence':
+                if remaining['model_calls'] < 1 or remaining['steps'] < 1:
+                    result = {'answer': 'Research ended before another source-reading turn could be admitted.',
+                        'coverage_status': 'unresolved', 'stop_reason': 'task_budget_exhausted',
+                        'limitations': ['Cached sources are available but no model reading allowance remains.'], 'claims': []}
+                    return self._publish_research(tx, task, result, [], proposal['id'], complete=True)
+                from .literature_reading import select_cached
+                selected = select_cached(self.store, self.run_id, task, payload)
+                updated = tx.update('registration', task['id'], {'task_revision': task['task_revision'] + 1})
+                next_work = self._literature_work(tx, updated, 'cached-sources:' + proposal['id'],
+                                                required_evidence_ids=selected)
+                tx.insert('registration', identity('literature_cached_read', proposal['id']), {
+                    'kind': 'literature_cached_read', 'task_id': task['id'], 'proposal_id': proposal['id'],
+                    'selection': payload, 'selected_evidence_ids': selected, 'work_id': next_work['id'],
+                    'external_calls': 0, 'authority': 'Scheduled originals; not proof of model delivery'})
+                return {'task_id': task['id'], 'work_id': next_work['id'], 'selected_evidence_ids': selected}
             if action == 'request_diagnostic':
                 if remaining['model_calls'] < 1 or remaining['steps'] < 2:
                     result = {'answer': 'Research ended before another tool and reading turn could be admitted.',
@@ -561,6 +712,7 @@ class Runtime:
             sent_image_manifest_sha256=receipt.get('sent_image_manifest_sha256'),
             image_delivery_verified=receipt.get('image_delivery_verified', False))
         self._commit_agent_turn(effect, receipt)
+        self._record_literature_read(effect)
         if self.scientific_memory and effect['kind'] in {'lab', 'meta'}:
             self.scientific_memory.apply_updates(effect,packet,receipt.get('response'))
         if not existing:
@@ -901,8 +1053,15 @@ class Runtime:
                 self._block_agent_turn(effect, str(exc))
                 agent_recovery.append({'effect_id': effect['id'], 'status': 'blocked', 'reason': str(exc)})
         self.controller.tick(self.run_id)
+        capacity_recovery = []
+        for work in self.store.list(self.run_id, 'work', status='blocked'):
+            if work['kind'] != 'literature' or work.get('effect_id') or not work.get('outcome_ref'):
+                continue
+            outcome = json.loads(self.store.read_blob(work['outcome_ref']))
+            if outcome.get('status') in {'packet_unrepresentable', 'blocked_capacity'} and outcome.get('max_input_bytes'):
+                capacity_recovery.append(self.recover_literature_work(work['id']))
         return {'effects': effects, 'proposals': proposals, 'adapter_results': adapter_results,
-                'agent_recovery': agent_recovery}
+                'agent_recovery': agent_recovery, 'literature_capacity_recovery': capacity_recovery}
 
     def execute_adapter(self, adapter_id, inputs, *, trigger_id, work_id=None):
         adapter = self.adapters.get(adapter_id)
@@ -1009,7 +1168,15 @@ class Runtime:
                 raise ValueError('Adapter conclusions must retain their interpretive identity')
             if len({r['id'] for r in rows}) != len(rows):
                 raise ValueError('Duplicate evidence identities in adapter publication')
+            raw_publication = publication
             def publish(tx):
+                nonlocal publication
+                source_reads = []
+                if adapter_id.startswith('literature.'):
+                    from .literature_sources import canonicalize_publication, source_identity_registration
+                    publication, source_reads = canonicalize_publication(
+                        self.store, self.run_id, effect, raw_publication)
+                rows = publication['facts'] + publication['conclusions']
                 for row in rows:
                     old = tx.find('fact', id=row['id'])
                     content = row['content']
@@ -1023,6 +1190,14 @@ class Runtime:
                         raise ValueError('Adapter tried to replace immutable evidence identity')
                     if not old:
                         tx.insert('fact', row['id'], doc)
+                for read in source_reads:
+                    index = source_identity_registration(read)
+                    prior = tx.find('registration', id=index['id'])
+                    if prior and any(prior[0].get(key) != value for key, value in index.items()):
+                        raise ValueError('Canonical source index changed during publication')
+                    if not prior:
+                        tx.insert('registration', index['id'], {k: v for k, v in index.items() if k != 'id'})
+                    tx.insert('registration', read['id'], {k: v for k, v in read.items() if k != 'id'})
                 iid = effect.get('metadata',{}).get('issue_id')
                 if iid:
                     issue = tx.get('issue',iid)
@@ -1031,7 +1206,10 @@ class Runtime:
                         tx.update('issue',iid,{'evidence_ids':sorted(set(issue['evidence_ids'])|fresh),
                                               'evidence_revision':issue['evidence_revision']+1})
                 return tx.insert('registration', publication_id, {'kind':'adapter_publication','effect_id':effect['id'],
-                    'adapter_id':adapter.adapter_id, 'status':'published', 'publication_ref':tx.blob(publication)})
+                    'adapter_id':adapter.adapter_id, 'status':'published', 'publication_ref':tx.blob(publication),
+                    **({'original_publication_ref': tx.blob(raw_publication),
+                        'source_read_ids': [read['id'] for read in source_reads],
+                        'source_identity_policy': 'literature_source_identity_v1'} if source_reads else {})})
             self._mutate('adapter-publication:' + effect['id'], 'adapter_evidence_published', publish,
                          {'effect_id':effect['id'],'publication_sha256':digest(publication)})
         dep_id = effect.get('metadata',{}).get('dependency_id')

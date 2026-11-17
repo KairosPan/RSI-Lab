@@ -44,6 +44,9 @@ PAYLOADS = {
         'max_tool_calls': {'type': 'integer', 'minimum': 1}}),
     'publish_research_update': RESEARCH_RESULT,
     'complete_research': RESEARCH_RESULT,
+    'read_cached_evidence': obj({'evidence_ids': {**TEXTS, 'maxItems': 16},
+        'document_ids': {**TEXTS, 'maxItems': 16}, 'query': TEXT,
+        'limit': {'type': 'integer', 'minimum': 1, 'maximum': 16}}),
     'recommend_change': obj({'change_kind': {'type':'string','minLength':1},
         'instruction': TEXT, 'capability_id': TEXT, 'capability_version': TEXT,
         'expected_outcome': TEXT, 'measurement': TEXT, 'falsifier': TEXT}),
@@ -68,7 +71,7 @@ PAYLOADS = {
 }
 ACTIONS = {
     'lab': ('request_literature', 'request_diagnostic', 'propose_issue', 'no_action'),
-    'literature': ('request_diagnostic', 'publish_research_update', 'complete_research'),
+    'literature': ('request_diagnostic', 'read_cached_evidence', 'publish_research_update', 'complete_research'),
     'discovery': ('propose_issue', 'request_diagnostic', 'no_action'),
     'disposition': ('request_evidence', 'request_diagnostic', 'narrow_request', 'replan_request', 'ask_user',
                     'request_capability', 'propose_trial', 'park', 'close_issue'),
@@ -222,6 +225,8 @@ def _validate(value, schema):
         raise ValueError('Command field outside the allowed enum')
     if type(value) is int and value < schema.get('minimum', value):
         raise ValueError('Command numeric field below minimum')
+    if type(value) is int and value > schema.get('maximum', value):
+        raise ValueError('Command numeric field above maximum')
     if isinstance(value,str) and len(value) < schema.get('minLength',0):
         raise ValueError('Command text shorter than its minimum length')
     if isinstance(value, dict):
@@ -230,6 +235,8 @@ def _validate(value, schema):
         for key, item in value.items():
             _validate(item, schema['properties'][key])
     if isinstance(value, list):
+        if len(value) > schema.get('maxItems', len(value)):
+            raise ValueError('Command list exceeds its item limit')
         for item in value:
             _validate(item, schema['items'])
 
@@ -295,6 +302,20 @@ class MetaAgent:
                 'and complete_research within the remaining model/tool/step allowances. '
                 'At most one model call remaining means complete_research now. '
                 'A research result is a source-backed interpretation, not scientific validation. ')
+            instructions += (
+                'task.reading_state records prior reading coverage and a cache index across turns and session '
+                'rebuilds. These records, cached summaries and document handles are pointers, not currently '
+                'delivered originals and do not grant citation permission. Before synthesizing sources whose '
+                'relevant passages are absent from this request, use read_cached_evidence to request a small '
+                'set of exact cached evidence_ids, document_ids and/or a query, with limit from 1 to 16. '
+                'The payload evidence_ids are retrieval targets, not command citations. Leave unused selection '
+                'fields empty; at least one selection field must be nonempty. Select relevant original passages '
+                'from all sources needed for the synthesis, including both papers when comparing two papers. '
+                'Do not reacquire or reread an entire document merely to restore citation permission. For new '
+                'reading, use document navigation and bounded relevant locators or passages. Research claims '
+                'must cite complete original source excerpts or delivered source images from THIS request. '
+                'Summaries, partial deliveries and tool observations may describe access or execution limits '
+                'but cannot support scientific claims. ')
             instructions += (
                 'For PDF work, first inspect available text/navigation and identify pages relevant to the question. '
                 'Text extraction does not preserve figure, table or layout fidelity. When a claim depends on a '
@@ -434,6 +455,29 @@ def literature_decision_record(response, packet):
     return copy.deepcopy(record)
 
 
+def _research_original_ids(packet):
+    """Originals actually delivered now; a cache index never grants authority."""
+    attached = {item['evidence_id'] for item in packet['envelope'].get('image_attachments', [])}
+    originals = set()
+    for page in packet['delivery_pages']:
+        if (page.get('complete_source') is not True
+                or page.get('source_kind') not in {'raw_fact', 'source_statement'}):
+            continue
+        try:
+            provenance = json.loads(page['source'])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not isinstance(provenance, dict):
+            continue
+        kind = provenance.get('delivery_kind')
+        if kind not in {'source_excerpt', 'source_image', 'original'}:
+            continue
+        if kind == 'source_image' and (not page.get('image') or page['evidence_id'] not in attached):
+            continue
+        originals.add(page['evidence_id'])
+    return originals
+
+
 def validate_command(response, packet, *, current_versions, authorized_sources=(), capabilities=None, request=None):
     if packet.get('status') != 'ready':
         raise ValueError('A command requires a dispatchable exact packet')
@@ -446,7 +490,15 @@ def validate_command(response, packet, *, current_versions, authorized_sources=(
         raise ValueError('Response contains unregistered fields')
     _validate({key:response.get(key) for key in schema['properties']}, schema)
     command = response['command']
-    _nonempty(command['payload'])
+    if command['action'] == 'read_cached_evidence':
+        payload = command['payload']
+        _nonempty([payload['evidence_ids'], payload['document_ids']])
+        if not (payload['evidence_ids'] or payload['document_ids'] or payload['query'].strip()):
+            raise ValueError('Cached evidence retrieval requires an evidence ID, document ID or query')
+        if any(len(payload[field]) != len(set(payload[field])) for field in ('evidence_ids', 'document_ids')):
+            raise ValueError('Cached evidence retrieval requires distinct evidence and document IDs')
+    else:
+        _nonempty(command['payload'])
     if command['expected_versions'] != current_versions or current_versions != packet['task']['expected_versions']:
         raise ValueError('Stale evidence, issue, or scheduling versions require a new admitted decision')
     if command['issue_id'] != packet['task'].get('issue_id'):
@@ -465,9 +517,12 @@ def validate_command(response, packet, *, current_versions, authorized_sources=(
                 or task['capability_versions'].get(payload['capability_id']) != payload['capability_version']):
             raise ValueError('Literature may use only its pinned registered literature tools')
         if action in {'publish_research_update', 'complete_research'}:
+            originals = _research_original_ids(packet)
             for claim in payload['claims']:
                 if not claim['evidence_ids'] or not set(claim['evidence_ids']).issubset(refs):
                     raise ValueError('Every research claim requires evidence actually delivered in this turn')
+                if not set(claim['evidence_ids']).issubset(originals):
+                    raise ValueError('Research claims require complete original evidence delivered in this turn')
             if payload['coverage_status'] == 'sufficient_for_requested_use' and not payload['claims']:
                 raise ValueError('Sufficient research coverage requires supported claims')
     if action == 'request_literature':

@@ -63,6 +63,74 @@ def _publication_source_view(store, run_id, publication):
     return observed
 
 
+def _canonical_read_bridge(store, run_id, effect, registration, publication):
+    try:
+        return _validate_canonical_read_bridge(store, run_id, effect, registration, publication)
+    except (KeyError, TypeError, AttributeError) as exc:
+        raise ValueError('Malformed canonical source read bridge') from exc
+
+
+def _validate_canonical_read_bridge(store, run_id, effect, registration, publication):
+    """Authenticate source reuse against the current raw receipt and publication.
+
+    A later read may reference an earlier immutable source fact. Only the
+    explicit canonical-source protocol can authorize that cross-effect edge.
+    """
+    from .literature_sources import (IDENTITY_SCHEMA, canonicalize_publication,
+                                     source_identity_registration)
+    from .store import META
+    policy = registration.get('source_identity_policy')
+    if policy is None:
+        if registration.get('source_read_ids') or registration.get('original_publication_ref'):
+            raise ValueError('Canonical source read bridge has no explicit identity policy')
+        return set()
+    if (policy != IDENTITY_SCHEMA or registration.get('effect_id') != effect['id']
+            or registration.get('adapter_id') != effect.get('metadata', {}).get('adapter_id')):
+        raise ValueError('Canonical source read bridge belongs to another effect or policy')
+    original = json.loads(store.read_blob(registration['original_publication_ref']))
+    expected, reads = canonicalize_publication(store, run_id, effect, original)
+    if (not reads or expected != publication
+            or registration.get('source_read_ids') != [row['id'] for row in reads]):
+        raise ValueError('Canonical source read bridge differs from its original publication')
+    receipt = json.loads(store.read_blob(effect['result_ref']))
+    result = receipt.get('result', {})
+    passages = result.get('data', {}).get('passages', []) if isinstance(result.get('data'), dict) else []
+    if (receipt.get('status') != 'succeeded' or result.get('status') not in {'ok', 'partial'}
+            or not isinstance(passages, list)):
+        raise ValueError('Canonical source read bridge lacks a successful original passage receipt')
+    originals = {row['id']: row for row in original['facts']}
+    for read in reads:
+        stored = store.get(run_id, 'registration', read['id'])
+        if ({key: value for key, value in stored.items() if key not in META}
+                != {key: value for key, value in read.items() if key != 'id'}
+                or read['original_publication_sha256'] != registration['original_publication_ref']
+                or originals[read['original_fact_id']]['content'] not in passages):
+            raise ValueError('Canonical source read bridge is not bound to the current receipt')
+        index = source_identity_registration(read)
+        stored_index = store.get(run_id, 'registration', index['id'])
+        if ({key: value for key, value in stored_index.items() if key not in META}
+                != {key: value for key, value in index.items() if key != 'id'}):
+            raise ValueError('Canonical source read bridge has a changed source identity index')
+    return {read['canonical_fact_id'] for read in reads}
+
+
+def _historical_origin_publication(store, run_id, origin):
+    """Verify a retained first-import origin before reusing its source wrapper."""
+    if (not isinstance(origin, dict)
+            or set(origin) != {'run_id', 'effect_id', 'receipt_ref', 'publication_ref', 'historical'}
+            or origin.get('run_id') != run_id or origin.get('historical') is not True):
+        raise ValueError('Repeated historical source has a different original owner')
+    effect = store.get(run_id, 'effect', origin['effect_id'])
+    registrations = store.list(run_id, 'registration', kind='adapter_publication', effect_id=effect['id'])
+    if (effect.get('status') != 'succeeded' or effect.get('accounting_unknown')
+            or effect.get('result_ref') != origin.get('receipt_ref') or len(registrations) != 1
+            or registrations[0].get('publication_ref') != origin.get('publication_ref')):
+        raise ValueError('Repeated historical source lost its original publication binding')
+    publication = json.loads(store.read_blob(origin['publication_ref']))
+    bridged = _canonical_read_bridge(store, run_id, effect, registrations[0], publication)
+    return effect, publication, bridged
+
+
 def _strings(value, name):
     if not isinstance(value, list) or any(not isinstance(x, str) or not x or len(x) > 256 for x in value):
         raise ValueError(name + ' requires explicit bounded identities')
@@ -213,7 +281,7 @@ class ScientificMemory:
                     'locator': row['locator'], 'effect_id': effect_id, 'origin': origin,
                     'status': 'completed', 'independent_replication': False})
 
-    def _observe(self, publication, *, effect_id, operation, origin, projection=None):
+    def _observe(self, publication, *, effect_id, operation, origin, projection=None, reusable_source_ids=()):
         question = self.ensure_question()
         effect = None if effect_id is None else self.store.get(self.run_id, 'effect', effect_id)
         projection = self._projection(publication, projection, effect=effect)
@@ -233,7 +301,19 @@ class ScientificMemory:
                     {'source_kind': f['kind'], 'source_locator': 'full_record', 'origin': origin},
                     question_ids=[question['id']], sources=[source], effect_id=effect_id,
                     authority='recorded_source')
-                records.append(self._append(tx, evidence, 0))
+                existing = self._head(evidence['id'])
+                if existing and f['id'] in reusable_source_ids:
+                    original = self.get(evidence['id'])
+                    if (original['kind'] != 'evidence' or original['authority'] != 'recorded_source'
+                            or original['source_refs'] != [source] or original['question_ids'] != [question['id']]
+                            or original['content'].get('source_kind') != f['kind']
+                            or original['content'].get('source_locator') != 'full_record'):
+                        raise ValueError('Repeated original source differs from its first scientific evidence record')
+                    # The first source evidence/origin is immutable; this tool
+                    # execution still receives its own investigation below.
+                    records.append(original)
+                else:
+                    records.append(self._append(tx, evidence, 0))
             if effect_id is not None or origin.get('effect_id'):
                 record = self._record('investigation', _key('investigation', self.run_id, operation), content,
                     question_ids=[question['id']], sources=sources, effect_id=effect_id,
@@ -272,9 +352,17 @@ class ScientificMemory:
         publications = self.store.list(self.run_id, 'registration', kind='adapter_publication', effect_id=actual['id'])
         if not publications or any(json.loads(self.store.read_blob(p['publication_ref'])) != publication for p in publications):
             raise ValueError('Scientific memory requires the registered adapter publication')
+        if len(publications) != 1:
+            raise ValueError('Scientific memory requires one exact registered publication')
+        bridged = _canonical_read_bridge(self.store, self.run_id, actual, publications[0], publication)
         observed = _publication_source_view(self.store, self.run_id, publication)
+        if any(row['provenance'].get('delivery_kind') == 'source_excerpt'
+               and row['provenance'].get('effect_id') != actual['id']
+               and row['id'] not in bridged for row in observed['facts']):
+            raise ValueError('Reused original source requires its current publication read bridge')
         return self._observe(observed, effect_id=actual['id'], operation='sm:publication:' + actual['id'],
-            origin={'run_id': self.run_id, 'effect_id': actual['id'], 'receipt_ref': actual['result_ref'], 'historical': False})
+            origin={'run_id': self.run_id, 'effect_id': actual['id'], 'receipt_ref': actual['result_ref'], 'historical': False},
+            reusable_source_ids=bridged)
 
     def observe_fact(self, fact_id, *, projection=None, origin=None):
         """Trusted host entry for task inputs or already imported historical facts."""
@@ -763,7 +851,7 @@ class ScientificMemory:
         binding is additionally checked here. This does not run an old adapter.
         """
         selected = None if effect_ids is None else set(effect_ids)
-        results = []
+        results, prior_origins = [], {}
         for registration in source_store.list(source_run_id, 'registration', kind='adapter_publication'):
             eid = registration['effect_id']
             if selected is not None and eid not in selected:
@@ -773,22 +861,66 @@ class ScientificMemory:
                 raise ValueError('Historical scientific effects must be reconciled')
             source_store.read_blob(effect['result_ref'])
             publication = json.loads(source_store.read_blob(registration['publication_ref']))
+            bridged = _canonical_read_bridge(source_store, source_run_id, effect, registration, publication)
             origin = {'run_id': source_run_id, 'effect_id': eid, 'receipt_ref': effect['result_ref'],
                       'publication_ref': registration['publication_ref'], 'historical': True}
             transferred = _copy(_publication_source_view(source_store, source_run_id, publication))
             mapping, image_blobs = {}, {}
+            reusable_sources, legacy_passages = set(bridged), None
             for fact in transferred['facts']:
                 old = source_store.get(source_run_id, 'fact', fact['id'])
                 if (old['content_ref'] != digest(fact['content']) or old['provenance'] != fact['provenance']
-                        or old['provenance'].get('effect_id') != eid):
+                        or old['provenance'].get('effect_id') != eid and fact['id'] not in bridged):
                     raise ValueError('Historical publication/source binding mismatch')
                 content = fact['content']
                 if isinstance(content, dict) and content.get('format') == 'rsi_image_evidence_ref_v1':
                     from . import images
                     image_blobs[content['blob_ref']] = images.decoded_image_bytes(_image_source(source_store, content))
-                mapping[fact['id']] = _key('history_fact', source_run_id, fact['id'], old['content_ref'])
-                fact['id'] = mapping[fact['id']]
+                source_fact_id = fact['id']
+                mapping[source_fact_id] = _key('history_fact', source_run_id, source_fact_id, old['content_ref'])
+                fact['id'] = mapping[source_fact_id]
                 fact['provenance'] = {'historical_scientific_source': origin, 'original_provenance': old['provenance']}
+                prior = self.store.list(self.run_id, 'fact', id=fact['id'])
+                if prior and prior[0]['provenance'] != fact['provenance']:
+                    previous = prior[0]
+                    if (previous['kind'] != fact['kind']
+                            or previous['content_ref'] != digest(content)
+                            or previous['provenance'].get('original_provenance') != old['provenance']):
+                        raise ValueError('Repeated historical source differs from its immutable original')
+                    first_origin = previous['provenance'].get('historical_scientific_source')
+                    token = digest(first_origin)
+                    if token not in prior_origins:
+                        prior_origins[token] = _historical_origin_publication(source_store, source_run_id, first_origin)
+                    first_effect, first_publication, first_bridged = prior_origins[token]
+                    expected = {'id': source_fact_id, 'kind': old['kind'], 'content': content, 'provenance': old['provenance']}
+                    if (expected not in first_publication['facts']
+                            or old['provenance'].get('effect_id') != first_effect['id'] and source_fact_id not in first_bridged):
+                        raise ValueError('Repeated historical source has a forged first-read origin')
+                    if source_fact_id not in bridged:
+                        # A legacy first publication has no canonical marker.
+                        # Importing it after a new canonical read is safe only
+                        # when that retained wrapper has the authenticated bridge
+                        # and this original still belongs to its own raw receipt.
+                        provenance = old['provenance']
+                        if (source_fact_id not in first_bridged or provenance.get('effect_id') != eid
+                                or provenance.get('delivery_kind') != 'source_excerpt'
+                                or provenance.get('result_ref') != effect['result_ref']
+                                or not provenance.get('adapter_id')
+                                or provenance['adapter_id'] != effect.get('metadata', {}).get('adapter_id')):
+                            raise ValueError('Legacy original lacks its owned receipt or canonical reverse bridge')
+                        if legacy_passages is None:
+                            receipt = json.loads(source_store.read_blob(effect['result_ref']))
+                            result = receipt.get('result') if isinstance(receipt, dict) else None
+                            data = result.get('data') if isinstance(result, dict) else None
+                            if (not isinstance(receipt, dict) or receipt.get('status') != 'succeeded'
+                                    or not isinstance(result, dict) or result.get('status') not in {'ok', 'partial'}
+                                    or not isinstance(data, dict) or not isinstance(data.get('passages'), list)):
+                                raise ValueError('Legacy original lacks a successful original passage receipt')
+                            legacy_passages = data['passages']
+                        if content not in legacy_passages:
+                            raise ValueError('Legacy original is absent from its owned tool receipt')
+                        reusable_sources.add(source_fact_id)
+                    fact['provenance'] = _copy(previous['provenance'])
             projection = self._projection(publication, source_store=source_store,
                                           source_run_id=source_run_id, effect=effect)
             for row in projection.get('identities', []):
@@ -804,5 +936,6 @@ class ScientificMemory:
                 return [f['id'] for f in rows]
             op = 'sm:history:' + digest(origin)
             self.store.mutate(self.run_id, op + ':facts', 'scientific_historical_sources_imported', add_facts, payload=transferred)
-            results.append(self._observe(transferred, effect_id=None, operation=op, origin=origin, projection=projection))
+            results.append(self._observe(transferred, effect_id=None, operation=op, origin=origin, projection=projection,
+                                         reusable_source_ids={mapping[fid] for fid in reusable_sources}))
         return {'status': 'imported', 'historical_effects': len(results), 'results': results}

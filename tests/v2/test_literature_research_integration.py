@@ -39,7 +39,7 @@ def publication(effect, receipt):
          'provenance': {'effect_id': effect['id'], 'delivery_kind': 'source_image'}},
         {'id': identity('caption', effect['id']), 'kind': 'source_statement',
          'content': {'caption': receipt['result']['caption']},
-         'provenance': {'effect_id': effect['id'], 'delivery_kind': 'source_excerpt'}}],
+         'provenance': {'effect_id': effect['id'], 'delivery_kind': 'tool_observation'}}],
         'conclusions': [], 'data': {'fixture': True}}
 
 

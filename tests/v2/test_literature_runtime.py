@@ -149,7 +149,7 @@ class LiteratureRuntimeTests(unittest.TestCase):
         rejected = self.emit(work, self.command(work, 'complete_research', self.result(['unread']), ['unread']))
         self.assertEqual(rejected['proposal']['status'], 'rejected')
 
-    def test_two_tool_results_preserve_history_but_only_latest_is_required_and_citable_when_narrowed(self):
+    def test_history_is_cached_and_old_originals_require_explicit_current_delivery(self):
         self.delegate(max_model_calls=5, max_tool_calls=8)
         self.assertEqual(self.request_tool()['proposal']['status'], 'applied')
         self.execute_tool()
@@ -162,31 +162,24 @@ class LiteratureRuntimeTests(unittest.TestCase):
                       'The older source really was delivered in the preceding child turn')
         self.execute_tool()
         work = self.ready('literature')
-        accumulated = work['inputs']['evidence_ids']
+        accumulated = self.task()['evidence_ids']
         self.assertEqual(len(CALLS), 2, 'Both tools must execute through the real adapter/ledger lifecycle')
         self.assertEqual(len(accumulated), 2)
         latest = next(fid for fid in accumulated if fid != older)
         self.assertEqual(accumulated, [older, latest])
-        self.assertEqual(self.task()['evidence_ids'], accumulated)
+        self.assertEqual(work['inputs']['evidence_ids'], [latest])
         self.assertEqual(work['inputs']['required_evidence_ids'], [latest])
         self.assertEqual({row['id'] for row in self.store.list('r', 'fact')}, set(accumulated))
 
         agent, mode, task, options = self.runtime._context(work)
-        arguments = agent.arguments(mode, task, **options)
-        # Derive the limit from the actual role/schema/task envelope, as in
-        # PacketBuilder's narrowing tests. Ordinary small source passages are
-        # sufficient; no fabricated huge documents or removed facts are needed.
-        narrowed = agent.builder.build(**arguments, strategy='narrowed')
-        agent.builder.max_input_bytes = narrowed['input_bytes']
         planned = agent.prepare(mode, task, **options)
         self.assertEqual(planned['status'], 'ready')
-        self.assertEqual(planned['strategy'], 'narrowed')
         packet = agent.for_dispatch(planned, mode, task, **options)
         self.assertEqual(packet['required_evidence_ids'], [latest])
-        self.assertEqual(packet['deferred_evidence_ids'], [older])
         self.assertEqual([page['evidence_id'] for page in packet['delivery_pages']], [latest])
-        self.assertLessEqual(packet['input_bytes'], agent.builder.max_input_bytes)
-        self.assertEqual(self.task()['evidence_ids'], accumulated, 'Narrowing must not erase research history')
+        self.assertEqual(task['reading_state']['cached_original_count'], 2)
+        self.assertTrue(any(row['evidence_id'] == older for row in task['reading_state']['source_index']))
+        self.assertEqual(self.task()['evidence_ids'], accumulated, 'Source selection must not erase research history')
 
         # Previous delivery/persistent history does not authorize an omitted
         # citation in this request, even though the immutable fact still exists.
@@ -196,6 +189,19 @@ class LiteratureRuntimeTests(unittest.TestCase):
         accepted = validate_command(self.command(work, 'complete_research', self.result([latest]), [latest]),
             packet, current_versions=self.runtime.versions(None))
         self.assertEqual(accepted['action'], 'complete_research')
+
+        calls_before = list(CALLS)
+        recalled = self.emit(work, self.command(work, 'read_cached_evidence', {
+            'evidence_ids': [older, latest], 'document_ids': [], 'query': '', 'limit': 2}))
+        self.assertEqual(recalled['proposal']['status'], 'applied', recalled)
+        self.assertEqual(CALLS, calls_before, 'Cache retrieval must not execute another tool')
+        work = self.ready('literature')
+        self.assertEqual(work['inputs']['required_evidence_ids'], [older, latest])
+        done = self.emit(work, self.command(work, 'complete_research', self.result([older, latest]), [older, latest]))
+        self.assertEqual(done['proposal']['status'], 'applied', done)
+        delivered = json.loads(self.store.read_blob(done['effect']['metadata']['plan_ref']))['delivery_pages']
+        self.assertEqual({p['evidence_id'] for p in delivered if p['complete_source']}, {older, latest})
+        self.assertEqual(self.task()['evidence_ids'], accumulated)
 
     def test_task_identity_spoof_is_rejected(self):
         work = self.delegate()
@@ -222,20 +228,29 @@ class LiteratureRuntimeTests(unittest.TestCase):
         self.assertFalse(any(w['kind'] == 'diagnostic' for w in self.controller.ready('r')))
 
     def test_update_returns_sources_to_lab_and_preserves_child_autonomy(self):
-        self.delegate()
+        # Two tool requests, one cache-selection turn, then the update leave
+        # one explicitly budgeted child turn for continuing the active task.
+        self.delegate(max_model_calls=5)
         self.request_tool()
         self.execute_tool()
         cited = self.ready('literature')['inputs']['evidence_ids'][0]
         self.request_tool()
         self.execute_tool()
         work = self.ready('literature')
-        ids = work['inputs']['evidence_ids']
-        self.emit(work, self.command(work, 'publish_research_update', self.result([cited]), [cited]))
+        history = list(self.task()['evidence_ids'])
+        recall = self.emit(work, self.command(work, 'read_cached_evidence', {
+            'evidence_ids': [cited], 'document_ids': [], 'query': '', 'limit': 1}))
+        self.assertEqual(recall['proposal']['status'], 'applied', recall)
+        work = self.ready('literature')
+        result = self.emit(work, self.command(work, 'publish_research_update', self.result([cited]), [cited]))
+        self.assertEqual(result['proposal']['status'], 'applied', result)
         self.assertEqual(self.task()['status'], 'active')
         self.assertEqual({w['kind'] for w in self.controller.ready('r')}, {'lab', 'literature'})
         self.assertEqual(self.ready('literature')['inputs']['agent_instance_id'], work['inputs']['agent_instance_id'])
-        self.assertEqual(self.ready('literature')['inputs']['evidence_ids'], ids)
+        self.assertEqual(self.task()['evidence_ids'], history)
+        self.assertEqual(self.ready('literature')['inputs']['evidence_ids'], [cited])
         self.assertEqual(self.ready('literature')['inputs']['required_evidence_ids'], [cited])
+        self.assertEqual(len(CALLS), 2)
 
     def test_restart_replays_tool_publication_without_another_tool_call(self):
         self.delegate()
@@ -323,10 +338,11 @@ class LiteratureRuntimeTests(unittest.TestCase):
             self.execute_tool()
         self.runtime.recover()
         child = self.ready('literature')
-        self.assertEqual(len(child['inputs']['evidence_ids']), 2)
-        failure = next(fid for fid in child['inputs']['evidence_ids'] if fid != earlier)
+        self.assertEqual(len(child['inputs']['evidence_ids']), 1)
+        failure = child['inputs']['evidence_ids'][0]
+        self.assertNotEqual(failure, earlier)
         self.assertEqual(child['inputs']['required_evidence_ids'], [failure])
-        self.assertEqual(self.task()['evidence_ids'], child['inputs']['evidence_ids'])
+        self.assertEqual(self.task()['evidence_ids'], [earlier, failure])
         fact = self.store.get('r', 'fact', failure)
         self.assertEqual(fact['provenance']['authority'], 'execution_receipt_not_paper_evidence')
 
