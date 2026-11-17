@@ -41,7 +41,7 @@ def main(argv=None):
         help='Trusted installed Python factory, explicitly chosen by the operator; may be repeated')
     sub=p.add_subparsers(dest='command',required=True)
     q=sub.add_parser('init');q.add_argument('--config',required=True)
-    for name in ('status','recover','tick'):sub.add_parser(name)
+    for name in ('status','features','recover','tick'):sub.add_parser(name)
     q=sub.add_parser('register-plan');q.add_argument('--plan',required=True)
     q=sub.add_parser('adapter-run');q.add_argument('--adapter',required=True)
     q.add_argument('--inputs',required=True);q.add_argument('--event',required=True)
@@ -76,6 +76,8 @@ def main(argv=None):
         else:
             runtime=Runtime(store,args.run,adapters=adapters)
             if args.command=='status':result=runtime.status()
+            # Read-only. No identity provider can be given here, so the report says none was passed.
+            elif args.command=='features':result=runtime.feature_report()
             elif args.command=='recover':result=runtime.recover()
             elif args.command=='tick':result=controller.tick(args.run)
             elif args.command=='lab-start':

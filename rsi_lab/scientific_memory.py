@@ -79,6 +79,12 @@ class ScientificMemory:
                        and (question_id is None or r['id'] == question_id or question_id in r['question_ids'])),
                       key=lambda r: (r['id'], r['revision']))
 
+    @staticmethod
+    def _revision(record, current):
+        """``record`` in the form stored when it is appended after revision ``current``."""
+        return _copy({**record, 'schema_version': SCHEMA, 'revision': current + 1,
+                      'supersedes': None if current == 0 else {'id': record['id'], 'revision': current}})
+
     def _append(self, tx, record, expected_revision):
         hid = _key('head', record['id'])
         heads = tx.find('registration', id=hid)
@@ -88,8 +94,7 @@ class ScientificMemory:
             raise ValueError('Stale scientific memory revision')
         if old and old['object_kind'] != record['kind']:
             raise ValueError('Scientific object kind cannot change')
-        record = _copy({**record, 'schema_version': SCHEMA, 'revision': current + 1,
-                        'supersedes': None if current == 0 else {'id': record['id'], 'revision': current}})
+        record = self._revision(record, current)
         rid = _key('revision', record['id'], current + 1)
         tx.insert('registration', rid, {'kind': REVISION, 'schema_version': SCHEMA,
             'object_id': record['id'], 'object_kind': record['kind'],
@@ -111,15 +116,23 @@ class ScientificMemory:
                 'support_check': {'status': 'pending', 'outcome': None},
                 'validated_scope': None}
 
-    def ensure_question(self):
+    def _question_record(self):
         qid = _key('question', self.run_id, 'frozen-task')
-        if self._head(qid):
-            return self.get(qid)
-        record = self._record('question', qid, {'question': self.config.get('goal', 'Investigate the frozen task'),
+        return self._record('question', qid, {'question': self.config.get('goal', 'Investigate the frozen task'),
             'scope': {'task_id': self.config.get('task_id'), 'run_id': self.run_id}, 'status': 'open'},
             authority='task_contract')
+
+    def ensure_question(self):
+        record = self._question_record()
+        if self._head(record['id']):
+            return self.get(record['id'])
         return self.store.mutate(self.run_id, 'sm:root-question', 'scientific_question_registered',
             lambda tx: self._append(tx, record, 0), payload=record)
+
+    def _unregistered_question(self):
+        """The root question as ``ensure_question`` would append it; None once it is registered."""
+        record = self._question_record()
+        return None if self._head(record['id']) else self._revision(record, 0)
 
     def _source(self, fact_id):
         fact = self.store.get(self.run_id, 'fact', fact_id)
@@ -395,10 +408,20 @@ class ScientificMemory:
                 'deferred_count': len(deferred), 'deferred': deferred[:limit],
                 'support_checks': 'pending; recorded interpretation does not establish scientific validity'}
 
-    def prepare_context(self, role, evidence_ids, query=None, budget=16384):
+    def prepare_context(self, role, evidence_ids, query=None, budget=16384, *, read_only=False):
+        """Select objects and their source closure for one request within ``budget``.
+
+        The first call registers the root question. With ``read_only`` nothing
+        is written: a root question still missing is selected as if it had
+        just been appended.
+        """
         if role not in {'lab', 'meta'}:
             raise ValueError('Scientific context requires an authorized run role')
-        self.ensure_question()
+        root = None
+        if read_only:
+            root = self._unregistered_question()
+        else:
+            self.ensure_question()
         _strings(list(evidence_ids), 'evidence_ids')
         limit = budget.get('max_bytes', 16384) if isinstance(budget, dict) else budget
         if type(limit) is not int or limit < 512:
@@ -415,12 +438,17 @@ class ScientificMemory:
         recency = {(r['record']['id'], r['record']['revision']): r['created_seq'] for r in revision_rows}
         baseline = set(evidence_ids)
         candidates = []
-        for record in self.read_history():
+        history = self.read_history()
+        if root is not None:
+            # A real call appends it after every existing revision.
+            history.append(root)
+            recency[(root['id'], root['revision'])] = max(recency.values(), default=0) + 1
+        for record in history:
             if query.get('exclude_interpretations') and record['authority'] == 'model_interpretation':
                 continue
             if query.get('final_review_only') and not query.get('include_historical', False) and self._historical(record):
                 continue
-            current = self._head(record['id'])['revision'] == record['revision']
+            current = record is root or self._head(record['id'])['revision'] == record['revision']
             negative = record['content'].get('outcome') == 'negative'
             if not current and not negative:
                 continue

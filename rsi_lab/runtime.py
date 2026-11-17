@@ -24,6 +24,7 @@ from .improvements import ImprovementLoop, enabled
 from .research_policy import normalize_research_policy
 from .driver_report import build_report
 from .orchestration import Orchestration, orchestration_config
+from .preflight import feature_report, preflight, request_report
 
 
 def recovery_error(stage, item_id, exc):
@@ -65,6 +66,8 @@ class Runtime:
         self.research_policy = normalize_research_policy(self.config.get('research_policy'))
         self.agents = AgentState(store, run_id)
         self.improvements = ImprovementLoop(self) if enabled(self.config,'meta_lab') else None
+        # Kept even when Scientific Memory is off, so a report can say it was passed.
+        self.scientific_identity_provider = scientific_identity_provider
         self.scientific_memory = None
         if enabled(self.config,'scientific_memory'):
             from .scientific_memory import ScientificMemory
@@ -73,6 +76,21 @@ class Runtime:
 
     def _mutate(self, key, event, fn, payload):
         return self.store.mutate(self.run_id, key, event, fn, payload=payload)
+
+    def feature_report(self):
+        """Which research features this run declares, has built and offers to the model; writes nothing."""
+        return feature_report(self)
+
+    def preflight(self, expect, *, work_id=None):
+        """Raise ValueError naming every host expectation this run does not meet; else the feature report.
+
+        With ``work_id`` the request that ready Lab or Meta Work would send is held to them too.
+        """
+        return preflight(self, expect, work_id)
+
+    def request_report(self, work_id):
+        """What the model request for a ready Lab or Meta Work carries; prepares no Effect."""
+        return request_report(self, work_id)
 
     def versions(self, issue_id):
         if issue_id is None:
@@ -141,7 +159,13 @@ class Runtime:
             return proposal
         return self._mutate('observe:' + event_id, 'discovery_admission', apply, payload)
 
-    def _context(self, work, orchestration=None):
+    def _context(self, work, orchestration=None, *, read_only=False):
+        """The agent, mode, task and evidence options of one Lab or Meta request.
+
+        Building a request creates the role's session and the root scientific
+        question on first use. With ``read_only`` neither is created: the
+        request is built as if they had just been, and nothing is written.
+        """
         issue_id = work['issue_id']
         issue = self.store.get(self.run_id, 'issue', issue_id) if issue_id else None
         mode = 'lab' if work['kind'] == 'lab' else 'discovery' if work['kind'] == 'meta_discovery' else 'disposition'
@@ -204,11 +228,15 @@ class Runtime:
         else:
             task['trigger'] = work['inputs'].get('trigger', {})
         role = 'lab' if mode == 'lab' else 'meta'
-        session = self.agents.ensure_session(role, agent_instance_id=work['inputs'].get('agent_instance_id'),
+        owner = dict(agent_instance_id=work['inputs'].get('agent_instance_id'),
             branch_id=work['inputs'].get('branch_id', self.config.get('branch_id', 'main')),
             runtime_binding={'model': self.config.get('model', 'gpt-6-astra'),
                              'effort': self.config.get('effort', 'medium'), 'transport': 'codex_exec_text_v1'})
-        memory = self.agents.read_working_memory(session['id'], actor_session_id=session['id'])
+        if read_only:
+            session, memory = self.agents.preview_session(role, **owner)
+        else:
+            session = self.agents.ensure_session(role, **owner)
+            memory = self.agents.read_working_memory(session['id'], actor_session_id=session['id'])
         if self.scientific_memory:
             # Only trusted host Work can specify a query. This owner's private
             # plan provides retrieval hints, never shared facts or authority.
@@ -234,7 +262,7 @@ class Runtime:
             if work['inputs'].get('final_review_only'):
                 query.update(final_review_only=True, include_historical=False)
             context = self.scientific_memory.prepare_context(role, list(dict.fromkeys(list(evidence_ids)+required)),
-                query=query, budget=self.config.get('scientific_memory_context_bytes',16384))
+                query=query, budget=self.config.get('scientific_memory_context_bytes',16384), read_only=read_only)
             task['scientific_memory'] = context
             required.extend(context['required_evidence_ids'])
         task['agent_state'] = {'session_id': session['id'], 'agent_instance_id': session['agent_instance_id'],
@@ -242,6 +270,11 @@ class Runtime:
             'memory_authority': 'private_unverified_working_state',
             'committed_turn': session['committed_turn']}
         if work['inputs'].get('handoff_id'):
+            if read_only and not self.store.list(self.run_id, 'agent_session', id=session['id']):
+                # The real call creates this session first. A session that new
+                # is never a handoff's recipient, so it is refused the same way.
+                self.store.get(self.run_id, 'agent_handoff', work['inputs']['handoff_id'])
+                raise ValueError('Only the current recipient can read an accepted handoff')
             task['agent_state']['handoff'] = self.agents.handoff_payload(
                 work['inputs']['handoff_id'], actor_session_id=session['id'])
         agent = self.meta_agent_factory(self.packet_builder_factory(catalog, max_input_bytes=self.config.get('max_input_bytes', 131072)),

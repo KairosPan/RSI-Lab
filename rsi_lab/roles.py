@@ -139,6 +139,13 @@ def lab_settings_enabled(orchestration):
     return isinstance(orchestration, dict) and orchestration.get('lab_settings_action') is True
 
 
+def schema_summary(schema):
+    """The actions a response schema admits and its response fields other than ``command``."""
+    return {'actions': [variant['properties']['action']['enum'][0]
+                        for variant in schema['properties']['command']['anyOf']],
+            'extra_fields': [name for name in schema['properties'] if name != 'command']}
+
+
 def _validate(value, schema):
     if 'anyOf' in schema:
         matches = 0
