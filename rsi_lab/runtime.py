@@ -735,6 +735,13 @@ class Runtime:
             return None
         if work['issue_id'] and self.store.get(self.run_id, 'issue', work['issue_id'])['status'] != 'open':
             return None
+        if work['kind'] == 'literature':
+            # A retry the delegated task cannot afford would be refused at
+            # admission on every pass; the task then returns to its Lab instead.
+            remaining = self._literature_remaining(
+                self.store.get(self.run_id, 'registration', work['inputs']['literature_task_id']))
+            if remaining['model_calls'] < 1 or remaining['steps'] < 1:
+                return None
         root_id = work['inputs'].get('retry_of', work['id'])
         key = 'retry:%d:%s' % (attempt, root_id)
         return self.controller.enqueue(self.run_id, work['kind'], key, key, issue_id=work['issue_id'],

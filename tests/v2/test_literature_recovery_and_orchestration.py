@@ -272,6 +272,24 @@ class LiteratureRecoveryAndOrchestrationTests(unittest.TestCase):
         self.assertEqual([row['coverage_status'] for row in self.results()], ['unresolved'])
         self.assertEqual(len(self.returned_to_lab()), 1)
 
+    def test_a_failed_child_call_is_not_retried_beyond_its_own_task_allowance(self):
+        # A retry the task can no longer afford would be refused at admission
+        # forever; the task goes back to the Lab instead.
+        self.open(model_failure_retries=1)
+        self.sequence += 1
+        lab = self.runtime.enqueue_lab('brief-' + str(self.sequence))
+        tight = {**BRIEF, 'max_model_calls': 2, 'max_tool_calls': 1}
+        outcome = self.runtime.run_meta(lab['id'], model(self.reply(lab, 'request_literature', tight)), RES)
+        self.assertEqual(outcome['proposal']['status'], 'applied', outcome['proposal'])
+        self.execute_tool(self.request_tool())
+        self.runtime.run_meta(self.child()['id'], model(None, failed=True), RES)
+        self.assertEqual(self.task()['status'], 'completed')
+        self.assertEqual([row['coverage_status'] for row in self.results()], ['unresolved'])
+        self.assertFalse([work for work in self.controller.ready('r') if work['kind'] == 'literature'])
+        driven = self.runtime.run_until_wait(model(self.reply(self.returned_to_lab()[0], 'no_action',
+                                             {'reason': 'The unresolved research was read.'})), RES, max_steps=1)
+        self.assertEqual([step['proposal_status'] for step in driven['steps']], ['applied'])
+
     def test_a_child_action_blocked_while_routing_returns_the_task_unresolved(self):
         self.open()
         self.delegate()
