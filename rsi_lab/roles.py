@@ -34,6 +34,13 @@ WAIT = obj({'dependency_kind': {'type': 'string', 'enum': ['request', 'question'
 PAYLOADS = {
     'recommend_change': obj({'change_kind': {'type':'string','minLength':1},
         'instruction': TEXT, 'capability_id': TEXT, 'capability_version': TEXT,
+        'execution_contract_json': {'type': 'string', 'description':
+            'Required machine-checkable execution contract JSON. Use {"version":1,"kind":"exact_inputs",'
+            '"inputs":{...complete diagnostic inputs...}}, or {"version":1,"kind":"constraints",'
+            '"requirements":[{"path":["field"],"operator":"equals","value":...}]}. '
+            'Constraints must be nonempty; operators: equals, one_of, contains_all, min, max. '
+            'Paths are explicit object keys or array indices. Constraints apply to adapter-normalized inputs. '
+            'Natural language alone cannot certify adoption; request correspondence does not prove execution or benefit.'},
         'expected_outcome': TEXT, 'measurement': TEXT, 'falsifier': TEXT}),
     'propose_issue': obj({'title': TEXT, 'problem_kind': {'type': 'string', 'enum': ['missing_information', 'missing_capability', 'method_conflict', 'anomaly', 'omitted_prerequisite']},
                           'scope': TEXT, 'hypothesis': TEXT, 'competing_explanations': TEXTS,
@@ -79,16 +86,26 @@ COMMON = (
 
 
 def response_schema(mode, *, working_memory=False, research_features=None, final_review_only=False, research_policy=None,
-                    lab_settings=False):
+                    lab_settings=False, recommendation_admission=None, interpretation_only=False):
     if mode not in ACTIONS:
         raise ValueError('Unsupported Meta-agent mode')
     config = {'research_features':research_features}
     policy = normalize_research_policy(research_policy)
     actions = ACTIONS[mode] + (('recommend_change',) if enabled(config,'meta_lab') and mode != 'lab' else ())
+    if recommendation_admission is not None:
+        if (not isinstance(recommendation_admission, dict)
+                or type(recommendation_admission.get('allowed')) is not bool):
+            raise ValueError('Recommendation admission must contain an explicit allowed boolean')
+        if not recommendation_admission['allowed']:
+            actions = tuple(action for action in actions if action != 'recommend_change')
     if lab_settings and mode == 'disposition':
         actions += ('propose_lab_settings',)
     if final_review_only:
         actions = ('close_issue',) if mode == 'disposition' else ('no_action',)
+    if interpretation_only:
+        if mode != 'lab' or not enabled(config, 'scientific_memory'):
+            raise ValueError('A batch interpretation requires Lab scientific memory')
+        actions = ('no_action',)
     variants = []
     for action in actions:
         payload = copy.deepcopy(PAYLOADS[action])
@@ -199,11 +216,14 @@ class MetaAgent:
                   owner_interpretation=None, prior_review=None, page_cursors=None):
         features = task.get('constraints',{}).get('research_features')
         final_review_only = task.get('constraints',{}).get('final_review_only',False)
+        interpretation_only = task.get('constraints',{}).get('interpretation_only',False)
         policy = normalize_research_policy(task.get('constraints',{}).get('research_policy'))
         orchestration = task.get('constraints',{}).get('orchestration')
         lab_settings = lab_settings_enabled(orchestration)
+        admission = task.get('constraints',{}).get('research_loop',{}).get('recommendation_admission')
         response_schema(mode,research_features=features,final_review_only=final_review_only,research_policy=policy,
-                        lab_settings=lab_settings)
+                        lab_settings=lab_settings, recommendation_admission=admission,
+                        interpretation_only=interpretation_only)
         if stage not in ('initial', 'challenge'):
             raise ValueError('Unsupported review stage')
         if mode == 'discovery' and stage == 'initial' and (owner_interpretation is not None or prior_review is not None):
@@ -211,7 +231,7 @@ class MetaAgent:
         if mode == 'discovery' and stage == 'initial':
             allowed = {'goal', 'issue_id', 'expected_versions', 'trigger', 'target', 'protocol_version',
                        'run_id', 'branch_id', 'batch_id', 'study_id', 'capability_catalog',
-                       'authorized_sources', 'constraints', 'agent_state', 'scientific_memory'}
+                       'authorized_sources', 'constraints', 'agent_state', 'scientific_memory', 'decision_dependencies'}
             if not set(task).issubset(allowed):
                 raise ValueError('Raw-first discovery task contains an unregistered interpretation field')
             for eid in self.builder._closure(list(evidence_ids) + list(required_evidence_ids)):
@@ -255,11 +275,18 @@ class MetaAgent:
                 'never code execution or permission changes. Base recommend_change on delivered original '
                 'evidence and an exact registered capability. A Lab call must respond once to EACH recommendation in '
                 'constraints.research_loop.recommendations: adopt, decline or defer with a reason and evidence. Adoption must request '
-                'the recommended diagnostic in THIS SAME call, with actual inputs implementing the advice. At most one deferral is '
+                'the recommended diagnostic in THIS SAME call, with actual inputs satisfying its frozen execution_contract_json. '
+                'Create an explicit exact_inputs or nonempty constraints contract; free text alone cannot verify implementation. '
+                'Historical advice without a frozen execution contract must be declined or deferred, never adopted as verified. '
+                'Request-input matching and publication coverage are separate from scientific benefit. At most one deferral is '
                 'revisited. Meta result-review calls must review each named executed recommendation, cite the measurement and raw '
                 'results, then use no_action; they cannot create a new recommendation. Execution success, local observations and '
                 'causal benefit are different: without a controlled comparison causal benefit remains not_established. '
                 'Return an empty response/review array when none are due. ')
+            if admission is not None:
+                instructions += ('The controller publishes recommendation_admission with allowed, reason, remaining lifetime '
+                    'allowance and blocking pending recommendation identities. A positive remaining count is not current '
+                    'permission to recommend: use only actions present in this response schema. ')
             if not final_review_only and policy.get('recommendation_guidance'):
                 instructions += '\nHost recommendation guidance:\n' + policy['recommendation_guidance'] + '\n'
         if enabled({'research_features':features},'scientific_memory'):
@@ -267,6 +294,19 @@ class MetaAgent:
                 'Use it to track questions, hypotheses, experiments, evidence, local world-model revisions, disagreements and outcomes. '
                 'Objects and relationships are not proof: inspect delivered originals, preserve conflicting evidence and uncertainty, '
                 'and propose only warranted updates through scientific_memory_updates. Use [] when no supported update is needed. ')
+        if interpretation_only:
+            instructions += ('This is a BATCH INTERPRETATION turn, before any next candidate decision. '
+                'No tool or recommendation action is available. For EACH investigation in constraints.batch_interpretation '
+                'write a source-bound decision in scientific_memory_updates with nonempty content.result_interpretation, '
+                'content.decision and content.scope, its existing question_id and exact investigation id/revision '
+                'as a derived_from object_ref. Cite its complete original result sources. Record what the result '
+                'supports or contradicts and what should change in the next decision; do not invent a new measurement. '
+                'Use command no_action. Missing, deferred or rejected interpretations keep the next Lab decision blocked. '
+                'The subsequent decision receives these exact interpretation revisions and their original sources. ')
+        elif task.get('constraints', {}).get('batch_interpretation'):
+            instructions += ('The previous batch interpretation is delivered with its original sources. '
+                'Use its measured outcomes and limits when choosing the next action; state in working memory '
+                'which prior result motivates retaining or changing the next experiment. ')
         if final_review_only:
             instructions += ('This is a bounded FINAL REVIEW ONLY. The controller has restricted this call to reviewing delivered results; '
                 'that restriction does not establish task completion or success. '
@@ -304,7 +344,8 @@ class MetaAgent:
                 'Closing an unresolved issue must remain explicitly unresolved; the controller checks duties. ')
         return dict(mode=mode, instruction=instructions, schema=response_schema(mode, working_memory='agent_state' in task,
                     research_features=features,final_review_only=final_review_only,research_policy=policy,
-                    lab_settings=lab_settings), task=task,
+                    lab_settings=lab_settings, recommendation_admission=admission,
+                    interpretation_only=interpretation_only), task=task,
                     evidence_ids=evidence_ids, required_evidence_ids=required_evidence_ids, model=self.model,
                     effort=self.effort, owner_interpretation=owner_interpretation, prior_review=prior_review,
                     page_cursors=page_cursors)
@@ -323,7 +364,9 @@ def validate_command(response, packet, *, current_versions, authorized_sources=(
     features = packet['task'].get('constraints',{}).get('research_features')
     schema = response_schema(mode,research_features=features,
                              final_review_only=packet['task'].get('constraints',{}).get('final_review_only',False),
+                             interpretation_only=packet['task'].get('constraints',{}).get('interpretation_only',False),
                              research_policy=packet['task'].get('constraints',{}).get('research_policy'),
+                             recommendation_admission=packet['task'].get('constraints',{}).get('research_loop',{}).get('recommendation_admission'),
                              lab_settings=lab_settings_enabled(packet['task'].get('constraints',{}).get('orchestration')))
     if not isinstance(response, dict) or set(response) - (set(schema['properties']) | {'working_memory_delta'}):
         raise ValueError('Response contains unregistered fields')
@@ -406,16 +449,19 @@ def discovery_trigger(*, event_id, trigger_kind, batch_index, last_open_review_b
         raise ValueError('Discovery counters and source event must be explicit')
     if type(interval_batches) is not int or interval_batches < 1:
         raise ValueError('Open review interval must be positive')
-    anomaly = trigger_kind in ('coded_anomaly', 'input_changed', 'tool_failed', 'new_evidence')
+    anomaly = trigger_kind in ('coded_anomaly', 'input_changed', 'tool_failed')
     if anomaly:
         if not anomaly_evidence_ids:
             raise ValueError('Triggered review requires actual raw-event evidence references')
         return {'admitted': True, 'mode': 'discovery', 'entry': 'anomaly', 'trigger_id': event_id,
                 'evidence_ids': list(anomaly_evidence_ids), 'open_review_charge': 0}
+    if trigger_kind == 'new_evidence' and not anomaly_evidence_ids:
+        raise ValueError('New-evidence review requires actual evidence references')
     due = batch_index - last_open_review_batch >= interval_batches
     admitted = due and open_reviews_used < max_open_reviews
     return {'admitted': admitted, 'mode': 'discovery', 'entry': 'open_review', 'trigger_id': event_id,
-            'evidence_ids': [], 'open_review_charge': 1 if admitted else 0,
+            'evidence_ids': list(anomaly_evidence_ids) if trigger_kind == 'new_evidence' else [],
+            'open_review_charge': 1 if admitted else 0,
             'reason': 'admitted' if admitted else ('discovery_budget_exhausted' if due else 'not_due')}
 
 
@@ -428,6 +474,7 @@ def initial_review_receipt(packet, response, *, effect_id, response_ref):
     _validate(response.get('command'), response_schema('discovery',
         research_features=packet['task'].get('constraints',{}).get('research_features'),
         final_review_only=packet['task'].get('constraints',{}).get('final_review_only',False),
+        recommendation_admission=packet['task'].get('constraints',{}).get('research_loop',{}).get('recommendation_admission'),
         research_policy=packet['task'].get('constraints',{}).get('research_policy'))['properties']['command'])
     return {'mode': 'discovery', 'stage': 'initial', 'effect_id': effect_id,
             'packet_sha256': packet['packet_sha256'], 'response_sha256': digest(encoded(response)),
@@ -454,7 +501,9 @@ class CodexExecutor:
                 or request['mode'] not in ACTIONS or not request['prompt'].startswith(transport.PREAMBLE)
                 or request['response_schema'] != response_schema(request['mode'], working_memory=session is not None,
                     research_features=metadata.get('research_features'),final_review_only=metadata.get('final_review_only',False),
+                    interpretation_only=metadata.get('interpretation_only', False),
                     research_policy=metadata.get('research_policy'),
+                    recommendation_admission=metadata.get('recommendation_admission'),
                     lab_settings=lab_settings_enabled(metadata.get('orchestration')))):
             raise ValueError('Unsupported exact model request envelope')
         try:
@@ -464,6 +513,11 @@ class CodexExecutor:
             raise ValueError('Model packet must contain its exact research task and policy') from exc
         if packet_policy != normalize_research_policy(metadata.get('research_policy')):
             raise ValueError('Model packet policy differs from the admitted effect policy')
+        if data['task'].get('constraints', {}).get('interpretation_only', False) != metadata.get('interpretation_only', False):
+            raise ValueError('Model packet interpretation mode differs from its frozen effect metadata')
+        packet_admission = data['task'].get('constraints',{}).get('research_loop',{}).get('recommendation_admission')
+        if packet_admission != metadata.get('recommendation_admission'):
+            raise ValueError('Model packet recommendation admission differs from its frozen effect metadata')
         effect_id = effect['id']
         if not isinstance(effect_id, str) or not effect_id or Path(effect_id).name != effect_id or effect_id in ('.', '..'):
             raise ValueError('Unsafe model effect identity')

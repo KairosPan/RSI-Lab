@@ -48,6 +48,7 @@ def feature_report(runtime):
     return {'run_id': runtime.run_id,
             'scientific_memory': {'declared': enabled(config, 'scientific_memory'),
                                   'service': runtime.scientific_memory is not None},
+            'batch_interpretation_capabilities': sorted(runtime.batch_interpretations.capabilities),
             'meta_lab': {'declared': enabled(config, 'meta_lab'), 'service': runtime.improvements is not None},
             'orchestration': {'declared': 'orchestration' in config, 'service': runtime.orchestration is not None},
             # Scientific Memory calls it; a value it cannot call supplies no identities.
@@ -120,6 +121,7 @@ def request_report(runtime, work_id):
     return {'work_id': work_id, 'work_kind': work['kind'], 'mode': mode, 'status': status, 'reason': reason,
             'present': {path: _carries(sent, path) for path in REQUEST_BLOCKS.values()},
             'final_review_only': sent['constraints'].get('final_review_only') is True,
+            'interpretation_only': sent['constraints'].get('interpretation_only') is True,
             'capabilities': sorted(sent['capability_catalog']), **summary,
             'input_bytes': planned['input_bytes'] if planned else None,
             'packet_sha256': planned['packet_sha256'] if planned else None}

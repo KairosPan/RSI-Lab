@@ -449,7 +449,7 @@ class RequestReportTests(unittest.TestCase):
     def test_a_discovery_request_is_reported_as_sent(self):
         store, controller, rt = open_run(self, config=ALL_ON, adapters=[validating_adapter()])
         controller.add_fact('r', 'f1', 'raw_fact', {'x': 1}, {'source': 'fixture'}, 'k1')
-        report = self.same_packet(rt, rt.observe('e1', 'new_evidence', 0, ['f1'])['work_id'])
+        report = self.same_packet(rt, rt.observe('e1', 'input_changed', 0, ['f1'])['work_id'])
         self.assertEqual((report['work_kind'], report['mode']), ('meta_discovery', 'discovery'))
         self.assertEqual(report['present'], {**ABSENT, 'task.scientific_memory': True,
                                              'task.constraints.research_loop': True,
@@ -487,7 +487,7 @@ class RequestReportTests(unittest.TestCase):
         store, controller, rt = open_run(self)
         controller.add_fact('r', 'f1', 'raw_fact', {'x': 1}, {'source': 'fixture'}, 'k1')
         rt.run_lab(rt.enqueue_lab('lab-1', ['f1'])['id'], Scripted({'lab': none}, receipt=with_memory), RES)
-        rt.run_meta(rt.observe('e1', 'new_evidence', 0, ['f1'])['work_id'], Scripted({'discovery': none}), RES)
+        rt.run_meta(rt.observe('e1', 'input_changed', 0, ['f1'])['work_id'], Scripted({'discovery': none}), RES)
         sessions = {row['role']: row['id'] for row in store.list('r', 'agent_session')}
         handoff = rt.agents.propose_handoff(sessions['lab'], sessions['meta'], ['next_step'], 'Share the plan', 'h1')
         work_id = rt.agents.accept_handoff(handoff['id'], sessions['meta'], 'h1-accept')['target_work_id']
@@ -503,7 +503,7 @@ class RequestReportTests(unittest.TestCase):
         store, controller, rt = open_run(self)
         controller.add_fact('r', 'f1', 'raw_fact', {'x': 1}, {'source': 'fixture'}, 'k1')
         rt.run_lab(rt.enqueue_lab('lab-1', ['f1'])['id'], Scripted({'lab': none}), RES)
-        rt.run_meta(rt.observe('e1', 'new_evidence', 0, ['f1'])['work_id'], Scripted({'discovery': none}), RES)
+        rt.run_meta(rt.observe('e1', 'input_changed', 0, ['f1'])['work_id'], Scripted({'discovery': none}), RES)
         sessions = {row['role']: row['id'] for row in store.list('r', 'agent_session')}
         handoff = rt.agents.propose_handoff(sessions['lab'], sessions['meta'], ['next_step'], 'Share the plan', 'h1')
         rt.agents.accept_handoff(handoff['id'], sessions['meta'], 'h1-accept')
@@ -810,10 +810,10 @@ class UnchangedRunTests(unittest.TestCase):
         rt.feature_report()
         executor = Scripted({'lab': lambda d: ('propose_issue', ISSUE), 'disposition': lambda d: CLOSE})
         rt.run_until_wait(executor, RES, max_steps=12)
-        # The identities test_orchestration pins for a run without any feature.
+        # The current no-orchestration baseline includes decision dependencies.
         self.assertEqual([e['packet_hash'] for e in by_seq(store.list('r', 'effect'))],
-                         ['9a35bfbd5afd8f2726a8e7889e081c4c4bb3e7a28f2419c404c7d9b8fc336f1d',
-                          'c2a56d33a9d971086c6194d69e6a91fb2f525c0b3eca6c94463a858b5b17230e'])
+                         ['6a92b964b7d817973c1e34f98c471e06137358fe34d1562957f184760528527f',
+                          '889273ceb15ca270fe5d7f4ad8abc4deeb3e6515d8a1d2be4fc4f32b8634b365'])
         store.verify_history('r')
 
 

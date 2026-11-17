@@ -151,6 +151,9 @@ class Orchestration:
         publication = ledger.one('registration', identity('publication', tool['id']))
         if publication is None or publication['status'] != 'complete':
             return 'unfinished', None, None
+        semantic = ledger.one('registration', identity('semantic_result', tool['id']))
+        if semantic is not None:
+            return semantic['outcome'], semantic['reason_code'], None
         content = ledger.read(publication['publication_ref'])
         seq = publication['created_seq']
         for row in content['facts'] + content['conclusions']:

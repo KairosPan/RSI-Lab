@@ -57,6 +57,20 @@ class Adapter:
     # Optional domain interpretation of a settled publication. The controller
     # stores its JSON result separately from controller-owned execution facts.
     measure: Callable | None = None
+    # Optional trusted, read-only domain hooks. Admission runs in the same
+    # transaction that creates diagnostic Work; context is bounded public state.
+    admit_work: Callable | None = None
+    context: Callable | None = None
+    claim_identities: Callable | None = None
+    completed_identities: Callable | None = None
+    progress: Callable | None = None
+    # Pure request normalization and separate publication coverage checks.
+    recommendation_normalize: Callable | None = None
+    recommendation_completion: Callable | None = None
+    decision_dependencies: Callable | None = None
+    # Original facts the model must have received completely and explicitly
+    # cited before requesting this operation (e.g. an executable method plan).
+    required_evidence: Callable | None = None
 
     def __post_init__(self):
         for value in (self.adapter_id, self.version, self.effect_kind):
@@ -69,6 +83,12 @@ class Adapter:
         if not isinstance(self.manifest, dict) or not self.manifest:
             raise ValueError('Adapter must describe its applicability and contracts')
         encode(self.manifest)
+        if 'recommendation_contract_kinds' in self.manifest:
+            kinds = self.manifest['recommendation_contract_kinds']
+            if (not isinstance(kinds, list) or not kinds or any(
+                    not isinstance(k, str) or k not in {'exact_inputs', 'constraints'} for k in kinds)
+                    or len(kinds) != len(set(kinds))):
+                raise ValueError('Adapter recommendation_contract_kinds must be an explicit nonempty supported allowlist')
         if type(self.requires_acceptance) is not bool:
             raise ValueError('Explicit adapter acceptance policy is required')
         for fn in (self.prepare, self.reservations, self.execute, self.publication):
@@ -76,12 +96,19 @@ class Adapter:
                 raise ValueError('A registered adapter requires executable callbacks')
         if self.measure is not None and not callable(self.measure):
             raise ValueError('An adapter measurement provider must be callable')
+        for name in ('admit_work', 'context', 'claim_identities', 'completed_identities', 'progress',
+                     'recommendation_normalize', 'recommendation_completion', 'decision_dependencies', 'required_evidence'):
+            if getattr(self, name) is not None and not callable(getattr(self, name)):
+                raise ValueError('An adapter ' + name + ' provider must be callable')
 
     def descriptor(self):
         sources, callbacks = {}, {}
         names = ('prepare','reservations','execute','publication')
         if self.measure is not None:
             names += ('measure',)
+        names += tuple(name for name in ('admit_work', 'context', 'claim_identities', 'completed_identities', 'progress',
+                                        'recommendation_normalize', 'recommendation_completion', 'decision_dependencies', 'required_evidence')
+                       if getattr(self, name) is not None)
         for name in names:
             fn = getattr(self,name)
             if not inspect.isfunction(fn) or fn.__closure__:

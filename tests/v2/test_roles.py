@@ -136,6 +136,19 @@ class RoleTests(unittest.TestCase):
         # Both calls are proposals, not quota mutations; root persists their trigger IDs.
         self.assertEqual(roles.discovery_trigger(**args), roles.discovery_trigger(**args))
 
+    def test_new_evidence_uses_ordinary_quota_while_failure_still_bypasses_it(self):
+        args = dict(event_id='result', trigger_kind='new_evidence', batch_index=5,
+                    last_open_review_batch=0, open_reviews_used=0, max_open_reviews=1,
+                    interval_batches=5, anomaly_evidence_ids=['actual-result'])
+        ordinary = roles.discovery_trigger(**args)
+        self.assertEqual(ordinary['entry'], 'open_review')
+        self.assertEqual(ordinary['open_review_charge'], 1)
+        self.assertEqual(ordinary['evidence_ids'], ['actual-result'])
+        self.assertFalse(roles.discovery_trigger(**{**args, 'open_reviews_used': 1})['admitted'])
+        self.assertFalse(roles.discovery_trigger(**{**args, 'batch_index': 4})['admitted'])
+        self.assertTrue(roles.discovery_trigger(**{**args, 'trigger_kind': 'tool_failed',
+                                                   'open_reviews_used': 1})['admitted'])
+
 
 class ExecutorTests(unittest.TestCase):
     def setUp(self):

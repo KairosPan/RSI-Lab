@@ -20,6 +20,7 @@ RSI-Lab 的内核负责可追踪执行、Lab/Meta 协作和可恢复的研究状
 - `execute`：执行已持久保存且处于派发状态的调用，返回实际结果和成本。
 - `publication`：把核验结果映射为原始事实、来源陈述、验证结论与应用结果。
 - 可选 `measure`：产生有界任务指标，内核保留原始执行凭据，不解释分数方向。
+- 可选 `required_evidence(store, run_id, inputs)`：声明此请求必须读取并引用的原始事实。Runtime 核对这些事实已完整交付到实际模型请求，并出现在命令引用中；只提交来源 ID 或摘要卡片不够。回调与其他 Adapter 代码一起绑定源码身份。
 
 `Runtime(..., adapters=[...])` 接收宿主选择的能力；`execute_adapter(adapter_id, inputs, trigger_id=...)` 负责调用前预约、保存回执与发布。适配器身份、版本、回调与实现 hash 绑定到执行，恢复时不会按任务名称猜测实现。每个回调的代码 hash 覆盖其字节码、名称与常量，不随这段代码所在的文件名或行号变化，也不随进程内存中的其他内容变化；列出的源文件仍按绝对路径和整个文件内容绑定，因此移动模块或编辑这些文件中的任何内容都会改变描述符，变更前已准备的 Effect 会被报告为 `blocked_adapter`。
 
@@ -49,6 +50,16 @@ RSI-Lab 的内核负责可追踪执行、Lab/Meta 协作和可恢复的研究状
 
 ## Scientific Memory 与独立工作记忆
 
+### 决策依赖的研究状态
+
+`versions(issue_id)` 的三个字段仅表示 issue 的局部版本；没有 issue 时它们仍为 0，不承担研究状态新鲜度证明。每次 Runtime 请求另带 `task.decision_dependencies`（`decision_dependencies_v1`），其规范化 token 与相同的 Effect metadata 绑定。它记录本轮引用的原始来源、SM 对象及引用闭包、source correction、pending review、同研究问题的新增对象、具体建议和方法配置，以及受信宿主声明的查询范围与成员指纹。
+
+请求正文和依赖清单在同一个 SQLite 只读快照中生成。内核在 Effect 准备、派发 CAS、proposal 准入及首个行动写事务中复验；过期的未派发请求取消并退还预留费用，后续使用新请求。已返回但依赖过期的回答记为 `blocked_stale`，不能创建评分任务或提交其科学记忆更新。预算记账、agent turn、私有工作记忆及无关研究问题不使依赖失效。
+
+首个行动与 `decision_commit` 同事务落盘，封存实际响应及依赖 token；崩溃后只幂等完成这个既定意图，不能把原回答解释成另一动作。未提交的历史调用若没有清单，须重新决策；历史已经提交的意图保留 `legacy_unversioned`，不补造当时的新鲜度证明。
+
+领域通过源码固定的 `Adapter.decision_dependencies(store, run_id)` 或受信 Work 的 `decision_dependency_selectors` 声明新增相关状态的查询范围。selector 使用 `kind` 加 `id` 或 `where`，可用 `fields` 投影语义字段，支持严格的等值及 `$in`、`$contains`、`$exists`。成员数量和内容指纹一起校验，既覆盖已知对象修改，也覆盖范围内新增对象。宿主须声明领域读取的额外动态状态；内核不从任意工具代码推断这些依赖。PABLO 已声明评分轨迹、排队任务、候选占用和文献执行状态。
+
 Lab/Meta 的持久会话提供工作连续性，各自的工作记忆保存计划、尝试与未决问题。共享 Work/Effect 账本保存已承诺动作、执行结果和费用。Scientific Memory 保存有来源约束的研究状态，三者不能互相替代。跨角色协作通过显式 Handoff/Work，不能直接读写另一角色的私有工作记忆。
 
 启用冻结配置中的 `research_features.scientific_memory` 后，`ScientificMemory` 在同一 SQLite 的 registration 表保存六类对象：`question`、`evidence`、`claim`、`investigation`、`method_experience` 与 `decision`。修订只追加，head 指向当前版本，来源正文与执行回执仍以原有事实/blob 为权威。它不是一个预填研究结果的独立文件，也不依赖外部向量数据库。
@@ -64,11 +75,57 @@ Lab/Meta 的持久会话提供工作连续性，各自的工作记忆保存计�
 
 对象身份与条件由受信 `scientific_identity_provider` 提供。模型解释默认保留待支持检查状态；保存合法对象不等于完成语义蕴含验证。新来源与负结果可登记为共享证据，但不会自动变成普遍适用的方法经验。精确源码见 [Scientific Memory](../rsi_lab/scientific_memory.py)，会话、日志与恢复边界见[持久 Agent 说明](persistent-agents.md)。
 
+普通决策的检索在强制对象之后，将剩余预算分给当前结果和历史经验两个类别，空余可互借；经验包括 `claim`、`method_experience`、`decision`，按来源关联、文本相关性、负结果和版本排序，避免 pending 调查数量吞掉全部历史经验空间。`query.related_evidence_ids` 仅为有界排序提示，不授予证据使用权限或豁免正文预算。最终复核仍优先本次未解释调查。每个对象连同来源闭包计费；强制对象无法完整装入时报告阻塞，不截断来源。返回的 `retrieval` 字段说明检索策略和各类对象数量。
+
+### 逐批解释屏障
+
+宿主可冻结 `batch_interpretation_capabilities`，列出需要“结果解释完成后再决策”的能力 ID；该功能要求 Scientific Memory。内核不判断何为评分批次或分数改善。
+
+指定工具完成发布后，内核创建持久解释屏障和专用 Lab Work。该请求的 `interpretation_only` 为真，工具目录为空，动作只允许 `no_action`，但仍要求合法的 Scientific Memory 更新。同 Lab 实例、同分支的普通决策被阻塞。只有这次解释轮成功写入每个调查的当前、来源完整的解释，才原子释放屏障并唤醒下一次决策；延后、空更新或借用其他轮次的解释不算完成。
+
+下一次决策强制获得该批调查、固定版本的解释和原始事实。屏障集合也进入决策依赖清单；撤回解释或来源变化会使续行失败。已准备工具在派发事务内复查，所以延迟发布的旧结果不能被准备阶段与执行阶段之间的空档跳过。恢复不重复执行、解释或唤醒；存在未完成解释且无可运行解释任务时返回 `blocked_interpretation`，不能冒充正常完成。
+
+这证明解释已经写入并交付后续决策，不证明模型正确理解了结果。实现及交错回归见 [batch_interpretations.py](../rsi_lab/batch_interpretations.py) 和 [test_batch_interpretations.py](../tests/v2/test_batch_interpretations.py)。未配置该功能的旧运行保留原流程。
+
 ## Meta 的发现与复核
 
 Meta 使用 discovery 与 disposition 模式，共享问题账本。前者从目标、当时可见事实、来源和能力说明提出问题及区分解释的检查；后者推进查询、重规划、提问、能力建设、试验或明确等待。
 
 领域检查表是工具能力，不是发现模式的完整问题空间。仅复述预先列出的缺口不能证明自主发现。研究模式的 Meta→Lab 建议由来源绑定，实际采用、工具执行、测量与复核分别留痕。推荐类别与最终复核语义由任务宿主提供，内核不推断任务是搜索、最大化或最小化。
+
+建议创建有两个独立的冻结配置：`max_recommendations` 是整轮累计创建上限（内核默认 8），`max_pending_recommendations` 是同时未完成建议上限（默认 1）。二者必须是非负整数；布尔值、字符串、小数或显式 `null` 无效。任一上限为 0 时禁止新建建议，但保留已有结果复核与其他适用动作。
+
+`proposed`、`deferred`、`adopted`、`executed` 都占未完成名额；工具执行完毕还需 Meta 复核。进入 `reviewed`、`declined` 或 `deferred_closed` 才释放未完成名额，不返还累计创建额度。未被接纳、没有创建建议记录的 proposal 不占累计额度。并发协调者创建建议时，内核在同一写事务内再次检查两个上限。
+
+实际请求中的 `task.constraints.research_loop.recommendation_admission` 提供 `total_limit`、`total_created`、`remaining`、`pending_limit`、`pending_count`、未完成建议 ID/状态以及 `allowed`、`reason`。容量已满、累计额度耗尽或正在进行限定复核时，该请求的输出 schema 不包含 `recommend_change`。这份状态随 Effect 冻结；执行器校验它与真实请求一致。通用功能报告只说明功能已注册，具体动作是否可用应查看该次 `request_report`。
+
+`recommend_change` 必须给出 `execution_contract_json`。例如 `{"version":1,"kind":"exact_inputs","inputs":{"candidates":["a","b"]}}` 要求实际请求参数完全匹配；`constraints` 则给出非空 `requirements`，每项明确 `path`、`operator`、`value`，可用 `equals`、`one_of`、`contains_all`、`min`、`max`。路径是对象键或非负数组索引，缺少路径、类型不匹配或任一约束失败都拒绝采纳。合同和适配器源码身份在建议创建时冻结；响应验证与创建诊断 Work 的同一事务分别检查实际参数，不能凭工具名、版本相同就声称实施了建议。
+
+Adapter 的 `recommendation_normalize(store, run_id, inputs)` 可提供只读、确定性的领域参数规范化。`manifest.recommendation_contract_kinds` 可限制合同类型，例如完整候选集合或完整查询必须使用 `['exact_inputs']`。采纳记录 `adoption_verification`，其 `verification_scope` 是 `request_inputs`；历史无合同建议不能获得验证采纳标记，仍可明确拒绝或延后。旧测量记录原样保留。
+
+请求参数匹配并不证明实际完成。独立的 `recommendation_completion(contract, effect, publication)` 回调只检查真实发布结果覆盖范围，生成 `measurement.contract_completion`（`verification_scope=publication_coverage`）。返回 `complete`、`partial` 或 `unsupported`；无回调时为 `unsupported`。预算裁剪等部分产出仍记录真实执行并交给 Meta 复核，不冒充全部完成；以上状态均不证明科学收益或因果改善。
+
+普通 `new_evidence` 与 `batch_boundary` 都受 `open_review_interval_batches` 和 `max_open_reviews` 控制。`coded_anomaly`、`input_changed`、`tool_failed` 仍需实际来源证据，可触发不占普通额度的处理；已经承诺的执行结果复核不因普通发现额度耗尽而取消。
+
+## 工具入队、占用与结果发布
+
+同一 `branch_id`、`agent_instance_id` 的 Lab 提交工具后，下一次 Lab 决策要等工具执行及结果发布完成。普通工具 Work 先于普通 Lab/Meta Work 调度；独立分支不受这一分支屏障限制。兼容且尚未冻结的 Lab 唤醒合并，并保留所有来源、必读证据和建议引用；冻结请求、修复、重试及最终复核不合并。Effect 准备事务再次检查分支屏障和 Work 版本，避免请求构造期间新增通知被漏读。
+
+Adapter 可提供源码固定的 `claim_identities(store, run_id, inputs)` 与 `completed_identities(effect, publication)`。前者返回包含实验条件的规范化身份；内核在同一个写事务内全有或全无地取得占用并创建诊断 Work。后者只声明本次实际完成的身份。已知失败或取消释放占用，未知执行及未知费用保留占用，成功且发布完成后才标记为已覆盖；未产出或被预算裁剪的身份释放。冲突记录为 `waiting_existing` 或 `covered`，保留原 Work/Effect 归属，不给后来的建议虚构执行成果。
+
+Adapter 的可选 `progress(effect, publication)` 返回 `query`、`state`、`result`、`new_scores`、`information_units`。前三项应排除 receipt/Effect 等运行身份；后两项为非负整数。内核按适配器版本和语义内容复用 canonical evidence；重复结果保留原始回执，但不重复触发 discovery 或新增 Scientific Memory 来源。描述随首次发布冻结，通知恢复无需重新安装插件。没有该回调的适配器沿用事实内容去重；内核不自行推断领域信息增益。
+
+显式启用逐批解释的能力例外：即使语义结果重复，也为该次真实执行保留调查和解释义务，不能因去重绕过屏障；这不把重复结果计为信息增益。
+
+### 恢复的完成记录与性能边界
+
+`Runtime.recover()` 每次仍先通过 `Controller.recover()` 完整核对事件链、事件 blob 和 SQLite 投影。随后批量读取本轮恢复索引，用持久的 `runtime_effect_completion` 记录筛选真正需要恢复的模型和工具调用；完整处理过的历史调用不再逐个重新进入 `apply_meta()` 或 `publish_adapter_effect()`，避免“历史调用数 × 全量验账”的开销。
+
+完成记录只在全部后处理之后写入。模型记录绑定 Effect、终态 proposal 和终态 agent turn；工具记录绑定 Effect 和 complete publication，并位于占用清理之后。模型回答已提交但 proposal 尚未应用、publication 已完成但占用尚未清理、未知费用或未结束的原生 writer，都不能用一个成功状态跳过恢复。完成记录包含处理器版本；以后新增必须恢复的后处理义务时需要更新该版本。旧账本缺少记录时保守重放一次并补记，后续恢复才使用快速路径。
+
+快速路径仍校验相关冻结输入、回执、发布材料及来源事实的内容哈希和绑定。仅凭事件 head 不变不足以证明这些文件未变化。去重读取只在当前一次恢复内存在，不跨恢复调用缓存验证结果。独立调用公共恢复/应用/发布接口仍验账，准备与派发的状态、版本和费用校验保留。
+
+这项优化减少已经完成工作被重复处理的成本，不把全量验证变成常数时间，也不减少研究流程要求的模型轮次。回归覆盖历史 blob/projection 篡改、多个提交阶段间崩溃、重启后持久完成记录，以及历史数量增加时稳态全量验账次数保持一次。
 
 ## Meta 调整 Lab 编排
 
@@ -80,7 +137,7 @@ Meta 使用 discovery 与 disposition 模式，共享问题账本。前者从目
 
 `no_result_steps`（下称 N）取 2 到 64，`max_changes` 取 0 到 20，两个键都必须写，出现其他键即拒绝。`init` 和 `Runtime` 都做这个检查，运行开始后不能修改。`max_changes` 为 0 时只发信号，Meta 不能改设置。
 
-**步骤与新结果。** 一次 Lab 模型调用算一步。模型服务明确失败、从未派发就被取消、仅做最终复核的调用不算。Lab 请求的工具成功发布，且至少一条事实的内容在更早的事实里没有出现过，这一步才算“新结果”。重复内容、提议被拒或被阻塞、工具拒绝输入、工具明确失败、工具调用在派发前被取消、`no_action` 和 `propose_issue` 都算没有新结果。调用、提议或工具结果还没结清的步骤算未结束。
+**步骤与新结果。** 一次 Lab 模型调用算一步。模型服务明确失败、从未派发就被取消、仅做最终复核的调用不算。Lab 请求的工具成功发布后，优先采用领域 `progress` 生成的语义结果记录判断有无新评分或新信息；没有该回调时，才按事实内容是否首次出现判断。重复回执、提议被拒或被阻塞、工具拒绝输入、工具明确失败、工具调用在派发前被取消、`no_action` 和 `propose_issue` 都算没有新结果。调用、提议或工具结果还没结清的步骤算未结束。
 
 **信号。** 最近一个新结果之后的步骤构成一段无结果期，用第一步的 Effect 标识命名。期内步骤都结束后，满足以下任一条件就发信号：
 
@@ -140,7 +197,7 @@ Meta 使用 discovery 与 disposition 模式，共享问题账本。前者从目
 | --- | --- | --- |
 | Scientific Memory | 运行配置 `research_features.scientific_memory` 为 `true` | `task.scientific_memory`，响应字段 `scientific_memory_updates` |
 | 领域身份 | `Runtime(..., scientific_identity_provider=...)`，传一个函数。不传时 Scientific Memory 照常工作，但发布的结果没有领域身份 | 不进请求包 |
-| Meta→Lab 反馈闭环 | 运行配置 `research_features.meta_lab` 为 `true` | `task.constraints.research_loop`；Meta 多出动作 `recommend_change` 和响应字段 `improvement_reviews`，Lab 多出响应字段 `recommendation_responses` |
+| Meta→Lab 反馈闭环 | 运行配置 `research_features.meta_lab` 为 `true` | `task.constraints.research_loop` 提供额度与未完成名额；仅在本轮接纳状态允许时，Meta schema 包含 `recommend_change`。Meta 响应保留 `improvement_reviews`，Lab 响应包含 `recommendation_responses` |
 | 领域指标 | 适配器的 `measure` 回调，并且反馈闭环已启用。没有时闭环的测量只有执行凭据 | 不进请求包 |
 | 推荐类别与复核指引 | 运行配置 `research_policy`，至少一个字段 | `task.constraints.research_policy` |
 | Meta 调整 Lab 编排 | 运行配置里有 `orchestration` 块 | `task.constraints.orchestration`；`max_changes` 大于 0 时处置模式多出动作 `propose_lab_settings` |

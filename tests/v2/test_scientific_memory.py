@@ -240,6 +240,97 @@ class ScientificMemoryTests(unittest.TestCase):
         self.assertIn('large', context['required_evidence_ids'])
         self.assertEqual(context['additional_source_bytes'], 0)
 
+    def test_pending_flood_preserves_relevant_historical_negative_experience(self):
+        self.add_fact('thermal-history', {'measurement': 'Thermal cycling reversed the earlier trend',
+                                        'raw_trace': 'complete historical instrument record'})
+        self.memory.observe_fact('thermal-history', projection={'experience': {
+            'summary': 'Thermal cycling was unstable; repeating that temperature ramp failed',
+            'scope': {'method': 'thermal cycling', 'condition': 'fast ramp'}, 'outcome': 'negative'}})
+        historical = next(r for r in self.memory.read_history(kind='method_experience')
+                          if r['content']['scope'].get('method') == 'thermal cycling')
+        for i in range(14):
+            e, pub = self.publication('recent-' + str(i), 'CURRENT-' + str(i))
+            self.memory.observe_publication(e, pub)
+        latest = next(r for r in self.memory.read_history(kind='investigation') if r['source_effect_id'] == e['id'])
+        query = {'text': 'Choose the next thermal cycling ramp after the temperature instability'}
+        context = self.memory.prepare_context('lab', ['recent-13'], query=query, budget=9000)
+        selected = {r['id']: r for r in context['objects']}
+        self.assertIn(historical['id'], selected)
+        self.assertIn(latest['id'], selected)
+        self.assertEqual(selected[historical['id']]['content']['outcome'], 'negative')
+        self.assertIn('thermal-history', context['required_evidence_ids'])
+        self.assertEqual(context['retrieval']['policy'], 'balanced_results_and_experience')
+        self.assertLessEqual(context['bytes'] + context['additional_source_bytes'], 9000)
+        self.assertGreater(context['omission_count'], 0)
+        hinted = self.memory.prepare_context('lab', ['recent-13'],
+            query={'related_evidence_ids': ['thermal-history']}, budget=9000)
+        self.assertIn(historical['id'], {r['id'] for r in hinted['objects']})
+        self.assertGreater(hinted['additional_source_bytes'], 0)
+        # Final review retains its separate priority and does not silently turn
+        # imported/historical investigations into this run's review obligations.
+        final = self.memory.prepare_context('lab', ['recent-13'],
+            query={**query, 'final_review_only': True}, budget=9000)
+        self.assertEqual(final['objects'][0]['id'], latest['id'])
+        self.assertNotIn(historical['id'], {r['id'] for r in final['objects']})
+        self.assertEqual(final['retrieval']['policy'], 'pending_review_first')
+
+    def test_related_evidence_is_a_ranking_hint_not_free_source_authority(self):
+        self.add_fact('large-related', {'measurement': 'not in the current packet', 'trace': 'x' * 20000})
+        self.memory.observe_fact('large-related', projection={'experience': {
+            'summary': 'A related method failed', 'scope': {'method': 'trial'}, 'outcome': 'negative'}})
+        target = next(r for r in self.memory.read_history(kind='method_experience')
+                      if r['content']['scope'].get('method') == 'trial')
+        query = {'related_evidence_ids': ['large-related'], 'object_ids': [target['id']]}
+        context = self.memory.prepare_context('lab', [], query=query, budget=9000)
+        self.assertEqual(context['status'], 'blocked')
+        self.assertIn(target['id'], context['missing_required_objects'])
+        self.assertNotIn('large-related', context['required_evidence_ids'])
+        self.assertTrue(any(r['id'] == target['id'] and r['reason'] == 'byte_budget' for r in context['omissions']))
+        # Actually delivered evidence can be shared; a ranking hint alone
+        # cannot waive its cost or become permission for a model update.
+        delivered = self.memory.prepare_context('lab', ['large-related'], query=query, budget=9000)
+        self.assertEqual(delivered['status'], 'ready')
+        self.assertIn(target['id'], {r['id'] for r in delivered['objects']})
+        self.assertEqual(delivered['additional_source_bytes'], 0)
+        for invalid in ('large-related', [1], ['x' * 257], ['same', 'same'], [str(i) for i in range(129)]):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                self.memory.prepare_context('lab', [], query={'related_evidence_ids': invalid})
+
+    def test_mandatory_objects_override_lane_shares_and_unavailable_sources_block(self):
+        self.assertEqual(self.apply(self.update('mandatory-experience', kind='method_experience',
+            content={'summary': 'A deliberately detailed negative experiment ' + 'detail ' * 200,
+                     'scope': {'method': 'bounded test'}, 'outcome': 'negative'}))['status'], 'applied')
+        query = {'object_ids': ['mandatory-experience']}
+        context = self.memory.prepare_context('lab', [], query=query, budget=6000)
+        self.assertEqual(context['status'], 'ready')
+        self.assertIn('mandatory-experience', {r['id'] for r in context['objects']})
+        self.assertIn('f1', context['required_evidence_ids'])
+        self.assertLessEqual(context['bytes'] + context['additional_source_bytes'], 6000)
+        source_ref = self.store.get('r', 'fact', 'f1')['content_ref']
+        original = self.store.read_blob
+        def missing(ref):
+            if ref == source_ref:
+                raise FileNotFoundError('Unavailable source fixture')
+            return original(ref)
+        with patch.object(self.store, 'read_blob', side_effect=missing):
+            blocked = self.memory.prepare_context('lab', [], query=query, budget=6000)
+        self.assertEqual(blocked['status'], 'blocked')
+        self.assertEqual(blocked['missing_required_objects'], ['mandatory-experience'])
+        self.assertTrue(any(r['id'] == 'mandatory-experience' and r['reason'] == 'source_unavailable'
+                            for r in blocked['omissions']))
+
+    def test_unused_result_allowance_is_borrowed_by_experience(self):
+        for i in range(8):
+            self.assertEqual(self.apply(self.update('experience-' + str(i), kind='method_experience',
+                content={'summary': 'A measured negative method outcome ' + str(i),
+                         'scope': {'attempt': i}, 'outcome': 'negative'}))['status'], 'applied')
+        full = self.memory.prepare_context('lab', ['f1'], budget=100000)
+        budget = full['bytes'] + 2548
+        context = self.memory.prepare_context('lab', ['f1'], budget=budget)
+        self.assertEqual({r['id'] for r in context['objects'] if r['kind'] == 'method_experience'},
+                         {'experience-' + str(i) for i in range(8)})
+        self.assertLessEqual(context['bytes'] + context['additional_source_bytes'], budget)
+
     def test_new_question_and_claim_can_be_committed_together(self):
         question = self.update('subquestion', 'question', sources=[], content={'question': 'Does A generalize?'})
         claim = self.update(); claim['question_ids'] = ['subquestion']

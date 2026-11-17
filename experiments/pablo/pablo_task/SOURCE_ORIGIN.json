@@ -1,0 +1,97 @@
+{
+  "source_checkout": "/Users/pan/.codex/worktrees/pablo-200-rounds/RSI-Lab",
+  "scope": "Independent domain package; rsi_lab remains the generic PR4 runtime.",
+  "files": [
+    {
+      "source": "/Users/pan/.codex/worktrees/pablo-200-rounds/RSI-Lab/rsi_domains/pablo/adapter.py",
+      "destination": "pablo_task/adapter.py",
+      "source_sha256": "3d7dbf178f009e535c911197403b7b4845f280027497dd32c636604004064a79",
+      "destination_sha256": "3d7dbf178f009e535c911197403b7b4845f280027497dd32c636604004064a79",
+      "byte_identical": true
+    },
+    {
+      "source": "/Users/pan/.codex/worktrees/pablo-200-rounds/RSI-Lab/rsi_domains/pablo/oracle.py",
+      "destination": "pablo_task/oracle.py",
+      "source_sha256": "f5327b4e5aaa4cd48525617fbb09b729cecd332044f776cf401fe7fee766074e",
+      "destination_sha256": "f5327b4e5aaa4cd48525617fbb09b729cecd332044f776cf401fe7fee766074e",
+      "byte_identical": true
+    },
+    {
+      "source": "/Users/pan/.codex/worktrees/pablo-200-rounds/RSI-Lab/rsi_domains/pablo/lookup.py",
+      "destination": "pablo_task/lookup.py",
+      "source_sha256": "425ee8371330a2c5324833fed683c4d325370147dfb6395f46e6ab3af1089a8e",
+      "destination_sha256": "425ee8371330a2c5324833fed683c4d325370147dfb6395f46e6ab3af1089a8e",
+      "byte_identical": true
+    },
+    {
+      "source": "/Users/pan/.codex/worktrees/pablo-200-rounds/RSI-Lab/rsi_domains/pablo/research.py",
+      "destination": "pablo_task/research.py",
+      "source_sha256": "5c4133c0aa3d1297887aa1d801fe05681f61ae43cae0016974db6eb1e56be041",
+      "destination_sha256": "06acd3422e91ff31d60d6562fbce5fa07b2740ba9f361c4d256229c78a7bbb8d",
+      "byte_identical": false
+    },
+    {
+      "source": "/Users/pan/.codex/worktrees/pablo-200-rounds/RSI-Lab/rsi_domains/pablo/__init__.py",
+      "destination": "pablo_task/__init__.py",
+      "source_sha256": "f0fb293e7db3d3b3295af797d76cd66c4bf0a77c2372c7a611773d6a7ced9008",
+      "destination_sha256": "f0fb293e7db3d3b3295af797d76cd66c4bf0a77c2372c7a611773d6a7ced9008",
+      "byte_identical": true
+    },
+    {
+      "source": "/Users/pan/.codex/worktrees/pablo-200-rounds/RSI-Lab/rsi_domains/literature/adapter.py",
+      "destination": "pablo_task/literature/adapter.py",
+      "source_sha256": "4112c305ca01ed5e6b36e078433ceec769f8f3746e3a859460efdef291ca8a6d",
+      "destination_sha256": "4112c305ca01ed5e6b36e078433ceec769f8f3746e3a859460efdef291ca8a6d",
+      "byte_identical": true
+    },
+    {
+      "source": "/Users/pan/.codex/worktrees/pablo-200-rounds/RSI-Lab/rsi_domains/literature/smoke.py",
+      "destination": "pablo_task/literature/smoke.py",
+      "source_sha256": "a0c23f16b1f92975607c59a3ef979998e76ec8e144124986044889c31a3de188",
+      "destination_sha256": "f72e25d56e9289161aba3fad896208adb087926d3a941be4af94a3370850593e",
+      "byte_identical": false
+    },
+    {
+      "source": "/Users/pan/.codex/worktrees/pablo-200-rounds/RSI-Lab/rsi_domains/literature/__init__.py",
+      "destination": "pablo_task/literature/__init__.py",
+      "source_sha256": "81af31ffeb245ddbbfab92cf88c278efb35991865261830f28e1fbffd373cf3b",
+      "destination_sha256": "81af31ffeb245ddbbfab92cf88c278efb35991865261830f28e1fbffd373cf3b",
+      "byte_identical": true
+    },
+    {
+      "source": "/Users/pan/.codex/worktrees/pablo-200-rounds/RSI-Lab/rsi_domains/literature/README.md",
+      "destination": "pablo_task/literature/README.md",
+      "source_sha256": "2fb0dbf735b42fd092d25f761480274a0ada7030e41c2bd4a977f87d6f3c5325",
+      "destination_sha256": "7788a9c25dd97504711429e9725d451c89f668fd5439d38bbe25600c4848ccce",
+      "byte_identical": false
+    },
+    {
+      "source": "/Users/pan/.codex/worktrees/pablo-200-rounds/RSI-Lab/tests/test_pablo_adapter.py",
+      "destination": "tests/test_pablo_adapter.py",
+      "source_sha256": "2a82a9471d6f7ba0fd36837d412f048310ed26b1c3b10fbc5a4c318b962bed0d",
+      "destination_sha256": "3600493bafa9157644e7a4c40a4b827a3fa15a17790a3c9d0eb804acfa7f5859",
+      "byte_identical": false
+    },
+    {
+      "source": "/Users/pan/.codex/worktrees/pablo-200-rounds/RSI-Lab/tests/test_pablo_lookup.py",
+      "destination": "tests/test_pablo_lookup.py",
+      "source_sha256": "c6647caf563a4f4ecef2ebcd5e0a3e77b31df92d81884c11b5363db07e7582f5",
+      "destination_sha256": "137735882d67df6e482e501509c5478ad856829d35ef34579a282036d33a5344",
+      "byte_identical": false
+    },
+    {
+      "source": "/Users/pan/.codex/worktrees/pablo-200-rounds/RSI-Lab/tests/test_literature_adapter.py",
+      "destination": "tests/test_literature_adapter.py",
+      "source_sha256": "b746865d998697053b352a401111637b8abd26c062482a2e865f4cead1c5954b",
+      "destination_sha256": "c27b2e2d26a916a28def11c0da27648e705011fd783076dc0b23735bb1f069ca",
+      "byte_identical": false
+    },
+    {
+      "source": "/Users/pan/.codex/worktrees/pablo-200-rounds/RSI-Lab/tests/test_research_domain_boundary.py",
+      "destination": "tests/test_research_domain_boundary.py",
+      "source_sha256": "39c6f3193729091dcd369f439395dbff47e08cffb4ebc40a3dcec5b284376c79",
+      "destination_sha256": "2dc70d9ccfc9ec5a6ec111dc7764f434f100d10cc3e376fa51560d98baf53a2b",
+      "byte_identical": false
+    }
+  ]
+}

@@ -62,7 +62,8 @@ class AdapterBoundaryTests(unittest.TestCase):
         self.root=Path(self.tmp.name)
         self.store=Store(self.root/'ledger');self.addCleanup(self.store.close)
         self.controller=Controller(self.store)
-        self.controller.initialize('r',budgets={'tool_calls':{'limit':10,'hard':True}})
+        self.controller.initialize('r',budgets={'tool_calls':{'limit':10,'hard':True}},
+                                   config={'open_review_interval_batches':1})
         self.adapter=fixture_adapter()
         self.runtime=Runtime(self.store,'r',adapters=[self.adapter])
         EXECUTIONS.clear()
