@@ -33,7 +33,7 @@ TITLE = 'The Sequence Alignment/Map format and SAMtools'
 PDF_URL = 'https://dash.harvard.edu/bitstreams/7312037c-6b3b-6bd4-e053-0100007fdf3b/download'
 GOAL = f'''完成一篇真实论文的 Literature 工具验收：{TITLE} (2009)。
 Lab 先委派一个 Literature 子任务，分配 max_model_calls=18、max_tool_calls=36，
-启用目录里的全部8个 literature 能力；将以下步骤和限制完整传给子任务。
+工具目录由宿主固定，Lab 不枚举或启用工具；将以下验收要求和限制交给子任务。
 1. 先通过 Europe PMC search_papers 按标题检索(limit=2)，核对论文身份，再 get_paper。
 2. acquire_fulltext(provider=europe_pmc, preferred_format=xml) 获取全文，
    read_document(max_bytes=24000) 从头读到 next_cursor 为空，覆盖全文而不只摘要。

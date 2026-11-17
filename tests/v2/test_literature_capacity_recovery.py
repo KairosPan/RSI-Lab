@@ -162,7 +162,7 @@ class LiteratureCapacityRecoveryTests(unittest.TestCase):
         emit(runtime.enqueue_lab('capacity-parent'), 'request_literature', {
             'question': 'Which control is reported?', 'intended_use': 'Bounded source inspection',
             'scope': 'One synthetic paper', 'deliverables': ['An original passage'],
-            'capability_ids': ['literature.read_document'], 'max_model_calls': 8, 'max_tool_calls': 6})
+            'max_model_calls': 8, 'max_tool_calls': 6})
         emit(ready('literature'), 'request_diagnostic', {'capability_id': 'literature.read_document',
             'capability_version': '1.0.0', 'inputs_json': '{"document_id":"paper"}'},
             delta={'next_step': 'Preserve the control passage across capacity reconstruction'})

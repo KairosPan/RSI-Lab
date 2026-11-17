@@ -164,8 +164,7 @@ class Runtime:
             task['reading_state']['deferred_from_this_work_count'] = len(
                 work['inputs'].get('deferred_evidence_ids', []))
             task['goal'] = delegated['question']
-            task['capability_catalog'] = {cid: desc for cid, desc in task['capability_catalog'].items()
-                if delegated['capability_versions'].get(cid) == desc['version']}
+            task['capability_catalog'] = self._literature_capability_catalog(delegated)
         else:
             # Scientific interpretation and Meta/Lab recommendation governance
             # remain with their authorized top-level roles. The child receives
@@ -237,6 +236,11 @@ class Runtime:
                                                           task['capability_catalog'])
             if literature_context is not None:
                 task['literature_context'] = literature_context
+                # Lab commissions research; the child receives operation and
+                # provider schemas and chooses how to do that research.
+                if literature_context.get('delegation_version'):
+                    task['capability_catalog'] = {cid: row for cid, row in task['capability_catalog'].items()
+                                                  if not cid.startswith('literature.')}
         if work['inputs'].get('handoff_id'):
             task['agent_state']['handoff'] = self.agents.handoff_payload(
                 work['inputs']['handoff_id'], actor_session_id=session['id'])
@@ -310,10 +314,22 @@ class Runtime:
             return self._mutate('session-context-block:' + work_id, 'packet_unrepresentable',
                 lambda tx: tx.update('work', work_id, {'status': 'blocked', 'outcome_ref': tx.blob(context)}),
                 {'work_id': work_id, 'context': context})
+        delegation_metadata = {}
+        if mode == 'lab' and task.get('literature_context', {}).get('delegation_version'):
+            from .literature_context import LITERATURE_DELEGATION_VERSION, literature_tool_catalog
+            delegation_context = task['literature_context']
+            snapshot = literature_tool_catalog(self.capability_catalog())
+            if (delegation_context['delegation_version'] != LITERATURE_DELEGATION_VERSION
+                    or digest(snapshot) != delegation_context['tool_catalog_sha256']):
+                raise ValueError('Literature tool catalog changed during Lab request preparation')
+            delegation_metadata = {'literature_delegation_version': LITERATURE_DELEGATION_VERSION,
+                'literature_tool_catalog_sha256': digest(snapshot),
+                'literature_tool_catalog_ref': self.store.put_blob(snapshot)}
         plan_ref = self.store.put_blob({key: value for key, value in packet.items() if key != 'envelope_bytes'})
         kind = mode if mode in {'lab', 'literature'} else 'meta'
         return self.controller.prepare_effect(self.run_id, work_id, kind, packet['envelope_bytes'], reservations,
             'prepare-agent:' + work_id, metadata={'mode': mode, 'plan_ref': plan_ref, 'issue_id': work['issue_id'],
+                **delegation_metadata,
                 **({'literature_task_id': work['inputs']['literature_task_id'],
                     'task_revision': work['inputs']['task_revision']} if mode == 'literature' else {}),
                 'agent_session_id': session['id'], 'agent_session': session,
@@ -392,6 +408,23 @@ class Runtime:
                 e.get('actual_costs', {}).get(resource, 0) + e.get('held_reservations', {}).get(resource, 0)
                 for e in effects)
         return remaining
+
+    def _literature_capability_catalog(self, task):
+        """Expose only the child's immutable admission, never a later expansion."""
+        catalog = self.capability_catalog()
+        selected = {cid: row for cid, row in catalog.items()
+                    if task['capability_versions'].get(cid) == row['version']}
+        version = task.get('delegation_version')
+        if version is None:
+            return selected
+        from .literature_context import LITERATURE_DELEGATION_VERSION
+        if version != LITERATURE_DELEGATION_VERSION:
+            raise ValueError('Unsupported Literature task delegation version')
+        snapshot = json.loads(self.store.read_blob(task['capability_catalog_ref']))
+        if (digest(snapshot) != task['capability_catalog_sha256']
+                or {cid: row['version'] for cid, row in snapshot.items()} != task['capability_versions']):
+            raise ValueError('Literature task tool catalog does not match its pinned admission')
+        return {cid: row for cid, row in selected.items() if snapshot.get(cid) == row}
 
     def _literature_work(self, tx, task, trigger, required_evidence_ids=None):
         selected = task['evidence_ids'] if required_evidence_ids is None else required_evidence_ids
@@ -555,9 +588,34 @@ class Runtime:
                 if command['mode'] != 'lab' or parent['role'] != 'lab' or effect['kind'] != 'lab':
                     raise ValueError('Only Lab can own and delegate a Literature task')
                 catalog = self.capability_catalog()
-                versions = {cid: catalog[cid]['version'] for cid in payload['capability_ids']}
+                from .literature_context import LITERATURE_DELEGATION_VERSION
+                metadata = effect['metadata']
+                delegation_version = metadata.get('literature_delegation_version')
+                admission = {}
+                if delegation_version == LITERATURE_DELEGATION_VERSION:
+                    snapshot = json.loads(self.store.read_blob(metadata['literature_tool_catalog_ref']))
+                    planned = json.loads(self.store.read_blob(metadata['plan_ref']))
+                    context = planned['task']['literature_context']
+                    if (not snapshot or 'capability_ids' in payload
+                            or context.get('delegation_version') != delegation_version
+                            or digest(snapshot) != metadata['literature_tool_catalog_sha256']
+                            or digest(snapshot) != context['tool_catalog_sha256']
+                            or any(not cid.startswith('literature.') or catalog.get(cid) != row
+                                   for cid, row in snapshot.items())):
+                        raise ValueError('Literature delegation no longer matches its admitted tool catalog')
+                    versions = {cid: row['version'] for cid, row in snapshot.items()}
+                    admission = {'delegation_version': delegation_version, 'tool_selection_owner': 'literature',
+                        'capability_catalog_ref': metadata['literature_tool_catalog_ref'],
+                        'capability_catalog_sha256': metadata['literature_tool_catalog_sha256']}
+                elif delegation_version is None:
+                    # Historical requests retain their original Lab-selected
+                    # subset. Replaying them must not grant new permissions.
+                    versions = {cid: catalog[cid]['version'] for cid in payload['capability_ids']}
+                else:
+                    raise ValueError('Unsupported Literature delegation version')
                 tid = identity('literature_task', proposal['id'])
                 task = tx.insert('registration', tid, {**payload, 'kind': 'literature_task',
+                    **admission,
                     'status': 'active', 'task_revision': 1, 'parent_owner_id': parent['owner_id'],
                     'parent_session_id': parent['id'], 'parent_work_id': effect['work_id'],
                     'parent_effect_id': effect['id'], 'agent_instance_id': 'literature:' + tid,
@@ -594,7 +652,8 @@ class Runtime:
                         'limitations': ['No further model turn remains to inspect new tool evidence.'], 'claims': []}
                     return self._publish_research(tx, task, result, [], proposal['id'], complete=True)
                 if (not payload['capability_id'].startswith('literature.') or
-                        task['capability_versions'].get(payload['capability_id']) != payload['capability_version']):
+                        task['capability_versions'].get(payload['capability_id']) != payload['capability_version']
+                        or payload['capability_id'] not in self._literature_capability_catalog(task)):
                     raise ValueError('Tool is outside the delegated Literature capabilities')
                 updated = tx.update('registration', task['id'], {'task_revision': task['task_revision'] + 1})
                 return self.controller._work(tx, None, 'diagnostic', 'literature-tool:' + proposal['id'],
@@ -854,6 +913,10 @@ class Runtime:
             wait = self._park(iid, dep, key + ':park', deadline=deadline, expiry='ask_user')
             return {'build_intent_id': intent['id'], 'work_id': work['id'], 'wait_id': wait['id']}
         if action == 'request_diagnostic':
+            if command['mode'] == 'lab' and p['capability_id'].startswith('literature.'):
+                effect = self.store.get(run, 'effect', proposal['effect_id'])
+                if effect['metadata'].get('literature_delegation_version') is not None:
+                    raise ValueError('Lab delegates research questions; Literature selects and calls its tools')
             inputs = {**p, 'issue_id': iid, 'dependency_id': base,
                 **({'lab_continuation': True, 'source_proposal_id': proposal['id']}
                    if command['mode'] == 'lab' else {})}
@@ -1089,6 +1152,8 @@ class Runtime:
             'trigger_id': trigger_id}
         if work['inputs'].get('literature_task_id'):
             task = self._literature_task(work)
+            if adapter_id not in self._literature_capability_catalog(task):
+                raise ValueError('Literature tool differs from its pinned task admission')
             metadata.update(literature_task_id=task['id'], task_revision=task['task_revision'])
         if self.config.get('task_plan_id'):
             from .plans import load_task_plan

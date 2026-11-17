@@ -7,7 +7,9 @@ import unittest
 from rsi_lab import input_view
 from rsi_lab.agent_state import AgentState
 from rsi_lab.controller import Controller
-from rsi_lab.literature_context import LITERATURE_DECISION_POLICY_VERSION, build_literature_context
+from rsi_lab.literature_context import (
+    LITERATURE_DECISION_POLICY_VERSION, LITERATURE_DELEGATION_VERSION,
+    build_literature_context, literature_tool_catalog)
 from rsi_lab.runtime import Runtime
 from rsi_lab.store import Store, digest
 from rsi_domains.literature.adapter import make_adapter as make_legacy_adapter
@@ -49,7 +51,12 @@ class LiteratureContextTests(unittest.TestCase):
         self.register('foreign', self.other)
         value = self.context()
         self.assertEqual([task['task_id'] for task in value['owned_tasks']], ['owned'])
-        self.assertEqual(value['available_capability_ids'], ['literature.search_papers'])
+        self.assertNotIn('available_capability_ids', value)
+        self.assertEqual(value['delegation_version'], LITERATURE_DELEGATION_VERSION)
+        self.assertIs(value['available'], True)
+        self.assertEqual(value['tool_selection'], 'literature')
+        self.assertEqual(value['available_tool_count'], 1)
+        self.assertEqual(value['tool_catalog_sha256'], digest(literature_tool_catalog(self.capabilities)))
         self.assertEqual(value['run_allowance'], {'model_calls': 20, 'tool_calls': 40})
         self.assertEqual(value['new_task_model_call_ceiling'], 18)
         self.assertEqual(value['owned_tasks'][0]['remaining'], {'model_calls': 4, 'tool_calls': 8})
@@ -68,6 +75,22 @@ class LiteratureContextTests(unittest.TestCase):
 
     def test_no_literature_capabilities_does_not_change_legacy_context_contract(self):
         self.assertIsNone(build_literature_context(self.store, 'r', self.lab, {}))
+
+    def test_permission_catalog_requires_loaded_descriptor_and_hashes_complete_contract(self):
+        self.capabilities.update({
+            'literature.artifact_only': {'status': 'accepted', 'version': '1.0', 'artifact_ref': 'artifact'},
+            'literature.empty_descriptor': {'status': 'accepted', 'descriptor': {}},
+            'literature.invalid_descriptor': {'status': 'accepted', 'descriptor': 'artifact'},
+            'literature.disabled_loaded': {'status': 'unavailable', 'descriptor': {'version': '1.0'}},
+            'local.loaded': {'status': 'accepted', 'descriptor': {'version': '1.0'}}})
+        catalog = literature_tool_catalog(self.capabilities)
+        self.assertEqual(list(catalog), ['literature.search_papers'])
+        self.assertEqual(catalog['literature.search_papers'], self.capabilities['literature.search_papers'])
+        initial = self.context()['tool_catalog_sha256']
+        self.capabilities['literature.search_papers']['descriptor']['input_schema'] = {
+            'provider': {'enum': ['enabled-provider']}}
+        self.assertNotEqual(initial, self.context()['tool_catalog_sha256'])
+        self.assertEqual(self.context()['available_tool_count'], 1)
 
     def test_namespace_unavailable_or_unknown_policy_does_not_opt_in(self):
         for capability_id, row in [
@@ -129,8 +152,9 @@ class LiteratureContextTests(unittest.TestCase):
                                  'rejected' if requires_record else 'applied', result)
                 if requires_record:
                     self.assertEqual(context['version'], LITERATURE_DECISION_POLICY_VERSION)
-                    self.assertEqual(context['available_capability_ids'],
-                                     sorted(adapter.adapter_id for adapter in adapters))
+                    self.assertEqual(context['delegation_version'], LITERATURE_DELEGATION_VERSION)
+                    self.assertNotIn('available_capability_ids', context)
+                    self.assertEqual(context['available_tool_count'], len(adapters))
                     second = runtime.enqueue_lab('with-record')
                     result = runtime.run_meta(second['id'], executor, {'model_calls': 1})
                     self.assertEqual(result['proposal']['status'], 'applied', result)

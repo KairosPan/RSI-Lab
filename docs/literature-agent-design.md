@@ -6,7 +6,7 @@
 
 ## 1. 角色定位
 
-Literature 是 Lab 管理的文献研究子 agent。Lab 决定研究目标、优先级、资源分配和结果如何用于科研任务；Literature 在委托范围与额度内自主拆题、检索、筛选、阅读全文、追踪引用、提取证据、综合并补查，向所属 Lab 交付可复核的研究结果。
+Literature 是 Lab 管理的文献研究子 agent。Lab 将研究问题、用途、范围、交付要求及预算交给 Literature，并判断结果如何用于科研任务。Literature 在委托范围与额度内自主拆题、选择工具和 provider，安排检索、筛选、阅读全文、看图、追踪引用、提取证据、综合及补查，向所属 Lab 交付可复核的研究结果。Lab 不为子 agent 编排工具调用清单。
 
 组织归属与运行时实现分开：Literature 有自己的会话、工作记忆和多步研究循环，执行与恢复沿用通用 Controller；独立会话不赋予它与 Lab、Meta 同级的科研管理职责。它的目标与任务生命周期归 Lab 管理，具体搜读策略由它自行决定。
 
@@ -27,11 +27,13 @@ flowchart TD
 
 普通文献研究由 Lab 直接发起，无须先创建 Meta issue。组织设计要求 Meta 对当前科研任务的文献补查需求送给 Lab，由 Lab 转化为 Literature 子任务；专用需求命令尚未实现。Meta 不成为同一个子 agent 的第二个任务管理者。Literature 获得任务级授权后，可以自行换查询、换已授权来源、读下一页、追下一条引用；任务范围内的这些选择无需 Lab 逐次审批。
 
+启用新版研究委托时，Meta 仍可为独立审计直接调用文献工具，但不能把具体 `literature.*` 操作作为要求 Lab 直接执行的 `recommend_change` 目标。知识缺口可通过现有 issue 机制表达；它本身不创建 Literature 子任务。历史建议保留，Lab 可明确拒绝或延期，并自行决定是否委托新的研究问题。
+
 ### Lab 自主决定是否委托（已实现）
 
 每次 Lab 调用都收到通用的文献决策策略：先识别会影响当前决定的外部知识缺口，再检查本轮原文是否已经足够。方法适用性、跨条件外推、竞争解释或尚未交付的来源内容可以触发委托；本地观测、明确公式、执行记录和已有充分原文通常直接处理。科学主题本身不构成调用理由，任务也不必出现“查文献”等字样。
 
-存在已验收且 manifest 显式声明 `literature_decision_policy: lab_literature_decision_v1` 的文献能力时，Runtime 向 Lab 提供 `task.literature_context`：已注册能力、运行剩余额度，以及同一 owner/branch 的子任务、状态和结果指针。新版 `rsi_literature` 适配器声明该版本；混合目录仍列出全部已验收的文献能力。最多展示 16 个任务，活跃任务优先，省略数量明确标出。它用于避免重复研究和预留回传预算，不代表论文原文已经交付。任务描述与结果 ID 不获得引用权威。
+存在已验收且 manifest 显式声明 `literature_decision_policy: lab_literature_decision_v1` 的文献能力时，Runtime 向 Lab 提供 `task.literature_context`：研究服务可用性、可用工具数量、运行剩余额度，以及同一 owner/branch 的子任务、状态和结果指针。具体文献操作及参数目录只交给 Literature，Lab 不直接调用文献 diagnostic。新版 `rsi_literature` 适配器声明该策略；混合目录中的全部可用文献操作也由子 agent 选择。最多展示 16 个任务，活跃任务优先，省略数量明确标出。它用于避免重复研究和预留回传预算，不代表论文原文已经交付。任务描述与结果 ID 不获得引用权威。
 
 Lab 在现有 `working_memory_delta.rationale_summaries` 中记录一个简短的 `literature_decision`，值为 `delegate`、`use_delivered_evidence`、`local_work`、`await_existing`、`blocked` 或 `not_needed`，附行动理由、当前交付的证据 ID 和已有任务 ID。协议校验决策记录与实际命令、证据和任务身份一致；它不认证科学判断正确。真正的调用仍由模型选择 `request_literature`，没有关键词触发器、强制配额或验收脚本代写的委托。
 
@@ -225,7 +227,11 @@ Meta 发起核查应说明要核查的命题、可能的问题以及能区分解
 | Literature | `request_research_change` | **拟议** | 将澄清、范围或额度需求送回 Lab，保存明确等待条件 |
 | Literature | `propose_issue` | **拟议** | 该动作目前只在 Lab/Meta 既有模式内可用，尚未授权给 Literature |
 
-当前委托 payload 恰好包含 `question/intended_use/scope/deliverables/capability_ids/max_model_calls/max_tool_calls`。两种结果动作恰好包含 `answer/coverage_status/stop_reason/limitations/claims`；claim 字段为 `statement/evidence_ids/limitations`。`purpose/seed_papers/deadline/evidence_requirements` 等第 2 节目标字段不能直接加入当前闭合 schema。
+当前委托 payload 恰好包含 `question/intended_use/scope/deliverables/max_model_calls/max_tool_calls`，不含 `capability_ids`。Controller 在新 Lab 请求中固定完整可用文献目录的身份，将具体目录保存在 Effect 的权限快照中；创建子任务时按该快照固定操作版本及描述符，Literature 自主选择实际使用哪些工具。两种结果动作恰好包含 `answer/coverage_status/stop_reason/limitations/claims`；claim 字段为 `statement/evidence_ids/limitations`。`purpose/seed_papers/deadline/evidence_requirements` 等第 2 节目标字段不能直接加入当前闭合 schema。
+
+研究委托合同 `literature_research_brief_v2` 与 Lab 是否需要文献的决策策略分别版本化。无新合同标记的历史请求仍按旧 `capability_ids` 接口及原回执验证；旧任务继续使用原工具子集，纯 legacy 适配器保持原接口。添加工具或恢复任务不会重算并扩大已固定的权限。
+
+新 Lab 请求提交到模型后，若可用文献目录在响应准入前改变，该委托响应会被判为过期，需要重新准入。已经创建的子任务只使用其固定目录中的仍有效操作，不自动吸收后加的工具。
 
 缓存读取 payload 恰好包含 `evidence_ids/document_ids/query/limit`。前两个数组可为空，`query` 可为空字符串，但至少一个选择字段非空；`limit` 为 1–16，两个 ID 数组各至多 16 项。明确的原文 ID 按指定身份读取；否则按文档范围与查询选择片段。payload 中的 ID 是待取指针，命令外层 `evidence_ids` 仍只允许引用当前实际交付的来源。
 

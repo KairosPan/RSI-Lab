@@ -17,6 +17,8 @@ from .packets import PacketBuilder, digest, encoded
 from . import images
 from .improvements import enabled
 from .research_policy import normalize_research_policy
+from .literature_context import LITERATURE_DELEGATION_VERSION, literature_tool_catalog
+from .store import digest as value_digest
 
 
 def obj(properties):
@@ -112,7 +114,7 @@ LAB_LITERATURE_POLICY = (
     'cannot establish a missing fact about this run, supply a missing local dataset, or prove that '
     'an experiment was executed. If the delivered evidence already resolves the task and there is '
     'no further useful admitted action, use no_action with the answer or disposition and its limits. '
-    'Consult the current literature_context for registered capabilities, resource availability, '
+    'Consult the current literature_context for research availability, resource allowances, '
     'and existing research tasks. Do not duplicate an active task that already covers the same '
     'decision and scope; report that you are awaiting it or advance other independent local work. '
     'For a completed task, reuse its currently delivered source evidence when sufficient. A task '
@@ -123,8 +125,8 @@ LAB_LITERATURE_POLICY = (
     'tool, enable a disabled service, exceed the available allowance, or treat a resource block '
     'as evidence that the scientific question is answered. State the unresolved gap and the '
     'specific missing condition using an allowed action. '
-    'When delegating, use the Literature child for source reading and external research. Choose '
-    'only the registered capabilities that the question needs and a feasible bounded allowance '
+    'When delegating, use the Literature child for source reading and external research. Set '
+    'a feasible bounded allowance '
     'that leaves room to receive and assess the result. Put the decision to be informed and the '
     'current evidence gap in intended_use; make question, scope, deliverables, and a stopping '
     'criterion specific enough for the child to finish without expanding the scientific goal. '
@@ -145,9 +147,12 @@ LAB_LITERATURE_DECISION_SCHEMA = obj({
 })
 
 
-def response_schema(mode, *, working_memory=False, research_features=None, final_review_only=False, research_policy=None):
+def response_schema(mode, *, working_memory=False, research_features=None, final_review_only=False,
+                    research_policy=None, literature_delegation_version=None):
     if mode not in ACTIONS:
         raise ValueError('Unsupported Meta-agent mode')
+    if literature_delegation_version not in (None, LITERATURE_DELEGATION_VERSION):
+        raise ValueError('Unsupported literature delegation version')
     config = {'research_features':research_features}
     policy = normalize_research_policy(research_policy)
     research_role = mode in ('lab', 'discovery', 'disposition')
@@ -159,6 +164,9 @@ def response_schema(mode, *, working_memory=False, research_features=None, final
     variants = []
     for action in actions:
         payload = copy.deepcopy(PAYLOADS[action])
+        if action == 'request_literature' and literature_delegation_version == LITERATURE_DELEGATION_VERSION:
+            del payload['properties']['capability_ids']
+            payload['required'].remove('capability_ids')
         if action == 'recommend_change' and 'recommendation_kinds' in policy:
             payload['properties']['change_kind']['enum'] = policy['recommendation_kinds']
         variants.append(obj({'mode': {'type': 'string', 'enum': [mode]}, 'action': {'type': 'string', 'enum': [action]},
@@ -264,7 +272,9 @@ class MetaAgent:
         research_role = mode in ('lab', 'discovery', 'disposition')
         final_review_only = task.get('constraints',{}).get('final_review_only',False)
         policy = normalize_research_policy(task.get('constraints',{}).get('research_policy'))
-        response_schema(mode,research_features=features,final_review_only=final_review_only,research_policy=policy)
+        delegation_version = task.get('literature_context', {}).get('delegation_version')
+        response_schema(mode,research_features=features,final_review_only=final_review_only,research_policy=policy,
+                        literature_delegation_version=delegation_version)
         if stage not in ('initial', 'challenge'):
             raise ValueError('Unsupported review stage')
         if mode == 'discovery' and stage == 'initial' and (owner_interpretation is not None or prior_review is not None):
@@ -288,12 +298,15 @@ class MetaAgent:
                     or prior_review.get('response_sha256') != digest(encoded(prior_review.get('judgment')))):
                 raise ValueError('Challenge lacks the bound initial raw-evidence review receipt')
             _validate(prior_review['judgment'].get('command'), response_schema('discovery',
-                research_features=features,final_review_only=final_review_only,research_policy=policy)['properties']['command'])
+                research_features=features,final_review_only=final_review_only,research_policy=policy,
+                literature_delegation_version=delegation_version)['properties']['command'])
         instructions = COMMON
         if mode == 'literature':
             instructions = COMMON.replace('ONE Meta-agent operating in a selected mode',
                 'the Literature subagent owned by the parent Lab') + (
                 'Independently plan and conduct the bounded research task across multiple turns. '
+                'You choose which search, reading, extraction and review operations are needed, '
+                'their order, and the specific providers from the admitted task catalog. '
                 'Only request the literature capabilities pinned in this task. Copy task_id and '
                 'task_revision from literature_task. Lab owns scope, priorities, budget and acceptance; '
                 'Meta is an independent auditor, not a second task owner. ToolResult metadata and '
@@ -339,6 +352,15 @@ class MetaAgent:
                 'does not grant original-source reading authority. no_action means no further '
                 'admitted action, not proof the scientific goal succeeded. ')
             instructions += LAB_LITERATURE_POLICY
+            if delegation_version == LITERATURE_DELEGATION_VERSION:
+                instructions += (
+                    'Literature delegation contract (literature_research_brief_v2): submit only a research '
+                    'brief with question, intended_use, scope, deliverables and model/tool allowances. '
+                    'The controller pins the admitted tool catalog and Literature independently selects '
+                    'tools and providers. Do not choose tool IDs, providers or an operation sequence '
+                    'on the child\'s behalf, or call literature capabilities through request_diagnostic. '
+                    'Preserve explicit user-supplied sources and constraints as task requirements. Describe '
+                    'the evidence needed and the acceptance/stopping criteria, not tool orchestration. ')
         if 'agent_state' in task:
             instructions += ('Your persistent session and private working memory are supplied by the '
                 'controller. Set working_memory_delta to a string encoding a JSON object; use "{}" for no changes. Never change owner, '
@@ -355,6 +377,16 @@ class MetaAgent:
                 'results, then use no_action; they cannot create a new recommendation. Execution success, local observations and '
                 'causal benefit are different: without a controlled comparison causal benefit remains not_established. '
                 'Return an empty response/review array when none are due. ')
+            if (mode in ('discovery', 'disposition') and task.get('constraints', {}).get(
+                    'research_loop', {}).get('lab_literature_delegation_version') == LITERATURE_DELEGATION_VERSION):
+                instructions += (
+                    'Literature tools remain available through request_diagnostic for your independent audit, '
+                    'but literature.* capabilities are not allowed recommend_change targets for Lab. Lab '
+                    'commissions research questions and Literature independently selects its tools. When '
+                    'an unresolved scientific knowledge gap needs Lab attention, use the existing propose_issue '
+                    'action where permitted, with source support, competing explanations and a discriminating '
+                    'check; Lab decides whether to delegate a research brief. Do not prescribe its literature '
+                    'tools through a diagnostic recommendation. ')
             if not final_review_only and policy.get('recommendation_guidance'):
                 instructions += '\nHost recommendation guidance:\n' + policy['recommendation_guidance'] + '\n'
         if research_role and enabled({'research_features':features},'scientific_memory'):
@@ -403,7 +435,8 @@ class MetaAgent:
                 'specific producer, dependency version, wake condition, deadline and expiry action. '
                 'Closing an unresolved issue must remain explicitly unresolved; the controller checks duties. ')
         return dict(mode=mode, instruction=instructions, schema=response_schema(mode, working_memory='agent_state' in task,
-                    research_features=features,final_review_only=final_review_only,research_policy=policy), task=task,
+                    research_features=features,final_review_only=final_review_only,research_policy=policy,
+                    literature_delegation_version=delegation_version), task=task,
                     evidence_ids=evidence_ids, required_evidence_ids=required_evidence_ids, model=self.model,
                     effort=self.effort, owner_interpretation=owner_interpretation, prior_review=prior_review,
                     page_cursors=page_cursors)
@@ -483,9 +516,12 @@ def validate_command(response, packet, *, current_versions, authorized_sources=(
         raise ValueError('A command requires a dispatchable exact packet')
     mode = packet['envelope']['mode']
     features = packet['task'].get('constraints',{}).get('research_features')
+    literature_context = packet['task'].get('literature_context', {})
+    delegation_version = literature_context.get('delegation_version')
     schema = response_schema(mode,research_features=features,
                              final_review_only=packet['task'].get('constraints',{}).get('final_review_only',False),
-                             research_policy=packet['task'].get('constraints',{}).get('research_policy'))
+                             research_policy=packet['task'].get('constraints',{}).get('research_policy'),
+                             literature_delegation_version=delegation_version)
     if not isinstance(response, dict) or set(response) - (set(schema['properties']) | {'working_memory_delta'}):
         raise ValueError('Response contains unregistered fields')
     _validate({key:response.get(key) for key in schema['properties']}, schema)
@@ -526,12 +562,22 @@ def validate_command(response, packet, *, current_versions, authorized_sources=(
             if payload['coverage_status'] == 'sufficient_for_requested_use' and not payload['claims']:
                 raise ValueError('Sufficient research coverage requires supported claims')
     if action == 'request_literature':
-        ids = payload['capability_ids']
-        if not payload['deliverables'] or not ids or len(ids) != len(set(ids)):
-            raise ValueError('Literature delegation needs deliverables and distinct registered tools')
-        if any(not cid.startswith('literature.') or
-               (capabilities or {}).get(cid, {}).get('status') != 'accepted' for cid in ids):
-            raise ValueError('Literature delegation requires registered literature capabilities')
+        if delegation_version == LITERATURE_DELEGATION_VERSION:
+            catalog = literature_tool_catalog(capabilities or {})
+            if not payload['deliverables']:
+                raise ValueError('Literature delegation needs nonempty deliverables')
+            if (literature_context.get('available') is not True or not catalog
+                    or literature_context.get('tool_selection') != 'literature'
+                    or literature_context.get('available_tool_count') != len(catalog)
+                    or literature_context.get('tool_catalog_sha256') != value_digest(catalog)):
+                raise ValueError('Literature delegation requires the exact available controller tool catalog')
+        else:
+            ids = payload['capability_ids']
+            if not payload['deliverables'] or not ids or len(ids) != len(set(ids)):
+                raise ValueError('Literature delegation needs deliverables and distinct registered tools')
+            if any(not cid.startswith('literature.') or
+                   (capabilities or {}).get(cid, {}).get('status') != 'accepted' for cid in ids):
+                raise ValueError('Literature delegation requires registered literature capabilities')
     if action == 'propose_issue':
         if not refs or not payload['competing_explanations']:
             raise ValueError('An issue needs evidence and at least one competing explanation')
@@ -560,6 +606,9 @@ def validate_command(response, packet, *, current_versions, authorized_sources=(
                         or replacement['max_bytes'] < old['max_bytes']):
                     raise ValueError('Narrowing requires a strict reduction in objects, fields, pages, or bytes; wording is not a reduction')
     if action == 'request_diagnostic':
+        if (mode == 'lab' and delegation_version == LITERATURE_DELEGATION_VERSION
+                and payload['capability_id'].startswith('literature.')):
+            raise ValueError('Lab must delegate a research brief; Literature selects literature tools')
         capability = (capabilities or {}).get(payload['capability_id'])
         if (not capability or capability.get('status') != 'accepted'
                 or capability.get('version') != payload['capability_version']):
@@ -621,7 +670,8 @@ def initial_review_receipt(packet, response, *, effect_id, response_ref):
     _validate(response.get('command'), response_schema('discovery',
         research_features=packet['task'].get('constraints',{}).get('research_features'),
         final_review_only=packet['task'].get('constraints',{}).get('final_review_only',False),
-        research_policy=packet['task'].get('constraints',{}).get('research_policy'))['properties']['command'])
+        research_policy=packet['task'].get('constraints',{}).get('research_policy'),
+        literature_delegation_version=packet['task'].get('literature_context', {}).get('delegation_version'))['properties']['command'])
     return {'mode': 'discovery', 'stage': 'initial', 'effect_id': effect_id,
             'packet_sha256': packet['packet_sha256'], 'response_sha256': digest(encoded(response)),
             'response_ref': response_ref, 'owner_interpretation_included': False,
@@ -647,7 +697,8 @@ class CodexExecutor:
                 or request['mode'] not in ACTIONS or not request['prompt'].startswith(transport.PREAMBLE)
                 or request['response_schema'] != response_schema(request['mode'], working_memory=session is not None,
                     research_features=metadata.get('research_features'),final_review_only=metadata.get('final_review_only',False),
-                    research_policy=metadata.get('research_policy'))):
+                    research_policy=metadata.get('research_policy'),
+                    literature_delegation_version=metadata.get('literature_delegation_version'))):
             raise ValueError('Unsupported exact model request envelope')
         try:
             data = input_view.decode(request['prompt'].rsplit('INPUT_DATA_JSON:\n',1)[1],request['input_view_mode'])
@@ -656,6 +707,10 @@ class CodexExecutor:
             raise ValueError('Model packet must contain its exact research task and policy') from exc
         if packet_policy != normalize_research_policy(metadata.get('research_policy')):
             raise ValueError('Model packet policy differs from the admitted effect policy')
+        literature_context = data['task'].get('literature_context', {})
+        if (literature_context.get('delegation_version') != metadata.get('literature_delegation_version')
+                or literature_context.get('tool_catalog_sha256') != metadata.get('literature_tool_catalog_sha256')):
+            raise ValueError('Model packet literature delegation differs from the admitted effect contract')
         effect_id = effect['id']
         if not isinstance(effect_id, str) or not effect_id or Path(effect_id).name != effect_id or effect_id in ('.', '..'):
             raise ValueError('Unsafe model effect identity')

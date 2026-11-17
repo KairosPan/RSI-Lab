@@ -118,7 +118,6 @@ class LiteratureEvidenceLifecycleTests(unittest.TestCase):
             'intended_use': 'Choose follow-up questions; do not infer efficacy.',
             'scope': 'Two supplied synthetic papers',
             'deliverables': ['A comparison citing one original control passage per paper'],
-            'capability_ids': ['literature.read_document'],
             'max_model_calls': 32, 'max_tool_calls': 32}, evidence_ids)
         self.assertEqual(result['proposal']['status'], 'applied', result)
         return self.ready('literature')

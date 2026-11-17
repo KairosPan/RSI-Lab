@@ -101,7 +101,7 @@ class LiteratureResearchIntegrationTests(unittest.TestCase):
         self.assertIn('literature_context', task)
         self.emit(lab, 'request_literature', {'question': 'Inspect the page relevant to the supplied question',
             'intended_use': 'Read the supplied visual source', 'scope': 'The registered fixture page',
-            'deliverables': ['A source-backed observation'], 'capability_ids': [self.adapter.adapter_id],
+            'deliverables': ['A source-backed observation'],
             'max_model_calls': 3, 'max_tool_calls': 2})
         child = next(work for work in self.controller.ready('r') if work['kind'] == 'literature')
         agent, mode, child_task, options = self.runtime._context(child)

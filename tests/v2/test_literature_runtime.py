@@ -92,7 +92,7 @@ class LiteratureRuntimeTests(unittest.TestCase):
         result = self.emit(lab, self.command(lab, 'request_literature', {
             'question': 'Which control supports the reported assay?', 'intended_use': 'Plan a replication',
             'scope': 'The supplied paper', 'deliverables': ['Evidence-backed control identification'],
-            'capability_ids': ['literature.read_document'], 'max_model_calls': max_model_calls,
+            'max_model_calls': max_model_calls,
             'max_tool_calls': max_tool_calls}))
         self.assertEqual(result['proposal']['status'], 'applied', result)
         return self.ready('literature')

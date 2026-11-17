@@ -185,7 +185,7 @@ PaperQA当前SDK使用同一配置下的 `Docs.aadd/aquery`，显式固定回答
 
 Literature是Lab的子agent，拥有独立session、工作记忆及多步循环。父Lab身份、branch、返回目标与子agent实例由真实委托Effect绑定，模型不能指定或改写。Meta可在既有权限内直接读取原文和执行回执、调用共享底层工具进行机制审计；它不成为该子任务的第二个owner。显式的Meta→Lab补查需求命令仍属于后续设计。
 
-当前Lab新增命令 `request_literature` 的payload必须恰好包含：
+Lab 通过 `request_literature` 提交研究问题、用途、范围、交付要求和预算，不指定工具清单或调用顺序。当前研究委托协议的 payload 必须恰好包含：
 
 ```json
 {
@@ -193,13 +193,16 @@ Literature是Lab的子agent，拥有独立session、工作记忆及多步循环�
   "intended_use": "支持Lab选择后续验证方案",
   "scope": "任务指定领域与纳入范围",
   "deliverables": ["有原文依据的比较与未解决问题"],
-  "capability_ids": ["literature.search_papers", "literature.get_paper", "literature.acquire_fulltext", "literature.read_document"],
   "max_model_calls": 6,
   "max_tool_calls": 12
 }
 ```
 
 以上只是payload示例，不能直接当作完整命令提交。完整命令还有 `mode/action/issue_id/expected_versions/evidence_ids/payload`；Literature命令额外携带当前 `task_id/task_revision`，持久响应另有 `working_memory_delta`。
+
+Controller 在委托请求时固定全部已启用、已验收且可执行的文献工具目录；Literature 得到具体操作、参数和 provider 选择，自主决定检索、阅读、看图、引用追踪、抽取或综述的步骤。Lab 只看到文献服务可用性、资源额度和已有子任务，不能绕过子 agent 直接调用这些文献工具。宿主的 provider 开关、凭证要求和允许列表仍然生效；没有配置的增强工具不会因此启用。
+
+新协议 `literature_research_brief_v2` 固定在请求及 Effect 中。历史请求仍按原工具子集协议验证，已创建的任务保持其原有权限；恢复或新增工具不会静默扩大任务的目录。
 
 Literature当前有四个动作：
 

@@ -32,7 +32,7 @@
 
 `run-until-wait` 是有步数上限的合作式驱动器：推进当时可运行的 Lab、Meta、Literature 和已注册 diagnostic，遇到依赖、资源限制、未知调用或无工作时返回。宿主在新输入、真实结果或 deadline 到达后再次调用；它不是隐藏的后台 daemon，也不会因为等待或 `no_action` 就自动宣布科学任务成功。
 
-各角色的工具权限由本轮命令模式与已注册能力决定，不来自会话里曾出现的文字。当前 Lab 命令为 `request_literature`、`request_diagnostic`、`propose_issue` 和 `no_action`。Literature 仅调用委托中固定的文献能力，并向父 Lab 发布阶段结果或完成结果。Meta 的 discovery/disposition 模式仍使用明确命令集合。
+各角色的工具权限由本轮命令模式与已注册能力决定，不来自会话里曾出现的文字。当前 Lab 命令为 `request_literature`、`request_diagnostic`、`propose_issue` 和 `no_action`。新版 Lab 将问题、用途、范围、交付物及预算委托给 Literature，不选择具体文献工具或通过 diagnostic 绕过子 agent。Controller 固定当时完整的可用文献目录；Literature 自主选择其中的工具，并向父 Lab 发布阶段结果或完成结果。历史任务保持原工具权限。Meta 的 discovery/disposition 模式仍使用明确命令集合。
 
 ## 运行入口
 

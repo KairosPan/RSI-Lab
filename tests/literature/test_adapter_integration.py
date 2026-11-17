@@ -131,7 +131,7 @@ class AdapterIntegrationTests(unittest.TestCase):
             self.assertEqual(download.call_count, 1)
         self.store.verify_history('integration')
 
-    def test_full_capability_catalog_and_schema_fit_default_lab_packet(self):
+    def test_full_capability_catalog_and_schema_belong_to_child_and_fit_its_packet(self):
         self.assertEqual(len(self.adapters), 13)
         self.assertEqual(set(self.runtime.capability_catalog()), {'literature.' + name for name in OPERATIONS})
         for adapter in self.adapters:
@@ -148,11 +148,24 @@ class AdapterIntegrationTests(unittest.TestCase):
         self.assertEqual(citation_adapter.manifest['input_schema']['properties']['direction']['enum'], ['references', 'citing'])
         with self.assertRaises(ValueError):
             citation_adapter.prepare({'paper_ref': 'PMID:12345', 'direction': 'forward'})
-        packet = self.runtime.prepare_meta(self.runtime.enqueue_lab('catalog-check')['id'], {'model_calls': 1})
+        lab = self.runtime.enqueue_lab('catalog-check')
+        packet = self.runtime.prepare_meta(lab['id'], {'model_calls': 1})
         self.assertEqual(packet['status'], 'prepared', packet)
         plan = json.loads(self.store.read_blob(packet['metadata']['plan_ref']))
-        self.assertEqual(len(plan['task']['capability_catalog']), 13)
+        self.assertEqual(plan['task']['capability_catalog'], {})
+        self.assertEqual(plan['task']['literature_context']['available_tool_count'], 13)
         self.assertLessEqual(plan['input_bytes'], 131072)
+        delegated = self.emit(lab, 'request_literature', {
+            'question': 'Compare the relevant methods and their evidence.',
+            'intended_use': 'Plan a follow-up experiment', 'scope': 'Registered source collection',
+            'deliverables': ['Source-backed comparison and coverage limits'],
+            'max_model_calls': 4, 'max_tool_calls': 8})
+        self.assertEqual(delegated['proposal']['status'], 'applied', delegated)
+        child_packet = self.runtime.prepare_meta(self.ready('literature')['id'], {'model_calls': 1})
+        self.assertEqual(child_packet['status'], 'prepared', child_packet)
+        child_plan = json.loads(self.store.read_blob(child_packet['metadata']['plan_ref']))
+        self.assertEqual(set(child_plan['task']['capability_catalog']), {'literature.' + name for name in OPERATIONS})
+        self.assertLessEqual(child_plan['input_bytes'], 131072)
 
     def test_lab_child_actual_tool_sources_return_to_same_lab_owner(self):
         doc = self.acquire()
@@ -162,7 +175,6 @@ class AdapterIntegrationTests(unittest.TestCase):
                     'evidence_ids': seeds, 'required_evidence_ids': seeds})
         delegate = self.emit(lab, 'request_literature', {'question': 'Which assay control is reported?',
             'intended_use': 'Plan a replication', 'scope': doc, 'deliverables': ['Control with original text'],
-            'capability_ids': [adapter.adapter_id for adapter in self.adapters],
             'max_model_calls': 5, 'max_tool_calls': 8}, seeds)
         self.assertEqual(delegate['proposal']['status'], 'applied', delegate)
         child = self.ready('literature')
