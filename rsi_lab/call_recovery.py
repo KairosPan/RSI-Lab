@@ -59,7 +59,7 @@ def _same(value, expected, message):
         raise RecoveryBlocked('recovery_binding_mismatch', message)
 
 
-def recover_codex_receipt(effect, packet_bytes, calls_root):
+def recover_codex_receipt(effect, packet_bytes, calls_root, *, interruption_attestation=None):
     """Return an authenticated receipt, None if unfinished, or raise on conflict.
 
     The result carries ``recovery_requires_fencing`` when no durable CLI exit is
@@ -108,7 +108,9 @@ def recover_codex_receipt(effect, packet_bytes, calls_root):
         capture = read_journal(journal_path)
     except (ValueError, OSError) as exc:
         raise RecoveryBlocked('journal_integrity_error', str(exc)) from exc
-    if capture['gaps']:
+    interrupted_gap = (interruption_attestation is not None and capture['gaps'] == [
+        {'kind': 'stream_incomplete', 'seq': capture['durable_seq']}])
+    if capture['gaps'] and not interrupted_gap:
         raise RecoveryBlocked('journal_gap', 'journal has an unconfirmed, conflicting or incomplete tail')
     records = capture['records']
     if not records or records[0]['stream'] != 'control' or records[0]['kind'] != 'attempt_started':
@@ -155,6 +157,11 @@ def recover_codex_receipt(effect, packet_bytes, calls_root):
             if isinstance(frame, dict):
                 frames.append(frame)
     terminals = [row for row in frames if row.get('type') in {'turn.completed', 'turn.failed'}]
+    if interruption_attestation is not None:
+        if terminals:
+            raise RecoveryBlocked('interruption_not_certified', 'A native terminal requires ordinary reconciliation')
+        from .interruption import certify_interruption
+        return certify_interruption(effect, packet_bytes, folder, request, invocation, capture, frames, interruption_attestation)
     if not terminals:
         return None
     if len(terminals) != 1:
@@ -271,3 +278,12 @@ def recover_codex_receipt(effect, packet_bytes, calls_root):
             'unknown_usage_is_zero': False, 'recovered_from_journal': True,
             'native_writer_quiesced': quiesced, 'recovery_requires_fencing': not quiesced,
             'reconciliation': {'effect_id': effect_id, 'provenance': 'verified local durable execution journal'}}
+
+
+def recover_interrupted_codex_receipt(effect, packet_bytes, calls_root, operator_attestation):
+    """Explicit operator-only, read-only certification of a killed model request."""
+    result = recover_codex_receipt(effect, packet_bytes, calls_root,
+                                   interruption_attestation=operator_attestation)
+    if result is None or 'interruption_quarantine_proof' not in result:
+        raise RecoveryBlocked('interruption_not_certified', 'No complete interruption proof is available')
+    return result

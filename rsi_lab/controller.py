@@ -6,6 +6,7 @@ import math
 import time
 
 from .store import Store, digest, encode
+from .interruption import effect_holds_execution, effect_is_quarantined
 
 WORK_KINDS = {'lab', 'literature', 'meta_discovery', 'meta_disposition', 'disposition', 'evidence_retrieve',
               'diagnostic', 'capability_build', 'effect_reconcile', 'trial_prepare', 'trial_settle'}
@@ -60,7 +61,7 @@ class Controller:
 
     def _capacity(self, tx):
         maximum = self.store.run(tx.run_id)['config'].get('max_external', 1)
-        available = maximum - sum(e['status'] in UNSETTLED for e in tx.find('effect'))
+        available = maximum - sum(effect_holds_execution(e) for e in tx.find('effect'))
         old = tx.find('dependency', id='external_capacity')
         if old:
             old = old[0]
@@ -367,7 +368,7 @@ class Controller:
                 if issue['status'] != 'open' or any(issue[k] != v for k, v in work['expected_versions'].items()):
                     raise ValueError('Dispatch input versions are stale; replan first')
             config = self.store.run(run_id)['config']
-            if sum(e['status'] in UNSETTLED for e in tx.find('effect')) >= config.get('max_external', 1):
+            if sum(effect_holds_execution(e) for e in tx.find('effect')) >= config.get('max_external', 1):
                 raise ValueError('No external execution lease; waiting issues do not count here')
             recovery = work['kind'] in {'disposition', 'effect_reconcile', 'trial_settle'}
             for resource, amount in reservations.items():
@@ -593,12 +594,13 @@ class Controller:
                 'result_ref': result_ref, 'actual_costs': actual, 'held_reservations': held,
                 'accounting_unknown': unknown_cost,
                 'provider_handle': receipt.get('provider_handle', effect.get('provider_handle'))})
-            if effect['metadata'].get('agent_turn_id'):
+            if effect['metadata'].get('agent_turn_id') and not effect_is_quarantined(effect):
                 from .agent_state import AgentState
                 AgentState(self.store, run_id).settle_request_tx(tx,
                     effect['metadata']['agent_turn_id'], effect_id, receipt)
-            tx.update('work', effect['work_id'], {'status': 'blocked' if status == 'unknown' else ('succeeded' if status == 'succeeded' else 'failed'),
-                'outcome_ref': result_ref})
+            if not effect_is_quarantined(effect):
+                tx.update('work', effect['work_id'], {'status': 'blocked' if status == 'unknown' else ('succeeded' if status == 'succeeded' else 'failed'),
+                    'outcome_ref': result_ref})
             self._capacity(tx)
             return result
         return self.store.mutate(run_id, key, 'effect_settled', apply, payload={'effect_id': effect_id, 'receipt_ref': receipt_ref})
@@ -607,7 +609,7 @@ class Controller:
         self.store.verify_history(run_id)
         recovered = []
         for effect in self.store.list(run_id, 'effect'):
-            if effect['status'] not in {'dispatching', 'unknown'}:
+            if effect_is_quarantined(effect) or effect['status'] not in {'dispatching', 'unknown'}:
                 continue
             path = self.store.root / ('receipt_' + effect['id'] + '.json')
             if path.exists():
@@ -619,6 +621,80 @@ class Controller:
                 receipt = self.store.put_blob({'status': 'unknown', 'actual_costs': {}, 'reason': 'blocked_external: no durable receipt/provider query'})
                 recovered.append(self.settle_effect(run_id, effect['id'], receipt, 'recovery_unknown:' + effect['id']))
         return recovered
+
+    def quarantine_interrupted_model(self, run_id, effect_id, operator_attestation, key):
+        """Explicitly isolate one stopped model attempt; unknown costs stay held.
+
+        Known costs are reconciled first. A crash between that settlement and
+        isolation is safely replayable and still holds the old execution lease.
+        No response, terminal, memory update, or replacement Work is fabricated.
+        """
+        from .agent_state import AgentState
+        from .call_recovery import recover_interrupted_codex_receipt
+        from .interruption import QUARANTINE_KIND
+        self.store.verify_history(run_id)
+        registration_id = identity('model_quarantine', effect_id)
+        existing = self.store.list(run_id, 'registration', id=registration_id)
+        if existing:
+            record = existing[0]
+            effect = self.store.get(run_id, 'effect', effect_id)
+            if (record['operator_attestation_sha256'] != digest(operator_attestation)
+                    or record['proof_ref'] != effect.get('execution_quarantine_ref')
+                    or not effect_is_quarantined(effect)):
+                raise ValueError('Interrupted model quarantine changed after isolation')
+            self.store.read_blob(record['proof_ref'])
+            return record
+        effect = self.store.get(run_id, 'effect', effect_id)
+        metadata = effect['metadata']
+        turn = self.store.get(run_id, 'agent_turn', metadata['agent_turn_id'])
+        session = self.store.get(run_id, 'agent_session', metadata['agent_session_id'])
+        owner = self.store.get(run_id, 'agent_owner', session['owner_id'])
+        work = self.store.get(run_id, 'work', effect['work_id'])
+        if (turn['effect_ids'] != [effect_id] or turn['status'] in {'committed', 'rejected', 'cancelled'}
+                or session['active_turn_id'] != turn['id'] or owner['session_id'] != session['id']
+                or turn['fence'] != session['fence'] or turn['fence'] != metadata['session_fence']
+                or owner['memory_revision'] != turn['expected_memory_revision']
+                or work.get('effect_id') != effect_id or work['status'] not in {'leased', 'blocked'}
+                or self.store.list(run_id, 'proposal', effect_id=effect_id)):
+            raise ValueError('Only a still-owned single interrupted model request without a proposal may be isolated')
+        receipt = recover_interrupted_codex_receipt(effect, self.store.read_blob(effect['packet_ref']),
+                                                   self.store.root / 'calls', operator_attestation)
+        proof = receipt['interruption_quarantine_proof']
+        original = {'effect': effect, 'session': session, 'turn': turn, 'work': work, 'owner': owner}
+        settled = self.reconcile(run_id, effect_id, receipt, key + ':known-costs')
+        def isolate(tx):
+            current = tx.get('effect', effect_id)
+            if current != settled or effect_is_quarantined(current):
+                raise ValueError('Interrupted model Effect changed during isolation')
+            # Settlement changes session/turn status, but never ownership,
+            # committed memory or the old native prefix.
+            current_owner = tx.get('agent_owner', owner['id'])
+            if current_owner != owner:
+                raise ValueError('Interrupted model owner changed during isolation')
+            current_work = tx.get('work', work['id'])
+            if (current_work.get('effect_id') != effect_id or current_work['status'] != 'blocked'
+                    or tx.find('proposal', effect_id=effect_id)):
+                raise ValueError('Interrupted model Work or proposal changed during isolation')
+            proof_ref = tx.blob(proof)
+            new = AgentState(self.store, run_id).quarantine_interrupted_turn_tx(tx, current, proof_ref)
+            tx.update('effect', effect_id, {'execution_quarantine_kind': QUARANTINE_KIND,
+                                            'execution_quarantine_ref': proof_ref})
+            tx.update('work', work['id'], {'status': 'cancelled', 'outcome_ref': proof_ref,
+                                           'execution_quarantine_ref': proof_ref})
+            record = tx.insert('registration', registration_id, {'kind': 'model_interruption_quarantine',
+                'schema_version': QUARANTINE_KIND, 'effect_id': effect_id, 'work_id': work['id'],
+                'turn_id': turn['id'], 'session_id': session['id'], 'owner_id': owner['id'],
+                'new_session_id': new['id'], 'proof_ref': proof_ref,
+                'operator_attestation_sha256': digest(operator_attestation),
+                **{'original_' + name + '_ref': tx.blob(value) for name, value in original.items()},
+                'memory_head_ref': owner['memory_head_ref'], 'memory_revision': owner['memory_revision'],
+                'unknown_resource_holds': current['held_reservations'],
+                'known_actual_costs': current['actual_costs'], 'accounting_unknown': current['accounting_unknown']})
+            self._capacity(tx)
+            return record
+        return self.store.mutate(run_id, key, 'interrupted_model_quarantined', isolate,
+            payload={'effect_id': effect_id, 'operator_attestation_sha256': digest(operator_attestation),
+                     'proof_sha256': digest(proof)})
 
     def reconcile(self, run_id, effect_id, receipt, key):
         """Explicit authenticated provider/operator recovery, never an executor retry."""

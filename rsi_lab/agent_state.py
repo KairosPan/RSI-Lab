@@ -394,6 +394,36 @@ class AgentState:
         return {'handoff_id': handoff_id, 'source_memory_ref': handoff['source_memory_ref'],
                 'purpose': handoff['purpose'], 'content': json.loads(self.store.read_blob(handoff['payload_ref']))}
 
+    def quarantine_interrupted_turn_tx(self, tx, effect, proof_ref):
+        """Fence one verified nonmutating interruption; preserve committed memory."""
+        metadata = effect['metadata']
+        turn = tx.get('agent_turn', metadata['agent_turn_id'])
+        session = tx.get('agent_session', metadata['agent_session_id'])
+        owner = tx.get('agent_owner', session['owner_id'])
+        if (effect['status'] != 'unknown' or turn['effect_ids'] != [effect['id']]
+                or turn['status'] not in {'running', 'waiting', 'recovery_required'}
+                or turn['session_id'] != session['id'] or turn['owner_id'] != owner['id']
+                or turn['work_id'] != effect['work_id'] or owner['session_id'] != session['id']
+                or session['active_turn_id'] != turn['id'] or turn['fence'] != session['fence']
+                or metadata['session_fence'] != turn['fence']
+                or owner['memory_revision'] != turn['expected_memory_revision']):
+            raise ValueError('Interrupted turn no longer owns its exact session, fence and memory revision')
+        generation = owner['session_generation'] + 1
+        sid = _id('session', owner['id'], generation)
+        document = self._session_document(owner['id'], owner['scope'], generation,
+                                          session['runtime_binding'], session['id'])
+        document.update(reconstruction_reason='Operator isolated an interrupted nonmutating model request',
+            reconstruction_memory_ref=owner['memory_head_ref'], resume_mode='reconstruct_from_committed_memory',
+            execution_quarantine_ref=proof_ref)
+        new = tx.insert('agent_session', sid, document)
+        tx.update('agent_turn', turn['id'], {'status': 'rejected', 'memory_update_status': 'discarded',
+            'rejection_reason': 'interrupted_nonmutating_model_quarantined', 'execution_quarantine_ref': proof_ref})
+        tx.update('agent_session', session['id'], {'status': 'superseded', 'active_turn_id': None,
+            'fence': session['fence'] + 1, 'execution_quarantine_ref': proof_ref,
+            'recovery_reason': 'interrupted_nonmutating_model_quarantined'})
+        tx.update('agent_owner', owner['id'], {'session_id': sid, 'session_generation': generation})
+        return new
+
     def discard_completed_turn(self, session_id, reason, key):
         """Explicitly quarantine a known finished turn before reconstructing.
 

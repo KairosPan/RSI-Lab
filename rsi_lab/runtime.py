@@ -10,7 +10,7 @@ from datetime import datetime
 import json
 import time
 
-from .controller import Controller, identity
+from .controller import Controller, identity, effect_holds_execution, effect_is_quarantined
 from .store import digest, encode
 from .packets import PacketBuilder, make_evidence, present_delivery
 from .roles import MetaAgent, discovery_trigger, initial_review_receipt, validate_command
@@ -742,6 +742,8 @@ class Runtime:
         pid = identity('proposal', effect_id)
         existing = self.store.list(self.run_id, 'proposal', id=pid)
         effect = self.store.get(self.run_id, 'effect', effect_id)
+        if effect_is_quarantined(effect):
+            raise ValueError('An isolated interrupted model response can never publish a proposal')
         if existing and existing[0]['status'] in {'applied', 'rejected', 'blocked_stale', 'blocked_action'}:
             if existing[0]['status'] == 'rejected' and effect['kind'] == 'literature':
                 self._end_literature(self.store.get(self.run_id, 'work', effect['work_id']),
@@ -1069,6 +1071,8 @@ class Runtime:
         # The outer receipt may be absent even though the CLI already completed.
         # Recover only this attempt's owned durable journal; never resend input.
         for effect in self.store.list(self.run_id, 'effect'):
+            if effect_is_quarantined(effect):
+                continue
             if effect['kind'] not in {'lab', 'meta', 'literature'} or not effect.get('metadata', {}).get('agent_session_id'):
                 continue
             prior = json.loads(self.store.read_blob(effect['result_ref'])) if effect.get('result_ref') else {}
@@ -1103,7 +1107,8 @@ class Runtime:
             if trial.get('issue_id'):
                 self.publish_trial_outcome(trial['id'])
         for effect in [e for e in self.store.list(self.run_id, 'effect')
-                       if e['kind'] in {'meta', 'lab', 'literature'} and e['status'] in {'succeeded', 'failed_definite'}]:
+                       if e['kind'] in {'meta', 'lab', 'literature'} and e['status'] in {'succeeded', 'failed_definite'}
+                       and not effect_is_quarantined(e)]:
             receipt = json.loads(self.store.read_blob(effect['result_ref']))
             try:
                 if receipt.get('terminal_received') or self.config.get('execution_mode') not in {'live', 'role_recall'}:
@@ -1391,6 +1396,8 @@ class Runtime:
                 'adapter_publications_pending':self.pending_adapter_publications(),
                 'effects_requiring_reconciliation': [e for e in self.store.list(self.run_id, 'effect')
                     if e['status'] in {'dispatching', 'unknown'} or e.get('accounting_unknown')],
+                'isolated_model_obligations': [e for e in self.store.list(self.run_id, 'effect')
+                    if effect_is_quarantined(e)],
                 'budgets': self.store.list(self.run_id, 'budget'),
                 'literature_tasks': self.store.list(self.run_id, 'registration', kind='literature_task'),
                 'agent_sessions': self.store.list(self.run_id, 'agent_session'),
@@ -1462,7 +1469,8 @@ class Runtime:
             if self.store.list(self.run_id, 'registration', id='run_lifecycle', status='finalizing'):
                 outcome, reason = 'finalizing', 'New agent turns are stopped; durable recovery remains available'
                 break
-            unresolved = [e for e in self.store.list(self.run_id, 'effect') if e['status'] in {'dispatching','unknown'}]
+            unresolved = [e for e in self.store.list(self.run_id, 'effect')
+                          if e['status'] in {'dispatching','unknown'} and effect_holds_execution(e)]
             pending = [e for e in self.store.list(self.run_id, 'effect', status='prepared')
                 if e['kind'] in {'lab', 'meta', 'literature'} or e['metadata'].get('adapter_id') in self.adapters.by_id]
             if len(unresolved) >= self.config.get('max_external', 1) and not pending:
