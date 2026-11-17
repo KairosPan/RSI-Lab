@@ -14,6 +14,7 @@ import time
 
 from .controller import identity
 from .driver_report import CAPACITY_BLOCKS, STOPPED_PROPOSALS, UNSETTLED
+from .interruption import effect_is_quarantined
 from .store import digest, encode
 
 # A Lab chain that ends on one of these has stopped abnormally. The driver
@@ -112,6 +113,9 @@ class Orchestration:
             # Definite model failures and cancelled intents never reached a
             # Lab decision; a final review only interprets delivered results.
             if effect['status'] == 'failed_definite' or metadata.get('final_review_only'):
+                continue
+            # Nor did a call the operator isolated: its response can never act.
+            if effect_is_quarantined(effect):
                 continue
             outcome, code, reason = self._outcome(ledger, effect, first_seen)
             orchestration = metadata.get('orchestration') or {}

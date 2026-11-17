@@ -332,6 +332,37 @@ class InterruptedModelQuarantineTests(unittest.TestCase):
         self.assertEqual(effect['actual_costs']['model_calls'], 1)
         self.assertEqual(self.store.get('r', 'dependency', 'external_capacity')['value']['available'], 0)
 
+    def test_an_isolated_call_is_not_reported_as_work_still_in_flight(self):
+        from rsi_lab.driver_report import _stalled_issues, build_report
+        from rsi_lab.runtime import Runtime
+        runtime = Runtime(self.store, 'r')
+        self.assertEqual(build_report(runtime)['work_status'], 'unresolved_effects')
+        self.quarantine()
+        report = build_report(runtime)
+        # The unknown costs remain a settlement duty; no work remains in flight.
+        self.assertEqual(report['settlement_status'], 'blocked_external')
+        self.assertNotEqual(report['work_status'], 'unresolved_effects')
+        # An open issue whose only call was isolated has nobody working on it.
+        self.controller.add_fact('r', 'observed', 'raw_fact', {'x': 1}, {'source': 'fixture'}, 'observed')
+        issue = self.controller.open_issue('r', 'issue-1', ['anomaly', 'scope', 'title'], 'A hypothesis', 'scope',
+                                           ['observed'], ['An alternative'], ['A check', 'A falsifier'], 'issue-1')
+        self.store.mutate('r', 'fixture-lose-disposition', 'fixture_lose_disposition', lambda tx: [
+            tx.update('work', work['id'], {'status': 'cancelled'})
+            for work in tx.find('work', issue_id=issue['id'])])
+        isolated = {**self.store.get('r', 'effect', self.effect['id']), 'issue_id': issue['id']}
+        self.assertTrue(effect_is_quarantined(isolated))
+        stalled = _stalled_issues(self.store, 'r', self.store.list('r', 'work'), [], [isolated])
+        self.assertEqual([row['issue_id'] for row in stalled], [issue['id']])
+
+    def test_an_isolated_lab_call_is_not_an_orchestration_step(self):
+        from rsi_lab.orchestration import Orchestration
+        from rsi_lab.runtime import Runtime
+        orchestration = Orchestration(Runtime(self.store, 'r'), {'no_result_steps': 2, 'max_changes': 0})
+        self.assertEqual([step['outcome'] for step in orchestration.steps()], ['unfinished'])
+        self.quarantine()
+        self.assertEqual(orchestration.steps(), [])
+        self.assertEqual(orchestration.status()['unfinished_steps'], [])
+
 
 if __name__ == '__main__':
     unittest.main()

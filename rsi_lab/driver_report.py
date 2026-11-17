@@ -28,7 +28,9 @@ def build_report(runtime, *, skipped=()):
         settlement = 'resource_exhausted'
     else:
         settlement = 'settled'
-    if any(e['status'] in UNSETTLED for e in effects):
+    # An operator-isolated call keeps its settlement duty above, but nothing of
+    # it is still in flight.
+    if any(effect_holds_execution(e) for e in effects):
         work_status = 'unresolved_effects'
     elif runtime.controller.ready(run_id):
         work_status = 'pending_queued'
@@ -70,7 +72,7 @@ def _stalled_issues(store, run_id, works, waits, effects):
             continue
         if any(w['issue_id'] == iid and w['status'] in PARKED for w in waits):
             continue
-        if any(e['status'] in UNSETTLED and (e['issue_id'] == iid or e.get('metadata', {}).get('issue_id') == iid)
+        if any(effect_holds_execution(e) and (e['issue_id'] == iid or e.get('metadata', {}).get('issue_id') == iid)
                for e in effects):
             continue
         last = max(bound, key=lambda w: w['created_seq']) if bound else None
