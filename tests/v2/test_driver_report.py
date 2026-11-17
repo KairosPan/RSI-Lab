@@ -6,7 +6,7 @@ from tests.v2.test_operator_recovery import LIVE, LIVE_RES, operator_receipt
 from tests.v2.test_operator_recovery import unknown as timed_out
 
 EMPTY_ATTENTION = {'stalled_issues': [], 'stopped_lab': None, 'sessions_requiring_recovery': [],
-                   'capacity_blocked_work': []}
+                   'capacity_blocked_work': [], 'stalled_literature_tasks': []}
 REQUEST = {'source_id': 'src', 'source_version': 1, 'object_ids': ['o1'], 'fields': ['f'], 'query': 'q',
            'max_pages': 1, 'max_bytes': 4096}
 

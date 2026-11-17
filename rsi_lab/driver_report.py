@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 
 from .controller import identity
+from .interruption import effect_holds_execution
 
 UNSETTLED = {'prepared', 'dispatching', 'unknown'}
 PARKED = {'waiting', 'disposition_due', 'disposed'}
@@ -27,7 +28,9 @@ def build_report(runtime, *, skipped=()):
         settlement = 'resource_exhausted'
     else:
         settlement = 'settled'
-    if any(e['status'] in UNSETTLED for e in effects):
+    # An operator-isolated call keeps its settlement duty above, but nothing of
+    # it is still in flight.
+    if any(effect_holds_execution(e) for e in effects):
         work_status = 'unresolved_effects'
     elif runtime.controller.ready(run_id):
         work_status = 'pending_queued'
@@ -39,7 +42,25 @@ def build_report(runtime, *, skipped=()):
             'attention': {'stalled_issues': _stalled_issues(store, run_id, works, waits, effects),
                           'stopped_lab': _stopped_lab(store, run_id, works),
                           'sessions_requiring_recovery': _sessions_requiring_recovery(store, run_id),
-                          'capacity_blocked_work': _capacity_blocked_work(store, works)}}
+                          'capacity_blocked_work': _capacity_blocked_work(store, works),
+                          'stalled_literature_tasks': _stalled_literature_tasks(store, run_id, works, effects)}}
+
+
+def _stalled_literature_tasks(store, run_id, works, effects):
+    """Active delegated tasks with no Work scheduled and no call still running."""
+    stalled = []
+    for task in store.list(run_id, 'registration', kind='literature_task', status='active'):
+        tid = task['id']
+        bound = [w for w in works if w['inputs'].get('literature_task_id') == tid]
+        if any(w['status'] in {'ready', 'leased'} for w in bound):
+            continue
+        if any(effect_holds_execution(e) and e.get('metadata', {}).get('literature_task_id') == tid
+               for e in effects):
+            continue
+        last = max(bound, key=lambda w: w['created_seq']) if bound else None
+        stalled.append({'task_id': tid, 'last_work_id': last['id'] if last else None,
+                        'last_work_status': last['status'] if last else None})
+    return stalled
 
 
 def _stalled_issues(store, run_id, works, waits, effects):
@@ -51,7 +72,7 @@ def _stalled_issues(store, run_id, works, waits, effects):
             continue
         if any(w['issue_id'] == iid and w['status'] in PARKED for w in waits):
             continue
-        if any(e['status'] in UNSETTLED and (e['issue_id'] == iid or e.get('metadata', {}).get('issue_id') == iid)
+        if any(effect_holds_execution(e) and (e['issue_id'] == iid or e.get('metadata', {}).get('issue_id') == iid)
                for e in effects):
             continue
         last = max(bound, key=lambda w: w['created_seq']) if bound else None

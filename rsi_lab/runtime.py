@@ -683,7 +683,7 @@ class Runtime:
                     raise
             elif effect['status'] == 'failed_definite':
                 self._block_agent_turn(effect, receipt.get('error') or 'Known failure has no native turn terminal')
-        self._schedule_retry(effect)
+        self._return_failed_literature(effect, self._schedule_retry(effect))
         proposal = self.apply_meta(effect['id']) if effect['status'] == 'succeeded' and not effect.get('accounting_unknown') else None
         self._record_completion(effect, 'model')
         return {'effect': effect, 'proposal': proposal}
@@ -699,7 +699,8 @@ class Runtime:
         usage as 0, so such a call keeps its reconciliation duty.
         """
         if (self.config.get('unknown_usage_policy', 'hold') != 'charge_reservation'
-                or effect['kind'] not in {'lab', 'meta'} or effect['status'] not in {'succeeded', 'failed_definite'}
+                or effect['kind'] not in {'lab', 'meta', 'literature'}
+                or effect['status'] not in {'succeeded', 'failed_definite'}
                 or not effect.get('accounting_unknown')):
             return effect
         prior = json.loads(self.store.read_blob(effect['result_ref']))
@@ -722,11 +723,11 @@ class Runtime:
         The failed Effect is never dispatched again. The successor's identity
         is fixed by the chain root and attempt, so repeating this is a no-op.
         """
-        if effect['kind'] not in {'lab', 'meta'} or effect['status'] != 'failed_definite':
+        if effect['kind'] not in {'lab', 'meta', 'literature'} or effect['status'] != 'failed_definite':
             return None
         work = self.store.get(self.run_id, 'work', effect['work_id'])
         attempt = work['inputs'].get('retry_attempt', 0) + 1
-        if (work['kind'] not in {'lab', 'meta_discovery', 'meta_disposition'}
+        if (work['kind'] not in {'lab', 'literature', 'meta_discovery', 'meta_disposition'}
                 or attempt > self.config.get('model_failure_retries', 0)):
             return None
         receipt = json.loads(self.store.read_blob(effect['result_ref']))
@@ -734,10 +735,30 @@ class Runtime:
             return None
         if work['issue_id'] and self.store.get(self.run_id, 'issue', work['issue_id'])['status'] != 'open':
             return None
+        if work['kind'] == 'literature':
+            # A retry the delegated task cannot afford would be refused at
+            # admission on every pass; the task then returns to its Lab instead.
+            remaining = self._literature_remaining(
+                self.store.get(self.run_id, 'registration', work['inputs']['literature_task_id']))
+            if remaining['model_calls'] < 1 or remaining['steps'] < 1:
+                return None
         root_id = work['inputs'].get('retry_of', work['id'])
         key = 'retry:%d:%s' % (attempt, root_id)
         return self.controller.enqueue(self.run_id, work['kind'], key, key, issue_id=work['issue_id'],
             inputs={**work['inputs'], 'retry_of': root_id, 'retry_attempt': attempt}, priority=work['priority'])
+
+    def _return_failed_literature(self, effect, successor):
+        """Return a child's task to its Lab when its model call failed for good.
+
+        ``successor`` is what ``_schedule_retry`` gave for this Effect. With no
+        retry the child has no Work left, so the task ends as unresolved under
+        a key fixed by the Effect; repeating this is a no-op.
+        """
+        if effect['kind'] != 'literature' or effect['status'] != 'failed_definite' or successor is not None:
+            return None
+        receipt = json.loads(self.store.read_blob(effect['result_ref']))
+        return self._end_literature(self.store.get(self.run_id, 'work', effect['work_id']),
+            'model-failure:' + effect['id'], receipt.get('error') or 'Literature model call failed definitely')
 
     def enqueue_lab(self, trigger_id, evidence_ids=()):
         """Explicitly start a bounded Lab step; no implicit completed-goal claim."""
@@ -1114,7 +1135,7 @@ class Runtime:
         if effect_is_quarantined(effect):
             raise ValueError('An isolated interrupted model response can never publish a proposal')
         if existing and existing[0]['status'] in TERMINAL_PROPOSALS:
-            if existing[0]['status'] == 'rejected' and effect['kind'] == 'literature':
+            if existing[0]['status'] != 'applied' and effect['kind'] == 'literature':
                 self._end_literature(self.store.get(self.run_id, 'work', effect['work_id']),
                     pid, existing[0]['error'])
             # The completion record follows every phase-specific postprocessing step.
@@ -1177,7 +1198,9 @@ class Runtime:
                     current_versions=self.versions(effect['issue_id']),
                     authorized_sources=self.config.get('authorized_sources', []),
                     capabilities=capabilities, request=request)
-                if validated['action'] == 'request_diagnostic':
+                # A child's refused inputs reach it as an execution observation
+                # it can correct; rejecting here would end its whole task.
+                if validated['action'] == 'request_diagnostic' and effect['kind'] != 'literature':
                     self._admit_tool_inputs(validated['payload'], packet=packet, cited=validated['evidence_ids'])
                 if validated['action'] == 'propose_lab_settings':
                     self.orchestration.admit(validated)
@@ -1247,9 +1270,14 @@ class Runtime:
         except (ValueError, KeyError, TypeError) as exc:
             # Data-shaped routing errors end the proposal; storage failures
             # (sqlite3.Error, unrelated OSError) propagate and leave it admitted.
-            return self._blocked_proposal(proposal,
+            blocked = self._blocked_proposal(proposal,
                 'blocked_stale' if isinstance(exc, decision_dependencies.StaleDecision) else 'blocked_action', str(exc),
                 disposition=exc.disposition if isinstance(exc, ExistingWork) else None)
+            if effect['kind'] == 'literature':
+                # A refused child action leaves the child no Work: its task goes
+                # back to the Lab as unresolved, as a rejected one does.
+                self._end_literature(self.store.get(self.run_id, 'work', effect['work_id']), pid, str(exc))
+            return blocked
         applied = self._mutate('applied:' + pid, 'meta_proposal_applied',
             lambda tx: tx.update('proposal', pid, {'status': 'applied', 'result_ref': tx.blob(result)}),
             {'proposal_id': pid})
@@ -1640,12 +1668,14 @@ class Runtime:
         # Opt-in failure policies also cover calls settled before a restart.
         policy_failed = set()
         for effect in self.store.list(self.run_id, 'effect'):
-            if effect['kind'] not in {'lab', 'meta'} or effect['status'] not in {'succeeded', 'failed_definite'}:
+            if (effect['kind'] not in {'lab', 'meta', 'literature'}
+                    or effect['status'] not in {'succeeded', 'failed_definite'}):
                 continue
             if effect['id'] in model_complete:
                 continue
             try:
-                self._schedule_retry(self._apply_usage_policy(effect))
+                settled = self._apply_usage_policy(effect)
+                self._return_failed_literature(settled, self._schedule_retry(settled))
             except Exception as exc:
                 policy_failed.add(effect['id'])
                 failed('agent_effect', effect['id'], exc)
@@ -2388,7 +2418,8 @@ class Runtime:
             # Nothing runs, yet an obligation is left without a scheduled owner.
             attention = report['attention']
             stalled_reason = next((name for name in ('stalled_issues', 'stopped_lab', 'sessions_requiring_recovery',
-                                             'capacity_blocked_work') if attention[name]), None)
+                                             'capacity_blocked_work', 'stalled_literature_tasks')
+                                   if attention[name]), None)
             if stalled_reason:
                 reason = stalled_reason
                 outcome = 'stalled'

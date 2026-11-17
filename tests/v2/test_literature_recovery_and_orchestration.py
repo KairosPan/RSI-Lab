@@ -38,6 +38,8 @@ SWITCH = {'refuse_prepare': False, 'fail_execute': False}
 def prepare(inputs):
     if SWITCH['refuse_prepare']:
         raise ValueError('Provider was disabled after this request was admitted')
+    if inputs.get('refuse'):
+        raise ValueError('The reader refuses these inputs')
     return dict(inputs)
 
 
@@ -48,8 +50,12 @@ def reservations(packet):
 def execute(effect, packet):
     if SWITCH['fail_execute']:
         return {'status': 'failed_definite', 'actual_costs': {'tool_calls': 1}, 'error': 'Provider unavailable'}
+    text = 'This synthetic experiment reports a matched control.'
+    passage = {'document_id': 'fixture-paper', 'document_version': digest(b'fixture-document-v1'),
+               'source_sha256': digest(b'synthetic-article-original'), 'locator': 'paragraph:1', 'text': text,
+               'kind': 'paragraph', 'char_range': [0, len(text)], 'byte_range': [0, len(text.encode())]}
     return {'status': 'succeeded', 'actual_costs': {'tool_calls': 1},
-            'result': {'status': 'ok', 'data': {'fixture': 'Offline synthetic adapter result'},
+            'result': {'status': 'ok', 'data': {'passages': [passage]},
                        'provenance': {'fixture': True, 'attempt_count': 0},
                        'coverage': {'synthetic_fixture': True}, 'continuation': None, 'errors': []}}
 
@@ -62,12 +68,16 @@ def tool(operation):
         prepare, reservations, execute, publication)
 
 
-def model(response, *, protocol_valid=True):
+def model(response, *, protocol_valid=True, failed=False):
     def call(effect, packet):
         envelope = json.loads(packet)
         receipt = {'status': 'succeeded', 'actual_costs': {'model_calls': 1}, 'response': response,
                    'sent_packet_sha256': digest(packet),
                    'sent_prompt_sha256': digest(envelope['prompt'].encode())}
+        if failed:
+            # A provider failure with a certified terminal: nothing was answered.
+            receipt.update(status='failed_definite', response=None, terminal_received=True,
+                           error='Provider refused the request')
         if not protocol_valid:
             # A certified terminal whose native turn nevertheless broke protocol:
             # the operator may discard it, and nothing in it may be applied.
@@ -89,14 +99,15 @@ class LiteratureRecoveryAndOrchestrationTests(unittest.TestCase):
         self.addCleanup(self.store.close)
         self.controller = Controller(self.store)
         self.controller.initialize('r', budgets={'model_calls': {'limit': 64, 'hard': True},
-            'tool_calls': {'limit': 64, 'hard': True}}, config={'execution_mode': 'replay',
+            'tool_calls': {'limit': 64, 'hard': True}, 'tokens': {'limit': 100000, 'hard': False}},
+            config={'execution_mode': 'replay',
                 'goal': 'Resolve the supplied scientific question', 'max_input_bytes': 500000, **config})
         self.runtime = Runtime(self.store, 'r', adapters=[tool('search_papers'), tool('read_document')])
 
-    def reply(self, work, action, payload):
+    def reply(self, work, action, payload, cited=()):
         mode = 'literature' if work['kind'] == 'literature' else 'lab'
         command = {'mode': mode, 'action': action, 'issue_id': None,
-            'expected_versions': self.runtime.versions(None), 'evidence_ids': [],
+            'expected_versions': self.runtime.versions(None), 'evidence_ids': list(cited),
             'payload': copy.deepcopy(payload)}
         memory = {}
         if mode == 'literature':
@@ -135,6 +146,175 @@ class LiteratureRecoveryAndOrchestrationTests(unittest.TestCase):
     def results(self):
         return [json.loads(self.store.read_blob(fact['content_ref'])) for fact in self.store.list('r', 'fact')
                 if (fact['provenance'] if isinstance(fact['provenance'], dict) else {}).get('producer') == 'literature']
+
+    def test_usage_policy_charges_a_child_call_with_unmeasured_usage(self):
+        self.open(unknown_usage_policy='charge_reservation')
+        self.delegate()
+        child = self.child()
+        # The fixture model reports its call but no token usage.
+        outcome = self.runtime.run_meta(child['id'], model(self.reply(child, 'complete_research', UNRESOLVED)),
+                                        {'model_calls': 1, 'tokens': 10})
+        self.assertFalse(outcome['effect'].get('accounting_unknown'))
+        self.assertEqual(outcome['effect']['actual_costs']['tokens'], 10)
+        self.assertEqual(outcome['proposal']['status'], 'applied', outcome['proposal'])
+        self.assertEqual(self.task()['status'], 'completed')
+
+    def test_a_failed_child_call_is_retried_within_the_allowance(self):
+        self.open(model_failure_retries=1)
+        self.delegate()
+        child = self.child()
+        self.runtime.run_meta(child['id'], model(None, failed=True), RES)
+        retry = self.child()
+        self.assertNotEqual(retry['id'], child['id'])
+        self.assertEqual((retry['inputs']['retry_of'], retry['inputs']['retry_attempt']), (child['id'], 1))
+        self.assertEqual(retry['inputs']['literature_task_id'], self.task()['id'])
+        self.assertEqual(self.task()['status'], 'active')
+        self.assertEqual(self.results(), [])
+
+    ORCHESTRATED = {'orchestration': {'no_result_steps': 2, 'max_changes': 2}}
+
+    def delegation_step(self):
+        steps = self.runtime.orchestration.steps()
+        self.assertEqual(len(steps), 1)
+        return steps[0]['outcome'], steps[0]['reason_code']
+
+    def complete_citing(self, fact_id):
+        child = self.child()
+        self.assertIn(fact_id, child['inputs']['required_evidence_ids'])
+        result = {'answer': 'The delivered source bears on the question.', 'coverage_status': 'partial',
+                  'stop_reason': 'The delivered source was read', 'limitations': ['One source only'],
+                  'claims': [{'statement': 'The source was delivered and read.', 'evidence_ids': [fact_id],
+                              'limitations': ['Offline fixture']}]}
+        done = self.runtime.run_meta(child['id'], model(self.reply(child, 'complete_research', result, [fact_id])), RES)
+        self.assertEqual(done['proposal']['status'], 'applied', done['proposal'])
+
+    def test_a_pending_delegation_is_an_unfinished_step(self):
+        self.open(**self.ORCHESTRATED)
+        self.delegate()
+        self.assertEqual(self.delegation_step(), ('unfinished', None))
+        self.assertIsNone(self.runtime.orchestration.signal())
+
+    def test_research_that_returns_an_original_is_a_new_result(self):
+        self.open(**self.ORCHESTRATED)
+        self.delegate()
+        self.execute_tool(self.request_tool())
+        original = next(fid for fid in self.child()['inputs']['required_evidence_ids']
+                        if self.store.get('r', 'fact', fid)['provenance'].get('delivery_kind') == 'source_excerpt')
+        self.complete_citing(original)
+        self.assertEqual(self.delegation_step(), ('new_result', 'research_result'))
+
+    def test_research_that_ends_unresolved_is_no_result(self):
+        self.open(**self.ORCHESTRATED)
+        self.delegate()
+        child = self.child()
+        self.runtime.run_meta(child['id'], model(self.reply(child, 'complete_research', UNRESOLVED)), RES)
+        self.assertEqual(self.delegation_step(), ('no_result', 'research_unresolved'))
+
+    def test_a_result_citing_only_a_tool_failure_is_no_result(self):
+        self.open(**self.ORCHESTRATED)
+        self.delegate()
+        tool_work = self.request_tool()
+        SWITCH['fail_execute'] = True
+        failed = self.execute_tool(tool_work)['effect']
+        self.assertEqual(failed['status'], 'failed_definite')
+        # A claim may not cite a failure receipt, but the command can: the
+        # returned result is then a summary of something that is not a source.
+        child = self.child()
+        receipt = child['inputs']['required_evidence_ids'][0]
+        done = self.runtime.run_meta(child['id'], model(self.reply(child, 'complete_research', UNRESOLVED,
+                                                                    [receipt])), RES)
+        self.assertEqual(done['proposal']['status'], 'applied', done['proposal'])
+        returned = next(fact for fact in self.store.list('r', 'fact')
+                        if fact['provenance'].get('producer') == 'literature')
+        self.assertEqual(returned['provenance']['summary_of'], [receipt])
+        self.assertEqual(self.delegation_step(), ('no_result', 'research_unresolved'))
+
+    def test_child_tool_inputs_refused_by_the_adapter_return_to_the_child(self):
+        self.open()
+        self.delegate()
+        child = self.child()
+        refused = {**READ, 'inputs_json': json.dumps({'refuse': True})}
+        outcome = self.runtime.run_meta(child['id'], model(self.reply(child, 'request_diagnostic', refused)), RES)
+        self.assertEqual(outcome['proposal']['status'], 'applied', outcome['proposal'])
+        work = next(row for row in self.controller.ready('r') if row['kind'] == 'diagnostic')
+        result = self.runtime.execute_adapter('literature.read_document', {'refuse': True},
+                                              trigger_id=work['id'], work_id=work['id'])
+        self.assertEqual(result['rejected'], 'The reader refuses these inputs')
+        self.assertEqual(self.task()['status'], 'active')
+        fact = self.store.get('r', 'fact', self.child()['inputs']['required_evidence_ids'][0])
+        self.assertEqual(json.loads(self.store.read_blob(fact['content_ref']))['status'], 'rejected_before_execution')
+        self.assertEqual(self.results(), [])
+
+    def returned_to_lab(self):
+        return [work for work in self.controller.ready('r')
+                if work['kind'] == 'lab' and work['inputs'].get('literature_result_task_id')]
+
+    def test_a_failed_child_call_without_a_retry_returns_the_task_unresolved(self):
+        self.open()
+        self.delegate()
+        self.runtime.run_meta(self.child()['id'], model(None, failed=True), RES)
+        self.assertEqual(self.task()['status'], 'completed')
+        self.assertEqual([(row['coverage_status'], row['stop_reason']) for row in self.results()],
+                         [('unresolved', 'Provider refused the request')])
+        self.assertEqual(len(self.returned_to_lab()), 1)
+        settled = self.store.verify_history('r')
+        self.runtime.recover()
+        self.runtime.recover()
+        self.assertEqual(self.store.verify_history('r'), settled)
+
+    def test_a_retry_that_also_fails_ends_the_task_only_then(self):
+        self.open(model_failure_retries=1)
+        self.delegate()
+        self.runtime.run_meta(self.child()['id'], model(None, failed=True), RES)
+        self.assertEqual(self.task()['status'], 'active')
+        self.runtime.run_meta(self.child()['id'], model(None, failed=True), RES)
+        self.assertEqual(self.task()['status'], 'completed')
+        self.assertEqual([row['coverage_status'] for row in self.results()], ['unresolved'])
+        self.assertEqual(len(self.returned_to_lab()), 1)
+
+    def test_a_failed_child_call_is_not_retried_beyond_its_own_task_allowance(self):
+        # A retry the task can no longer afford would be refused at admission
+        # forever; the task goes back to the Lab instead.
+        self.open(model_failure_retries=1)
+        self.sequence += 1
+        lab = self.runtime.enqueue_lab('brief-' + str(self.sequence))
+        tight = {**BRIEF, 'max_model_calls': 2, 'max_tool_calls': 1}
+        outcome = self.runtime.run_meta(lab['id'], model(self.reply(lab, 'request_literature', tight)), RES)
+        self.assertEqual(outcome['proposal']['status'], 'applied', outcome['proposal'])
+        self.execute_tool(self.request_tool())
+        self.runtime.run_meta(self.child()['id'], model(None, failed=True), RES)
+        self.assertEqual(self.task()['status'], 'completed')
+        self.assertEqual([row['coverage_status'] for row in self.results()], ['unresolved'])
+        self.assertFalse([work for work in self.controller.ready('r') if work['kind'] == 'literature'])
+        driven = self.runtime.run_until_wait(model(self.reply(self.returned_to_lab()[0], 'no_action',
+                                             {'reason': 'The unresolved research was read.'})), RES, max_steps=1)
+        self.assertEqual([step['proposal_status'] for step in driven['steps']], ['applied'])
+
+    def test_a_child_action_blocked_while_routing_returns_the_task_unresolved(self):
+        self.open()
+        self.delegate()
+        child = self.child()
+        missing = {'evidence_ids': ['never-cached'], 'document_ids': [], 'query': '', 'limit': 1}
+        outcome = self.runtime.run_meta(child['id'], model(self.reply(child, 'read_cached_evidence', missing)), RES)
+        self.assertEqual(outcome['proposal']['status'], 'blocked_action', outcome['proposal'])
+        self.assertEqual(self.task()['status'], 'completed')
+        self.assertEqual([row['coverage_status'] for row in self.results()], ['unresolved'])
+        self.assertEqual(len(self.returned_to_lab()), 1)
+        self.runtime.apply_meta(outcome['effect']['id'])
+        self.runtime.recover()
+        self.assertEqual(len(self.results()), 1)
+        self.store.verify_history('r')
+
+    def test_an_active_task_nobody_works_on_reads_stalled(self):
+        self.open()
+        task = self.delegate()
+        child = self.child()
+        self.store.mutate('r', 'fixture-lost-child-work', 'fixture_lost_child_work',
+                          lambda tx: tx.update('work', child['id'], {'status': 'cancelled'}))
+        driven = self.runtime.run_until_wait(model(None), RES, max_steps=1)
+        self.assertEqual((driven['status'], driven['reason']), ('stalled', 'stalled_literature_tasks'))
+        self.assertEqual([row['task_id'] for row in driven['report']['attention']['stalled_literature_tasks']],
+                         [task['id']])
 
     def test_discarded_child_turn_returns_its_task_to_the_lab_in_the_recovery_that_completes_it(self):
         # Recovery records an Effect complete as soon as its proposal is
