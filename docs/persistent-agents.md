@@ -40,8 +40,11 @@
 - `attention.stopped_lab`：没有就绪或已领取的 Lab Work，且最近一个 Lab Work 失败、被阻塞、其已准备的调用被取消，或成功但提议缺失、被拒绝或被阻止。字段给出 Work 身份、状态、提议状态和原因。查看原因后用 `lab-start` 开始新的 Lab Work。
 - `attention.sessions_requiring_recovery`：owner 的当前会话处于 `recovery_required`。存在 `unknown` 调用时先用 `reconcile` 对账，再用 `agent-rebuild` 更换会话。
 - `attention.capacity_blocked_work`：因会话上下文或 packet 超出容量（`blocked_capacity` 或 `packet_unrepresentable`）而阻塞的 Work。用 `agent-rebuild` 换成新会话，Lab 工作再用 `lab-start` 重新开始。
+- `attention.stalled_literature_tasks`：仍为 `active`、却没有就绪或已领取的 Work、也没有仍在执行的 Effect 的 Literature 委托任务，并给出最近一个相关 Work 的身份和状态。正常情况下不会出现：子 agent 的调用明确失败且没有重试名额、或它的动作在路由时被拦，任务都会以 `unresolved` 结果交还所属 Lab。出现时常见原因是子 agent 的调用被操作者隔离；查看原因后由 Lab 重新委托。
 
-原本会报告 `quiescent` 时，或原本会报告 `awaiting_producer_or_deadline`、但没有处于 `waiting`、`disposition_due` 或 `disposed` 的等待，且每个就绪 Work 都是其 agent 会话不空闲、驱动器因此不会选择的 Lab/Meta Work 时，只要上述 `attention` 中有任何一项非空，状态改为 `stalled`，`reason` 为第一项非空条目的名称（按 `stalled_issues`、`stopped_lab`、`sessions_requiring_recovery`、`capacity_blocked_work` 的顺序）。`quiescent` 因此只表示干净结束：没有待执行的工作，也没有无人负责的义务。其他状态不变。
+被操作者隔离的调用仍保留未知用量的对账义务，所以 `settlement_status` 仍为 `blocked_external`；但它不再算作仍在进行的工作，不计入 `work_status` 的 `unresolved_effects`，也不会让所属问题躲过 `stalled_issues`。
+
+原本会报告 `quiescent` 时，或原本会报告 `awaiting_producer_or_deadline`、但没有处于 `waiting`、`disposition_due` 或 `disposed` 的等待，且每个就绪 Work 都是其 agent 会话不空闲、驱动器因此不会选择的 Lab/Meta Work 时，只要上述 `attention` 中有任何一项非空，状态改为 `stalled`，`reason` 为第一项非空条目的名称（按 `stalled_issues`、`stopped_lab`、`sessions_requiring_recovery`、`capacity_blocked_work`、`stalled_literature_tasks` 的顺序）。`quiescent` 因此只表示干净结束：没有待执行的工作，也没有无人负责的义务。其他状态不变。
 
 各角色的工具权限由本轮命令模式与已注册能力决定，不来自会话里曾出现的文字。当前 Lab 命令为 `request_literature`、`request_diagnostic`、`propose_issue` 和 `no_action`。新版 Lab 将问题、用途、范围、交付物及预算委托给 Literature，不选择具体文献工具或通过 diagnostic 绕过子 agent。Controller 固定当时完整的可用文献目录；Literature 自主选择其中的工具，并向父 Lab 发布阶段结果或完成结果。历史任务保持原工具权限。Meta 的 discovery/disposition 模式仍使用明确命令集合。
 
@@ -80,8 +83,8 @@
 
 两个可选的失败策略键也写在运行配置顶层，省略时保持原有行为：
 
-- `unknown_usage_policy`：取 `hold`（默认）或 `charge_reservation`。模型调用已得到 `succeeded` 或 `failed_definite` 结果、但回执缺少部分用量（例如没有 token 计数）时，`hold` 保留这些资源的预约和对账义务：该调用的提议不会被应用，所属问题也不能关闭。`charge_reservation` 让 Runtime 按仍持有的完整预约结算这些资源，结算回执的 `estimated_resources` 列出这些资源名，`reconciliation.provenance` 为 `run config unknown_usage_policy=charge_reservation`。计费金额等于预约，是估计值：既不是实测值，也不保证是上限，因为 token 和时间预约不会让 provider 停止。预约为 0 的资源永不按此计费，这样的调用仍保留对账义务。从执行日志恢复、但仍缺少 CLI 进程已退出证明的调用暂不计费，直到该证明到达或操作者完成对账。`dispatching` 或 `unknown` 的调用不受影响，仍需按[未知模型调用的对账](#未知模型调用的对账)处理。
-- `model_failure_retries`：0 到 5 的整数，默认 0。Lab、Meta discovery 或 Meta disposition 调用收到 provider 的明确失败（`failed_definite`，回执确认收到终态且调用确实已派发）时，为同一问题和优先级加入一个新的同类 Work，输入带 `retry_of`（这条链第一个 Work 的身份）和 `retry_attempt`；每条链最多重试该次数。失败的 Effect 本身永不重新派发；问题已关闭时不重试；等待到期后的 `disposition` 仍然每个等待周期只尝试一次，不重试。重复执行 `recover` 不会重复加入重试 Work。
+- `unknown_usage_policy`：取 `hold`（默认）或 `charge_reservation`，对 Lab、Meta 和 Literature 的模型调用同样生效。模型调用已得到 `succeeded` 或 `failed_definite` 结果、但回执缺少部分用量（例如没有 token 计数）时，`hold` 保留这些资源的预约和对账义务：该调用的提议不会被应用，所属问题也不能关闭。`charge_reservation` 让 Runtime 按仍持有的完整预约结算这些资源，结算回执的 `estimated_resources` 列出这些资源名，`reconciliation.provenance` 为 `run config unknown_usage_policy=charge_reservation`。计费金额等于预约，是估计值：既不是实测值，也不保证是上限，因为 token 和时间预约不会让 provider 停止。预约为 0 的资源永不按此计费，这样的调用仍保留对账义务。从执行日志恢复、但仍缺少 CLI 进程已退出证明的调用暂不计费，直到该证明到达或操作者完成对账。`dispatching` 或 `unknown` 的调用不受影响，仍需按[未知模型调用的对账](#未知模型调用的对账)处理。
+- `model_failure_retries`：0 到 5 的整数，默认 0。Lab、Literature、Meta discovery 或 Meta disposition 调用收到 provider 的明确失败（`failed_definite`，回执确认收到终态且调用确实已派发）时，为同一问题和优先级加入一个新的同类 Work，输入带 `retry_of`（这条链第一个 Work 的身份）和 `retry_attempt`；每条链最多重试该次数。失败的 Effect 本身永不重新派发；问题已关闭时不重试；等待到期后的 `disposition` 仍然每个等待周期只尝试一次，不重试。重复执行 `recover` 不会重复加入重试 Work。Literature 调用的重试 Work 绑定同一个委托任务；没有重试名额或名额用尽时，任务以 `unresolved` 结果交还所属 Lab，不会停在 `active`。
 
 其他取值会使 Runtime 拒绝启动该运行。
 
