@@ -5,7 +5,9 @@ protocol; no model, network request or credential is used.
 """
 import base64
 import json
+import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import tempfile
@@ -71,18 +73,30 @@ class NativeTransportTests(unittest.TestCase):
         """Event lines as Codex writes them: non-ASCII text is not escaped."""
         return ''.join(json.dumps(event, ensure_ascii=False) + end for event in events)
 
-    def invoke(self, events=None, *, native=None, run_root=None, folder=None, end='\n'):
-        """Run ``transport.invoke`` against a local process that writes ``events`` (default ``frames()``)."""
-        wire = self.wire(frames() if events is None else events, end).encode()
-        code = 'import sys; sys.stdin.read(); sys.stdout.buffer.write(' + repr(wire) + '); sys.stdout.buffer.flush()'
+    def invoke(self, events=None, *, code=None, timeout=10, session=None, native=None, run_root=None, folder=None,
+               end='\n'):
+        """Run ``transport.invoke`` against a local process that runs ``code``, by default writing ``events``
+        (default ``frames()``), with ``session`` (default ``self.session()``)."""
+        if code is None:
+            wire = self.wire(frames() if events is None else events, end).encode()
+            code = 'import sys; sys.stdin.read(); sys.stdout.buffer.write(' + repr(wire) + '); sys.stdout.buffer.flush()'
 
         def fake(command, **kwargs):
             self.commands.append(command)
             return self.real_popen([sys.executable, '-u', '-c', code], **kwargs)
         with patch.object(transport.subprocess, 'Popen', side_effect=fake):
             return transport.invoke('Inspect this task', {'type': 'object'}, folder or self.folder, 'm', 'low',
-                                    timeout=10, session=self.session(), journal_metadata={'effect_id': 'effect'},
+                                    timeout=timeout, session=session or self.session(),
+                                    journal_metadata={'effect_id': 'effect'},
                                     native=native, run_root=run_root or str(self.root))
+
+    def kill_if_alive(self, marker):
+        """Kill the process whose pid ``marker`` holds, if it runs, so a failing test leaves nothing behind."""
+        if marker.exists():
+            try:
+                os.kill(int(marker.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
     def start_record(self, folder):
         first = read_journal(folder / 'journal.jsonl')['records'][0]
@@ -408,6 +422,22 @@ class NativeTransportTests(unittest.TestCase):
                 result = self.invoke(events, native=settings, folder=folder, end='\r\n')
                 self.assertEqual((result['response'], result['error'], result['protocol_valid']), ({'ok': True}, None, True))
         self.assertEqual(transport.stream_activity(self.root / 'calls' / 'crlf-on'), NATIVE_ACTIVITY)
+
+    def test_a_timeout_stops_a_command_running_in_its_own_session(self):
+        marker = self.root / 'grandchild.pid'
+        self.addCleanup(self.kill_if_alive, marker)
+        code = ('import os,subprocess,sys,time;sys.stdin.read();'
+                'p=subprocess.Popen([sys.executable,"-c","import time;time.sleep(60)"],start_new_session=True);'
+                'open(%r,"w").write(str(p.pid));time.sleep(60)' % str(marker))
+        result = self.invoke(code=code, timeout=2, session=self.session())     # real local process, no model
+        pid = int(marker.read_text())
+        self.assertEqual(result['execution_status'], 'unknown')
+        self.assertTrue(result['descendants_stopped'])
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid, 0)
+
+    def test_a_call_that_ends_on_its_own_reports_descendants_stopped(self):
+        self.assertTrue(self.invoke(frames(), session=self.session())['descendants_stopped'])
 
 
 if __name__ == '__main__':

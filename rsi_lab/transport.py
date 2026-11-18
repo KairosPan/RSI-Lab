@@ -159,12 +159,84 @@ def _events(stdout, allowed_items=frozenset()):
     return raw, usage, complete, errors
 
 
+# The Popen of import time: tests stand a local process in for Codex by
+# replacing ``subprocess.Popen``, and the process table must still be read.
+_POPEN = subprocess.Popen
+
+
+def _descendants(pid):
+    """Every transitive child of ``pid``, from ``ps -axo pid=,ppid=``.
+
+    Raises ``OSError`` or ``ValueError`` when the process table cannot be read.
+    """
+    with _POPEN(['ps', '-axo', 'pid=,ppid='], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL) as ps:
+        try:
+            listing = ps.communicate(timeout=5)[0]
+        except subprocess.TimeoutExpired:
+            ps.kill()
+            raise OSError('ps did not list the processes within 5 seconds') from None
+    if ps.returncode != 0:
+        raise OSError(f'ps exited with status {ps.returncode}')
+    children = {}
+    for line in listing.decode('ascii').splitlines():
+        child, parent = map(int, line.split())
+        children.setdefault(parent, []).append(child)
+    found, pending = [], [pid]
+    while pending:
+        for child in children.pop(pending.pop(), ()):
+            found.append(child)
+            pending.append(child)
+    return found
+
+
+def _gone(pid):
+    """Whether no process has ``pid``: only a signal that finds none says so."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:          # A process this one may not signal still runs.
+        pass
+    return False
+
+
 def _terminate(process):
-    """Kill the invocation's process group, including any lingering child."""
+    """Kill the invocation's process group and every process it started.
+
+    A command Codex runs can lead its own process group, out of reach of
+    Codex's. The descendants are listed before any signal, since a killed
+    parent's children are reparented and no longer found through it. One that
+    leads its own group is killed through that group, any other by pid, and
+    this process's own group never. Returns whether every listed pid is gone
+    within 5 seconds: ``False`` when the process table cannot be read, as
+    nothing can then be confirmed, though Codex's group is killed all the same.
+    """
+    try:
+        descendants = _descendants(process.pid)
+    except (OSError, ValueError):
+        descendants = None
     try:
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
+    own_group = os.getpgrp()
+    for pid in descendants or ():
+        try:
+            if os.getpgid(pid) == pid and pid != own_group:
+                os.killpg(pid, signal.SIGKILL)
+            else:
+                os.kill(pid, signal.SIGKILL)
+        except OSError:      # Gone already, or not this process's to signal: the check below decides.
+            pass
+    if descendants is None:
+        return False
+    deadline = time.monotonic() + 5
+    while True:
+        descendants = [pid for pid in descendants if not _gone(pid)]
+        if not descendants or time.monotonic() >= deadline:
+            return not descendants
+        time.sleep(.05)
 
 
 def _provider_stdout(folder):
@@ -346,11 +418,13 @@ def _archive_images(folder, images, manifest):
     return [record['path'] for record in files]
 
 
-def _stream_process(process, prompt, journal, folder, timeout):
+def _stream_process(process, prompt, journal, folder, timeout, stop):
     """Drain both pipes while sending input; no turn-sized communicate buffer.
 
     Each received chunk is durable before parsing complete event frames. This
     also preserves non-UTF8 data and unfinished frames if the writer is killed.
+    ``stop`` kills the process tree when the deadline elapses; the pipes then
+    have 5 seconds to drain.
     """
     selector = selectors.DefaultSelector()
     pending = memoryview(prompt.encode('utf-8'))
@@ -370,8 +444,8 @@ def _stream_process(process, prompt, journal, folder, timeout):
             now = time.monotonic()
             if not timed_out and now >= deadline:
                 timed_out = True
-                _terminate(process)
-                drain_deadline = now + 5
+                stop()
+                drain_deadline = time.monotonic() + 5
                 journal.append('control', b'Invocation deadline elapsed', kind='stream_incomplete')
             if timed_out and now >= drain_deadline:
                 raise TimeoutError('Unable to drain killed invocation pipes')
@@ -439,7 +513,9 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
     Execution completion, parsing, and application validation are separate.
     Native settings that switch anything on need a session and the run root;
     they are recorded as ``native`` in the invocation and the result, which
-    carry no such key when everything is off.
+    carry no such key when everything is off. The result's
+    ``descendants_stopped`` is ``True`` when Codex ended on its own, otherwise
+    whether killing it stopped every process it had started.
     """
     if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError('Prompt must be nonempty text')
@@ -494,6 +570,13 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
     temporary = None
     stream_complete = False
     journal_snapshot = None
+    descendants_stopped = True
+
+    def stop():
+        nonlocal descendants_stopped
+        descendants_stopped = False          # Stays False if _terminate is interrupted before it confirms.
+        descendants_stopped = _terminate(process)
+
     invocation = {'backend': 'codex', 'model': model, 'effort': effort,
                   'timeout_seconds': timeout, 'started_at_unix': time.time(), 'dispatched': False,
                   'session': binding}
@@ -529,7 +612,7 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
             invocation.update(sent_image_manifest=image_manifest,
                               sent_image_manifest_sha256=image_digest)
         _write_json(folder / 'invocation.json', invocation)
-        returncode, timed_out, partial_tail = _stream_process(process, sent_prompt, journal, folder, timeout)
+        returncode, timed_out, partial_tail = _stream_process(process, sent_prompt, journal, folder, timeout, stop)
         captured = read_journal(folder / 'journal.jsonl')
         stdout = raw_stream(captured, 'stdout').decode('utf-8', errors='replace')
         raw, usage, usage_complete, errors = audited_events(folder)
@@ -604,7 +687,7 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
                        'error': error}).encode(), kind='attempt_finished')
     except BaseException as exc:
         if process is not None and process.poll() is None:
-            _terminate(process)
+            stop()
             try:
                 process.wait(timeout=5)
             except subprocess.TimeoutExpired:
@@ -651,7 +734,7 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
                   'error': error, 'protocol_valid': protocol_valid, 'parse_error': parse_error, 'execution_status': execution_status,
                   'terminal_received': terminal_received, 'stream_complete': stream_complete,
                   'wall_seconds': time.monotonic() - started, 'returncode': returncode,
-                  'backend': 'codex', 'provider_thread_id': thread_id,
+                  'descendants_stopped': descendants_stopped, 'backend': 'codex', 'provider_thread_id': thread_id,
                   'session_id': binding['session_id'] if binding else None,
                   'codex_home': binding['codex_home'] if binding else None,
                   'workspace': binding['workspace'] if binding else None,
