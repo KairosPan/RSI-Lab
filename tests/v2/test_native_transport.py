@@ -461,15 +461,17 @@ class NativeTransportTests(unittest.TestCase):
     def test_a_call_that_ends_on_its_own_reports_descendants_stopped(self):
         self.assertTrue(self.invoke(frames(), session=self.session())['descendants_stopped'])
 
-    def orphaning_codex(self, marker, *, ends):
+    def orphaning_codex(self, marker, *, ends, events=None, status=0):
         """A "Codex" that starts a launcher, which starts a 60-second grandchild in its own session, records it to
-        ``marker`` and exits after about 0.5 seconds, orphaning it; "Codex" then runs about 1.5 seconds more and
-        writes a valid event stream, if it ``ends``, or never ends. Neither descendant holds Codex's pipes."""
+        ``marker`` and exits after about 0.5 seconds, orphaning it; "Codex" then runs about 1.5 seconds more, writes
+        ``events`` (default a valid stream) and exits with ``status``, if it ``ends``, or never ends. Neither
+        descendant holds Codex's pipes."""
         detached = 'stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL'
         launcher = ('import os,subprocess,sys,time;'
                     'p=subprocess.Popen([sys.executable,"-c","import time;time.sleep(60)"],start_new_session=True,'
                     + detached + ');' + record(marker) + 'time.sleep(.5)')
-        rest = ('time.sleep(1.5);sys.stdout.write(%r);sys.stdout.flush()' % self.wire(frames()) if ends
+        wire = self.wire(frames() if events is None else events)
+        rest = ('time.sleep(1.5);sys.stdout.write(%r);sys.stdout.flush();sys.exit(%d)' % (wire, status) if ends
                 else 'time.sleep(60)')
         return ('import subprocess,sys,time;sys.stdin.read();'
                 'subprocess.Popen([sys.executable,"-c",%r],%s).wait();' % (launcher, detached) + rest)
@@ -482,6 +484,19 @@ class NativeTransportTests(unittest.TestCase):
         self.assertEqual(result['execution_status'], 'succeeded', result['error'])
         self.assertTrue(result['descendants_stopped'])
         self.assert_stopped(marker)
+
+    def test_a_terminal_call_that_ends_without_a_terminal_event_stops_what_it_orphaned(self):
+        # Codex exits on its own with no turn.completed or turn.failed: a cut stream, or a crash.
+        for name, events, status in (('no-turn-completed', frames()[:3], 0), ('nonzero-exit', frames()[:2], 3)):
+            with self.subTest(case=name):
+                marker = self.root / (name + '.pid')
+                self.addCleanup(self.stop_recorded, marker)
+                with patch.object(transport, 'TRACK_SECONDS', .1):
+                    result = self.invoke(code=self.orphaning_codex(marker, ends=True, events=events, status=status),
+                                         native=TERMINAL, folder=self.root / 'calls' / name)
+                self.assertEqual((result['returncode'], result['terminal_received']), (status, False))
+                self.assertTrue(result['descendants_stopped'])
+                self.assert_stopped(marker)
 
     def test_a_terminal_call_that_times_out_stops_what_it_orphaned(self):
         marker = self.root / 'grandchild.pid'

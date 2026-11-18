@@ -654,7 +654,7 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
     journal_snapshot = None
     descendants_stopped = True
     tracked = {}                             # Every process seen under the call, as pid: start time.
-    terminal = settings['terminal'] is not None
+    terminal_on = settings['terminal'] is not None
     killed = False
 
     def stop():
@@ -699,7 +699,7 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
                               sent_image_manifest_sha256=image_digest)
         _write_json(folder / 'invocation.json', invocation)
         returncode, timed_out, partial_tail = _stream_process(process, sent_prompt, journal, folder, timeout, stop,
-                                                              tracked if terminal else None)
+                                                              tracked if terminal_on else None)
         captured = read_journal(folder / 'journal.jsonl')
         stdout = raw_stream(captured, 'stdout').decode('utf-8', errors='replace')
         raw, usage, usage_complete, errors = audited_events(folder)
@@ -792,7 +792,7 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
         if not isinstance(exc, Exception):
             interrupted = exc
     finally:
-        if terminal and process is not None and not killed:
+        if terminal_on and process is not None and not killed:
             # Codex ended without a kill, however the call ended: what was seen under it and still runs is stopped.
             descendants_stopped = False      # Stays False if _sweep is interrupted before it confirms.
             descendants_stopped = _sweep(tracked)
