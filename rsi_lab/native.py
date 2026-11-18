@@ -28,9 +28,12 @@ PROFILE = 'rsi_agent'
 OFF = {'web_search': False, 'terminal': None, 'subagents': None}
 DEFAULT_MAX_CONCURRENT = 3
 MAX_CONCURRENT = 8
-# Named sub-agent roles: at most MAX_ROLES, none named like one of Codex's built-in sub-agent roles.
+# Named sub-agent roles: at most MAX_ROLES, none named like one of Codex's built-in sub-agent roles
+# or like a fixed key of Codex's [agents] table, beside which each role's own agents.<name> values go.
 MAX_ROLES = 8
 BUILT_IN_ROLES = ('default', 'explorer', 'worker')
+AGENTS_TABLE_KEYS = ('max_depth', 'default_subagent_model', 'default_subagent_reasoning_effort',
+                     'max_concurrent_threads_per_session', 'enabled', 'interrupt_message')
 ROLE_NAME = re.compile('[a-z][a-z0-9_-]{0,31}')
 MAX_DESCRIPTION = 300
 MAX_INSTRUCTIONS = 8000
@@ -352,7 +355,7 @@ def _roles(roles, where):
     """Declared sub-agent roles in normal form: a new object in name order, each role a new object.
 
     Refuses more than ``MAX_ROLES`` roles, a name that ``ROLE_NAME`` does not
-    match in full or that is one of ``BUILT_IN_ROLES``, and a role that does not
+    match in full or that is one of ``BUILT_IN_ROLES`` or ``AGENTS_TABLE_KEYS``, and a role that does not
     hold exactly a one-line, non-blank ``description`` of at most
     ``MAX_DESCRIPTION`` characters and non-blank ``instructions`` of at most
     ``MAX_INSTRUCTIONS``.
@@ -360,9 +363,9 @@ def _roles(roles, where):
     if type(roles) is not dict or len(roles) > MAX_ROLES:
         raise ValueError(where + ' must be an object of at most ' + str(MAX_ROLES) + ' roles')
     for name, role in roles.items():
-        if type(name) is not str or not ROLE_NAME.fullmatch(name) or name in BUILT_IN_ROLES:
+        if type(name) is not str or not ROLE_NAME.fullmatch(name) or name in BUILT_IN_ROLES + AGENTS_TABLE_KEYS:
             raise ValueError(where + ' names must match ' + ROLE_NAME.pattern + ' and may not be '
-                             + ', '.join(BUILT_IN_ROLES) + ': ' + repr(name))
+                             + ', '.join(BUILT_IN_ROLES + AGENTS_TABLE_KEYS) + ': ' + repr(name))
         if type(role) is not dict or set(role) != {'description', 'instructions'}:
             raise ValueError(where + '.' + name + ' must hold exactly description and instructions')
         description, instructions = role['description'], role['instructions']

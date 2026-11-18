@@ -292,7 +292,8 @@ class RoleSettingsTests(unittest.TestCase):
                {'x': {**R, 'instructions': 'i' * 8001}}, {'x': {'description': 'd'}}, {'x': {**R, 'model': 'm'}},
                {'r' + str(i): R for i in range(9)}, ['local'], {'x': 'text'},
                {'x': {**R, 'description': 'a\rb'}}, {'x': {**R, 'description': ' '}}, {'x\n': R},
-               {'x': {**R, 'instructions': 7}}]
+               {'x': {**R, 'instructions': 7}},
+               {'max_depth': R}, {'default_subagent_model': R}, {'enabled': R}, {'interrupt_message': R}]
         for roles in bad:
             with self.subTest(roles=roles), self.assertRaisesRegex(
                     ValueError, r'^native_capabilities\.lab\.subagents\.roles'):
