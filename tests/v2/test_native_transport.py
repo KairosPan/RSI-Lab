@@ -45,6 +45,19 @@ NATIVE_ACTIVITY = {
     'searches': ['q'], 'files_changed': ['/w/notes.md'], 'omitted': 0}
 
 
+def record(marker):
+    """Python statements that write ``"<pid> <start>"`` for the process ``p`` to ``marker`` in one step, the start
+    time read from the process table right after ``p`` appears: the identity a cleanup confirms before a signal."""
+    part = str(marker) + '.part'
+    return ('s=subprocess.run(["ps","-o","lstart=","-p",str(p.pid)],capture_output=True,text=True).stdout.strip();'
+            'open(%r,"w").write(str(p.pid)+" "+s);os.replace(%r,%r);' % (part, part, str(marker)))
+
+
+def lstart(pid):
+    """The start time ``ps`` shows for ``pid``, as ``record`` reads it; ``''`` when no process has ``pid``."""
+    return subprocess.run(['ps', '-o', 'lstart=', '-p', str(pid)], capture_output=True, text=True).stdout.strip()
+
+
 class NativeTransportTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
@@ -91,13 +104,22 @@ class NativeTransportTests(unittest.TestCase):
                                     journal_metadata={'effect_id': 'effect'},
                                     native=native, run_root=run_root or str(self.root))
 
-    def kill_if_alive(self, marker):
-        """Kill the process whose pid ``marker`` holds, if it runs, so a failing test leaves nothing behind."""
+    def stop_recorded(self, marker):
+        """Kill the process ``marker`` records only while it is still that process, so a failing test leaves nothing
+        behind: a pid that now has another start time, or none, may name an unrelated process and is never signalled."""
         if marker.exists():
-            try:
-                os.kill(int(marker.read_text()), signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            pid, start = marker.read_text().split(' ', 1)
+            if start and lstart(pid) == start:
+                try:
+                    os.kill(int(pid), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    def assert_stopped(self, marker):
+        """The process ``marker`` records is gone; the marker then goes too, so no cleanup can signal its pid."""
+        with self.assertRaises(ProcessLookupError):
+            os.kill(int(marker.read_text().split()[0]), 0)
+        marker.unlink()
 
     def start_record(self, folder):
         first = read_journal(folder / 'journal.jsonl')['records'][0]
@@ -426,16 +448,14 @@ class NativeTransportTests(unittest.TestCase):
 
     def test_a_timeout_stops_a_command_running_in_its_own_session(self):
         marker = self.root / 'grandchild.pid'
-        self.addCleanup(self.kill_if_alive, marker)
+        self.addCleanup(self.stop_recorded, marker)
         code = ('import os,subprocess,sys,time;sys.stdin.read();'
                 'p=subprocess.Popen([sys.executable,"-c","import time;time.sleep(60)"],start_new_session=True);'
-                'open(%r,"w").write(str(p.pid));time.sleep(60)' % str(marker))
+                + record(marker) + 'time.sleep(60)')
         result = self.invoke(code=code, timeout=2, session=self.session())     # real local process, no model
-        pid = int(marker.read_text())
         self.assertEqual(result['execution_status'], 'unknown')
         self.assertTrue(result['descendants_stopped'])
-        with self.assertRaises(ProcessLookupError):
-            os.kill(pid, 0)
+        self.assert_stopped(marker)
 
     def test_a_call_that_ends_on_its_own_reports_descendants_stopped(self):
         self.assertTrue(self.invoke(frames(), session=self.session())['descendants_stopped'])
