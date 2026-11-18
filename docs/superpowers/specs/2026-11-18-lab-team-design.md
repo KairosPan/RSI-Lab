@@ -164,8 +164,9 @@ are the reason for a backstop that can be switched off, not proof of what works.
 }
 ```
 
-- A role name matches `^[a-z][a-z0-9_-]{0,31}$` and is not `default`,
-  `explorer` or `worker`. **(my call)**
+- A role name matches `^[a-z][a-z0-9_-]{0,31}$`, is not `default`, `explorer`
+  or `worker`, and is not a fixed key of Codex's `[agents]` table (such as
+  `max_depth`), which the command also sets. **(my call)**
 - At most 8 roles; `description` is one line of 1 to 300 characters;
   `instructions` is 1 to 8,000 characters. **(my call)**
 - In the stored settings `subagents` holds a `roles` key only when at least
