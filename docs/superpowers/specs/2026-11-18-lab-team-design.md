@@ -280,8 +280,9 @@ Harness version `pablo_lab_led_v1`. Its frozen configuration:
 | `challenge_every_batches` | removed |
 
 **The backstop counter.** `unchallenged_stale_batches` is the number of
-consecutive settled scoring batches of this run that were local and did not
-beat the best score. It starts at 0 for a new run whatever the inherited
+consecutive settled scoring batches of this run that did not beat the best
+score and were not a challenge batch with at least one scored candidate. (A
+challenge batch in which nothing was scored counts like a local one.) It starts at 0 for a new run whatever the inherited
 history says, and returns to 0 after a challenge batch or a batch that beats
 the best. When it reaches `challenge_backstop_batches`, the next batch's
 `required_role` is `challenge`; otherwise `required_role` is `null`.
