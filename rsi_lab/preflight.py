@@ -8,6 +8,7 @@ would send. Nothing here writes the ledger, calls a model or executes a tool.
 """
 from __future__ import annotations
 
+import copy
 import json
 
 from . import input_view
@@ -61,6 +62,8 @@ def feature_report(runtime):
             'capability_catalog': [{'capability_id': key, 'version': catalog[key]['version'],
                                     'admission': catalog[key].get('admission'), 'adapter_loaded': key in loaded}
                                    for key in sorted(catalog)],
+            # Codex's own tools for each role, as the Runtime read them from the config: readable roots resolved.
+            'native_capabilities': copy.deepcopy(runtime.native),
             'modes': modes}
 
 

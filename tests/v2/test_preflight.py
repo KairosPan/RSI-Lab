@@ -10,7 +10,7 @@ import shutil
 import tempfile
 import unittest
 
-from rsi_lab import input_view, roles
+from rsi_lab import input_view, native, roles
 from rsi_lab.__main__ import main
 from rsi_lab.adapters import Adapter
 from rsi_lab.runtime import Runtime
@@ -174,6 +174,46 @@ class FeatureReportTests(unittest.TestCase):
         report = rt.feature_report()
         self.assertEqual(json.loads(json.dumps(report, allow_nan=False)), report)
         self.assertEqual(events(store), before)
+
+    def test_feature_report_shows_each_roles_native_settings(self):
+        store, controller, rt = open_run(self, config={'native_capabilities': {'lab': {'web_search': True}}})
+        report = rt.feature_report()
+        self.assertEqual(report['native_capabilities']['lab'], {'web_search': True, 'terminal': None,
+                                                                'subagents': None})
+        self.assertEqual(report['native_capabilities']['meta'], native.OFF)
+        self.assertEqual(report['native_capabilities']['literature'], native.OFF)
+        self.assertEqual(json.loads(json.dumps(report, allow_nan=False)), report)
+
+    def test_a_run_without_the_block_reports_every_role_off(self):
+        store, controller, rt = open_run(self)
+        self.assertEqual(rt.feature_report()['native_capabilities'], {role: native.OFF for role in native.ROLES})
+
+
+def with_account(plan_type):
+    """Complete a scripted receipt with the account snapshot Codex recorded during the call, or ``None``."""
+    def receipt(receipt, index):
+        receipt['account_snapshot'] = None if plan_type is None else {
+            'plan_type': plan_type, 'used_percent': 12.5, 'window_minutes': 300, 'resets_at': 946702800,
+            'credits_balance': '1200.50', 'has_credits': True, 'unlimited': False}
+        return receipt
+    return receipt
+
+
+class CodexAccountStatusTests(unittest.TestCase):
+    def test_status_shows_the_latest_account_snapshot(self):
+        store, controller, rt = open_run(self)
+        self.assertIsNone(rt.status()['codex_account'])
+        for event, plan_type in (('lab-1', 'plus'), ('lab-2', 'pro'), ('lab-3', None)):
+            out = rt.run_lab(rt.enqueue_lab(event)['id'], Scripted({'lab': none}, receipt=with_account(plan_type)), RES)
+            self.assertEqual(out['proposal']['status'], 'applied', out['proposal'])
+        # The newest receipt read no snapshot; the one before it did.
+        self.assertEqual(rt.status()['codex_account']['plan_type'], 'pro')
+        self.assertEqual(rt.status()['codex_account']['credits_balance'], '1200.50')
+
+    def test_a_receipt_without_the_key_leaves_the_account_unknown(self):
+        store, controller, rt = open_run(self)
+        rt.run_lab(rt.enqueue_lab('lab-1')['id'], Scripted({'lab': none}), RES)
+        self.assertIsNone(rt.status()['codex_account'])
 
 
 EXPECT_ALL = {'scientific_memory': True, 'identity_provider': True, 'meta_lab': True, 'orchestration': True,

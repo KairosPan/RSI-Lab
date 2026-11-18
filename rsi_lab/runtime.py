@@ -2230,7 +2230,23 @@ class Runtime:
                 'literature_tasks': self.store.list(self.run_id, 'registration', kind='literature_task'),
                 'agent_sessions': self.store.list(self.run_id, 'agent_session'),
                 'agent_turns': self.store.list(self.run_id, 'agent_turn'),
+                'codex_account': self._codex_account(),
                 **({'orchestration': self.orchestration.status()} if self.orchestration else {})}
+
+    def _codex_account(self):
+        """The ``account_snapshot`` of the newest model receipt that records one, else ``None``.
+
+        Receipts are taken newest first by when their Effect last changed. The
+        snapshot is shared by everything the Codex account does; it is shown,
+        never used to admit or refuse work.
+        """
+        effects = [e for e in self.store.list(self.run_id, 'effect')
+                   if e['kind'] in {'lab', 'meta', 'literature'} and e.get('result_ref')]
+        for effect in sorted(effects, key=lambda e: (e['updated_seq'], e['created_seq']), reverse=True):
+            snapshot = json.loads(self.store.read_blob(effect['result_ref'])).get('account_snapshot')
+            if snapshot is not None:
+                return snapshot
+        return None
 
     def _agent_available(self, work):
         if work['kind'] not in {'lab', 'literature', 'meta_discovery', 'meta_disposition', 'disposition'}:

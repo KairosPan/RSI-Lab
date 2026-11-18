@@ -33,7 +33,7 @@ CALL, SESSION = 'effect_test', 'session_test'
 EXEC = 'text(await tools.exec_command({cmd: "cat in.txt"}))'
 TOOL_FREE_STREAM = [*NATIVE_STREAM[:2], NATIVE_STREAM[-2], NATIVE_STREAM[-1]]
 FAILED_STREAM = [*NATIVE_STREAM[:2], {'type': 'turn.failed', 'error': {'message': 'Synthetic provider failure'}}]
-NATIVE_KEYS = {'native_capabilities', 'native_activity', 'child_threads', 'account_snapshot'}
+NATIVE_KEYS = {'native_capabilities', 'native_activity', 'child_threads'}
 
 
 def rows(turn):
@@ -216,6 +216,8 @@ class NativeRecoveryTests(unittest.TestCase):
         self.assertEqual(receipt['token_source'], 'ledger')
         self.assertTrue(receipt['protocol_valid']); self.assertTrue(receipt['usage_complete'])
         self.assertFalse(NATIVE_KEYS & set(receipt))
+        # The turn was read, as on every call, and Codex recorded no account snapshot in it.
+        self.assertIsNone(receipt['account_snapshot'])
         # Everything off quiesces as today: what ran under Codex is not asked about.
         self.assertTrue(receipt['native_writer_quiesced']); self.assertFalse(receipt['recovery_requires_fencing'])
 
@@ -315,7 +317,9 @@ class RecoveryAgreesWithTheExecutorTests(unittest.TestCase):
                 # Every key of the executor's receipt but its journal frontier, which recovery records by path.
                 shared = set(executed) - {'journal', 'never_dispatched'}
                 self.assertEqual({key: recovered.get(key) for key in shared}, {key: executed[key] for key in shared})
-                self.assertEqual(NATIVE_KEYS & set(recovered), NATIVE_KEYS & set(executed))
+                keys = NATIVE_KEYS | {'account_snapshot'}
+                self.assertEqual(keys & set(recovered), keys & set(executed))
+                self.assertIn('account_snapshot', executed)
 
 
 if __name__ == '__main__':

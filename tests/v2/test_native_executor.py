@@ -54,6 +54,14 @@ def NO_ROWS(profile, cwd):
     return b'', turn_context('t1', profile, cwd=cwd)
 
 
+def ACCOUNTED_TURN(profile, cwd):
+    return b'', turn_context('t1', profile, cwd=cwd) + account('1200.50', 12.5) + usage_row(THREAD, 't1', 't1', 10, 1)
+
+
+def UNREADABLE(profile, cwd):
+    return b'', b'{"type": "event_msg", "payload": \n'
+
+
 def SEARCHED_TWICE(profile, cwd):
     search = 'text(await tools.web_search({query: "%s"}))'
     return (tool_call('c1', search % 'first') + usage_row(THREAD, 't1', 't1', 300, 20),
@@ -222,10 +230,28 @@ class NativeExecutorTests(unittest.TestCase):
         receipt = self.execute(settings=None, transport_extra={'descendants_stopped': False})
         self.assertEqual(set(self.calls[0]), {'session', 'journal_metadata'})
         self.assertTrue(receipt['native_writer_quiesced'])
-        for key in ('native_capabilities', 'native_activity', 'child_threads', 'account_snapshot'):
+        for key in ('native_capabilities', 'native_activity', 'child_threads'):
             self.assertNotIn(key, receipt)
         self.assertEqual(receipt['actual_costs']['tokens'], 11)
         self.assertEqual(receipt['token_source'], 'ledger')
+        # The turn was read, but Codex recorded no account snapshot in it.
+        self.assertIsNone(receipt['account_snapshot'])
+
+    def test_every_read_turn_records_its_account_snapshot(self):
+        for settings in (None, SEARCH, TERMINAL):
+            with self.subTest(settings=settings):
+                receipt = self.execute(settings=settings, rollout=ACCOUNTED_TURN)
+                self.assertEqual(receipt['account_snapshot']['plan_type'], 'pro')
+                self.assertEqual(receipt['account_snapshot']['credits_balance'], '1200.50')
+                self.assertEqual(receipt['token_source'], 'ledger')
+
+    def test_a_turn_that_cannot_be_read_records_no_account_snapshot(self):
+        for settings in (None, TERMINAL):
+            with self.subTest(settings=settings):
+                receipt = self.execute(settings=settings, rollout=UNREADABLE)
+                self.assertEqual(receipt['token_source'], 'unknown')
+                self.assertNotIn('account_snapshot', receipt)
+                self.assertEqual('native_activity' in receipt, settings is not None)
 
     def test_a_fresh_thread_without_usage_rows_is_charged_the_stream(self):
         receipt = self.execute(settings=None, rollout=NO_ROWS, stream_usage={'input_tokens': 40, 'output_tokens': 2})

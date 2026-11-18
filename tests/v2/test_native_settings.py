@@ -1,4 +1,6 @@
 """The native_capabilities block of a run config: read, normalised and checked before any call."""
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -15,6 +17,7 @@ from rsi_lab.store import Store
 from tests.v2.liveness_support import BUDGETS
 
 INVALID = {'lab': {'shell': True}}
+EXAMPLE = Path(__file__).resolve().parents[2] / 'examples' / 'native-capabilities-run.json'
 # The run config of tests/v2/liveness_support.open_run, which also starts a Runtime; these tests start their own.
 BASE = {'execution_mode': 'replay', 'goal': 'Native settings fixture', 'authorized_sources': ['src'],
         'open_review_interval_batches': 1, 'max_open_reviews': 4, 'wait_timeout_seconds': 600}
@@ -218,6 +221,28 @@ class NativeSettingsTests(unittest.TestCase):
                 self.addCleanup(store.close)
                 with self.assertRaises(KeyError):
                     store.run('r')
+
+    def test_the_example_config_is_valid(self):
+        config = json.loads(EXAMPLE.read_text())
+        by_role = native.capabilities(config)
+        self.assertTrue(native.any_on(by_role['lab'])); self.assertTrue(native.any_on(by_role['meta']))
+        for role in ('lab', 'meta'):
+            self.assertEqual(by_role[role], {'web_search': True, 'terminal': {'readable_roots': []},
+                                             'subagents': {'max_concurrent': 3}}, role)
+        self.assertEqual(by_role['literature'], {'web_search': True, 'terminal': None, 'subagents': None})
+        self.assertEqual(config['model_timeout_seconds'], 1800)
+        self.assertEqual(config['max_effective_context_bytes'], 4194304)
+        self.assertEqual(config['model'], 'YOUR_MODEL_ID')
+
+    def test_init_accepts_the_example_and_features_reports_its_settings(self):
+        ledger = str(self.root / 'ledger')
+        with contextlib.redirect_stdout(io.StringIO()):
+            main(['--root', ledger, '--run', 'r', 'init', '--config', str(EXAMPLE)])
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            main(['--root', ledger, '--run', 'r', 'features'])
+        self.assertEqual(json.loads(printed.getvalue())['native_capabilities'],
+                         native.capabilities(json.loads(EXAMPLE.read_text())))
 
 
 if __name__ == '__main__':

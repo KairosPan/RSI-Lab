@@ -300,9 +300,11 @@ def settle_call(folder, settings, *, session, codex_home, path, thread_id, strea
     ``'Permission profile was not in force'`` when the terminal is on, the call was ``dispatched`` and its last turn
     did not run under the managed offline profile that denies ``run_root`` and ``codex_home``; else ``None``.
     ``receipt`` holds ``token_source``, ``token_reason`` (only when unknown), ``stream_usage`` and ``ledger`` for every
-    call; and when anything is on, ``native_capabilities``, ``native_activity`` (``transport.stream_activity`` of
-    ``folder`` with the turn's tool calls, tool inputs, compactions and ``provider_requests``), ``child_threads`` and
-    ``account_snapshot``. That activity is recorded only: Codex's own tool calls charge no ``tool_calls``.
+    call; ``account_snapshot``, the turn's last account snapshot or ``None``, for a ``dispatched`` call whose turn was
+    read from the rollout, whatever its settings; and when anything is on, ``native_capabilities``,
+    ``native_activity`` (``transport.stream_activity`` of ``folder`` with the turn's tool calls, tool inputs,
+    compactions and ``provider_requests``) and ``child_threads``. That activity is recorded only: Codex's own tool
+    calls charge no ``tool_calls``.
     """
     resumed = session is not None and bool(session.get('provider_thread_id'))
     prefix = ((session or {}).get('context_manifest') or {}).get('native_prefix') or {}
@@ -313,13 +315,15 @@ def settle_call(folder, settings, *, session, codex_home, path, thread_id, strea
     receipt = {'token_source': spent['source'],
                'token_reason': spent['reason'] if spent['source'] == 'unknown' else None,
                'stream_usage': stream_usage, 'ledger': {name: spent[name] for name in ('requests',) + COUNTERS}}
+    if dispatched and spent['turn'] is not None:
+        receipt['account_snapshot'] = turn['account']
     if native_tools.any_on(settings):
         receipt.update(native_capabilities=settings,
                        native_activity={**transport.stream_activity(folder),
                            **{name: turn.get(name) for name in ('tool_calls', 'tool_inputs', 'tool_inputs_omitted',
                                                                 'compactions')},
                            'provider_requests': turn.get('requests')},
-                       child_threads=spent['children'], account_snapshot=turn.get('account'))
+                       child_threads=spent['children'])
     confined = (settings['terminal'] is None or not dispatched
                 or _profile_in_force(turn.get('profile'), run_root=run_root, codex_home=codex_home))
     return {'tokens': spent['tokens'], 'usage_known': spent['source'] != 'unknown',
