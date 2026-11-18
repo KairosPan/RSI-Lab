@@ -106,11 +106,13 @@ def make_runtime(store, run_id):
     if config.get('research_architecture') == ARCHITECTURE and (
             not enhanced or config.get('batch_interpretation_capabilities') != [adapter.ADAPTER_ID]):
         raise ValueError('PABLO v3 requires the local/challenge Harness and batch interpretation barrier')
-    if config.get('research_architecture') == team.ARCHITECTURE and (
-            not led or config.get('batch_interpretation_capabilities') != [adapter.ADAPTER_ID]
-            or not set(team.ROLES) <= team.lab_roles(config)):
-        raise ValueError('PABLO team run requires the Lab-led Harness, the batch interpretation barrier '
-                         'and the local and challenge roles among the Lab sub-agent roles')
+    if config.get('research_architecture') == team.ARCHITECTURE:
+        if (not led or config.get('batch_interpretation_capabilities') != [adapter.ADAPTER_ID]
+                or not set(team.ROLES) <= team.lab_roles(config)):
+            raise ValueError('PABLO team run requires the Lab-led Harness, the batch interpretation barrier '
+                             'and the local and challenge roles among the Lab sub-agent roles')
+        # What lies under a readable root can change after preparation, so every start checks again.
+        team.check_readable_roots(config)
     # Only a Lab-led run's selection adapter carries the decision and the dispatch check.
     adapters = (registered_adapters(executable_methods=True, led=True) if led
                 else registered_adapters(executable_methods=enhanced))
@@ -335,8 +337,9 @@ def prepare(args):
     if getattr(args, 'team', False):
         if getattr(args, 'native_capabilities', None) is None:
             raise ValueError('A team run needs its native capabilities file')
-        # The terminal may not read the checkout, the frozen source copy, the parent run or this run.
-        protected = [REPO] + [Path(p) for p in (args.parent_source_root, args.parent_root) if p is not None] + [root]
+        # The terminal may not read the checkout, the frozen source copy, the parent run, a prior attempt or this run.
+        protected = [REPO] + [Path(p) for p in (args.parent_source_root, args.parent_root,
+                                                getattr(args, 'prior_attempt_root', None)) if p is not None] + [root]
         team_settings = team.preparation(json.loads(Path(args.native_capabilities).read_text()),
             protected=protected, rebuild_history_bytes=getattr(args, 'rebuild_history_bytes', None),
             backstop=getattr(args, 'challenge_backstop_batches',

@@ -34,8 +34,9 @@ sub-agents declared by the host, decides each batch's role, and states that
 decision in its selection request; a backstop (`--challenge-backstop-batches`,
 default 4, or `off`) can require a challenge batch. `--native-capabilities FILE`
 is required with `--team` and must switch on `lab.subagents`. Readable roots
-that could expose the hidden objective are refused, and a run with web search
-on for the Lab says in its config and reports that it is not a blind run.
+that could expose the hidden objective are refused at preparation and checked
+again at every host start, and a run with web search on for any role says in
+its config and reports that it is not a blind run.
 Sub-agent tokens are charged to the Lab's turn, so raise the token budget with
 `--additional-tokens`. None of these options is accepted with `--resume`.
 Without `--team`, preparation is unchanged, except that a parent which was itself

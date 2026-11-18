@@ -41,12 +41,20 @@ GOAL = (
     'must dispatch Challenge and run its proposal as a challenge batch. '
     'Start Challenge with fork_turns none and pass it the eligible anchors, candidate constraints and observed '
     'results it needs.')
-NOT_BLIND = ('Web search is on for the Lab: the hidden objective is protected by instruction only, '
-             'and this run is not a blind run.')
-# Bounds of the search for the scorer's package under a readable root.
+# How the not-blind statement names each role whose web search is on, in the kernel's role order.
+ROLE_NAMES = {'lab': 'the Lab', 'meta': 'Meta', 'literature': 'Literature'}
+NOT_BLIND_TEMPLATE = ('Web search is on for {}: the hidden objective is protected by instruction only, '
+                      'and this run is not a blind run.')
+NOT_BLIND = NOT_BLIND_TEMPLATE.format(ROLE_NAMES['lab'])
+# Bounds of the search under a readable root.
 MAX_DEPTH = 6
 MAX_FOLDERS = 20000
+# Any entry whose name starts with this, compared case-insensitively: the package, its metadata, links, archives.
 PACKAGE = 'guacamol'
+# The scorer's source as it lies in a checkout or a frozen source copy: pablo_task/oracle.py.
+SCORER_FOLDER, SCORER_FILE = 'pablo_task', 'oracle.py'
+# The ledger file the kernel's Store (rsi_lab/store.py, Store.__init__) creates in every run root.
+RUN_STORE = 'ledger.sqlite3'
 
 
 def native_block(block, *, protected):
@@ -76,25 +84,38 @@ def native_block(block, *, protected):
     # The default is written out so that the frozen run does not follow a later change of the kernel's default.
     current = {'max_concurrent': native.DEFAULT_MAX_CONCURRENT} if subagents is True else copy.deepcopy(subagents)
     result['lab']['subagents'] = {**current, 'roles': {**copy.deepcopy(own), **copy.deepcopy(ROLES)}}
-    settings = native.capabilities({'native_capabilities': result})
-    for role, entry in settings.items():
-        for root in (entry['terminal'] or {}).get('readable_roots', ()):
-            reason = exposes_objective(root, protected)
-            if reason is not None:
-                raise ValueError('native_capabilities.' + role + '.terminal.readable_roots: ' + reason)
+    _check_roots(native.capabilities({'native_capabilities': result}), protected)
     return result
+
+
+def check_readable_roots(config):
+    """Check a team run's readable roots again, as the host does at every start.
+
+    What lies under a readable root can change after preparation, so every
+    role's roots are checked against the protected paths frozen in the config
+    (``pablo_team_protected_roots``). Raises ValueError with the reason.
+    """
+    protected = config.get('pablo_team_protected_roots')
+    if (type(protected) is not list or not protected
+            or any(type(place) is not str or not os.path.isabs(place) for place in protected)):
+        raise ValueError('A team run needs pablo_team_protected_roots, the absolute paths frozen at preparation')
+    _check_roots(native.capabilities(config), protected)
 
 
 def exposes_objective(root, protected):
     """A sentence naming why a terminal readable root could hand over the hidden objective, or None.
 
-    ``protected`` are the repository checkout, the frozen source copy and each
-    parent run root. A root is refused when it equals, contains or lies inside
-    one of them (by resolved path), or when a folder named guacamol holding
-    ``__init__.py`` is found under it. The search does not follow symlinks,
-    goes at most ``MAX_DEPTH`` levels below the root and visits at most
-    ``MAX_FOLDERS`` folders; a root beyond either bound is refused as too large
-    to check, and one that cannot be read is refused as well.
+    ``protected`` are the repository checkout, the frozen source copy, the
+    parent and prior-attempt run roots and the new run root. A root is refused
+    when it equals, contains or lies inside one of them (by resolved path).
+    Places not listed are caught by what the walk finds under the root: an
+    entry of any kind whose name starts with ``guacamol`` (case-insensitive),
+    the scorer's source ``pablo_task/oracle.py`` of a checkout or source copy,
+    or a run's store (``RUN_STORE``). A root itself named like guacamol is
+    refused too. The walk does not follow symlinks, goes at most ``MAX_DEPTH``
+    levels below the root and visits at most ``MAX_FOLDERS`` folders; a root
+    beyond either bound is refused as too large to check, and one that cannot
+    be read is refused as well.
     """
     root = Path(root).resolve()
     for place in protected:
@@ -104,6 +125,8 @@ def exposes_objective(root, protected):
                     + 'the protected folder ' + str(place) + '.')
         if _within(place, root):
             return 'The readable root ' + str(root) + ' contains the protected folder ' + str(place) + '.'
+    if root.name.casefold().startswith(PACKAGE):
+        return 'The readable root ' + str(root) + ' is named like the ' + PACKAGE + ' package.'
     pending, visited = [(root, 0)], 0
     while pending:
         folder, depth = pending.pop()
@@ -113,11 +136,19 @@ def exposes_objective(root, protected):
                     + str(MAX_FOLDERS) + ' folders.')
         try:
             with os.scandir(folder) as found:
-                entries = list(found)
+                entries = sorted(found, key=lambda entry: entry.name)
         except OSError as exc:
             return 'The readable root ' + str(root) + ' could not be checked: ' + str(exc)
-        if folder.name == PACKAGE and any(entry.name == '__init__.py' for entry in entries):
-            return 'The readable root ' + str(root) + ' holds a ' + PACKAGE + ' package at ' + str(folder) + '.'
+        for entry in entries:
+            name = entry.name.casefold()
+            if name.startswith(PACKAGE):
+                return ('The readable root ' + str(root) + ' holds ' + entry.path + ', named like the '
+                        + PACKAGE + ' package.')
+            if name == SCORER_FILE and folder.name.casefold() == SCORER_FOLDER:
+                return 'The readable root ' + str(root) + " holds the scorer's source " + entry.path + '.'
+            if name == RUN_STORE:
+                return ('The readable root ' + str(root) + " holds a run's store: " + entry.path
+                        + ' in the run root ' + str(folder) + '.')
         below = [Path(entry.path) for entry in entries if entry.is_dir(follow_symlinks=False)]
         if below and depth == MAX_DEPTH:
             return ('The readable root ' + str(root) + ' is too large to check: it has folders more than '
@@ -127,9 +158,17 @@ def exposes_objective(root, protected):
 
 
 def not_blind(block):
-    """The plain statement a run with web search on for the Lab carries, or None."""
-    lab = block.get('lab') if type(block) is dict else None
-    return NOT_BLIND if type(lab) is dict and lab.get('web_search') is True else None
+    """The plain statement a run with web search on for any role carries, or None.
+
+    The block is read as the kernel reads it, so the statement cannot disagree
+    with what the kernel switches on. The roles are named in the order lab,
+    meta, literature; for the Lab alone the sentence is ``NOT_BLIND``.
+    """
+    settings = native.capabilities({'native_capabilities': block})
+    names = [ROLE_NAMES[role] for role in native.ROLES if settings[role]['web_search']]
+    if not names:
+        return None
+    return NOT_BLIND_TEMPLATE.format(names[0] if len(names) == 1 else ', '.join(names[:-1]) + ' and ' + names[-1])
 
 
 def preparation(block, *, protected, backstop=harness.LED_DEFAULT_CONFIG['challenge_backstop_batches'],
@@ -148,9 +187,12 @@ def preparation(block, *, protected, backstop=harness.LED_DEFAULT_CONFIG['challe
         raise ValueError('The rebuild history size must be an integer of at least '
                          + str(MIN_REBUILD_HISTORY_BYTES) + ' bytes')
     block = native_block(block, protected=protected)
+    # Frozen so that every host start can check the readable roots again against the same places.
+    roots = list(dict.fromkeys(str(Path(place).resolve()) for place in protected))
     return {'research_architecture': ARCHITECTURE, 'pablo_harness': policy, 'native_capabilities': block,
             'max_effective_context_bytes': MAX_EFFECTIVE_CONTEXT_BYTES,
-            'prospective_rebuild_history_bytes': rebuild_history_bytes, 'pablo_not_blind': not_blind(block)}
+            'prospective_rebuild_history_bytes': rebuild_history_bytes, 'pablo_not_blind': not_blind(block),
+            'pablo_team_protected_roots': roots}
 
 
 def lab_roles(config):
@@ -165,6 +207,15 @@ def session_native(by_role, role):
     """
     settings = native.validate(by_role[role])
     return None if settings == native.OFF else settings
+
+
+def _check_roots(by_role, protected):
+    """Raise ValueError for the first readable root of any role that ``exposes_objective`` refuses."""
+    for role, entry in by_role.items():
+        for root in (entry['terminal'] or {}).get('readable_roots', ()):
+            reason = exposes_objective(root, protected)
+            if reason is not None:
+                raise ValueError('native_capabilities.' + role + '.terminal.readable_roots: ' + reason)
 
 
 def _same(path, folder):

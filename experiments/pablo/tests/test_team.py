@@ -89,6 +89,46 @@ class TeamTests(unittest.TestCase):
         self.assertIn('guacamol', team.exposes_objective(outside, [checkout]))
         self.assertIn('guacamol', team.exposes_objective(outside / 'env' / 'lib' / 'site-packages' / 'guacamol', []))
 
+    def test_scorer_source_or_a_run_store_under_a_root_is_refused_though_not_listed(self):
+        _, _, clean = tree(self.base)
+        (clean / 'tools').mkdir()
+        (clean / 'tools' / 'oracle.py').write_text('')   # Not in a pablo_task folder.
+        self.assertIsNone(team.exposes_objective(clean, []))
+        scorer = self.base / 'source-copy' / 'experiments' / 'pablo' / 'pablo_task'
+        scorer.mkdir(parents=True)
+        (scorer / 'oracle.py').write_text('')
+        reason = team.exposes_objective(self.base / 'source-copy', [])
+        self.assertIn("holds the scorer's source " + str(scorer / 'oracle.py'), reason)
+        earlier = self.base / 'old-runs' / 'earlier-run'
+        Store(earlier).close()                          # What the kernel leaves in every run root.
+        reason = team.exposes_objective(self.base / 'old-runs', [])
+        self.assertIn("holds a run's store: " + str(earlier / team.RUN_STORE), reason)
+        self.assertIn('in the run root ' + str(earlier), reason)
+
+    def test_every_entry_named_like_the_package_is_refused(self):
+        _, _, clean = tree(self.base)
+        for index, (name, folder) in enumerate((('guacamol', True), ('guacamol-0.5.2.dist-info', True),
+                                                ('Guacamol.egg-link', False), ('guacamol.zip', False))):
+            with self.subTest(name=name):
+                root = self.base / ('environment-' + str(index))
+                place = root / 'lib' / 'site-packages'
+                place.mkdir(parents=True)
+                if folder:
+                    (place / name).mkdir()
+                else:
+                    (place / name).write_text('')
+                reason = team.exposes_objective(root, [])
+                self.assertIn('holds ' + str(place / name) + ', named like the guacamol package', reason)
+                if folder:
+                    # The folder itself as a readable root is refused by its own name.
+                    self.assertIn('is named like the guacamol package', team.exposes_objective(place / name, []))
+        # A symlink is refused by its name, and not followed: its target here is clean.
+        linked = self.base / 'linked'
+        linked.mkdir()
+        os.symlink(clean, linked / 'GUACAMOL')
+        self.assertIn(str(linked / 'GUACAMOL'), team.exposes_objective(linked, []))
+        self.assertIsNone(team.exposes_objective(clean, []))
+
     def test_a_root_that_cannot_be_checked_in_bounds_is_refused(self):
         _, _, clean = tree(self.base)
         deep = clean.joinpath(*['level'] * 6)
@@ -127,6 +167,25 @@ class TeamTests(unittest.TestCase):
         self.assertEqual(team.not_blind({'lab': {'subagents': True, 'web_search': True}}),
                          'Web search is on for the Lab: the hidden objective is protected by instruction only, '
                          'and this run is not a blind run.')
+        self.assertEqual(team.NOT_BLIND, team.not_blind({'lab': {'web_search': True}}))
+
+    def test_not_blind_names_every_role_whose_web_search_is_on(self):
+        sentence = ('Web search is on for {}: the hidden objective is protected by instruction only, '
+                    'and this run is not a blind run.')
+        on = {'web_search': True}
+        cases = [({'lab': {'subagents': True, **on}}, 'the Lab'), ({'lab': {'subagents': True}, 'meta': on}, 'Meta'),
+                 ({'lab': on, 'meta': on}, 'the Lab and Meta'), ({'literature': on, 'lab': on}, 'the Lab and Literature'),
+                 ({'lab': on, 'meta': on, 'literature': on}, 'the Lab, Meta and Literature')]
+        for block, who in cases:
+            with self.subTest(block=block):
+                self.assertEqual(team.not_blind(block), sentence.format(who))
+        for block in ({}, {'lab': {'subagents': True}, 'meta': {'web_search': False}, 'literature': {}}):
+            with self.subTest(block=block):
+                self.assertIsNone(team.not_blind(block))
+        # The block is read as the kernel reads it, so what the kernel refuses is refused here too.
+        for block in ({'meta': {'web_search': 'yes'}}, {'search': on}):
+            with self.subTest(block=block), self.assertRaises(ValueError):
+                team.not_blind(block)
 
     def test_goal_states_the_team_in_order(self):
         order = ['local', 'challenge', 'default', 'lead', 'pablo.select_candidates', 'pablo.evaluate',
@@ -148,8 +207,10 @@ class TeamTests(unittest.TestCase):
             'pablo_harness': harness.LED_DEFAULT_CONFIG,
             'native_capabilities': team.native_block(block, protected=[]),
             'max_effective_context_bytes': 4194304, 'prospective_rebuild_history_bytes': 4194304,
-            'pablo_not_blind': team.not_blind(block)})
+            'pablo_not_blind': team.not_blind(block), 'pablo_team_protected_roots': []})
         self.assertEqual(harness.configuration(settings)['version'], harness.LED_VERSION)
+        listed = team.preparation(block, protected=[self.base / 'a' / '..' / 'b', self.base / 'b', 'relative'])
+        self.assertEqual(listed['pablo_team_protected_roots'], [str(self.base / 'b'), str(Path('relative').resolve())])
         off = team.preparation({'lab': {'subagents': True}}, protected=[], backstop=None,
                                rebuild_history_bytes=262144)
         self.assertIsNone(off['pablo_harness']['challenge_backstop_batches'])

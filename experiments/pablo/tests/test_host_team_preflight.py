@@ -39,7 +39,7 @@ class HostTeamPreflightTests(unittest.TestCase):
             'batch_interpretation_capabilities': [adapter.ADAPTER_ID],
             'native_capabilities': team.native_block({'lab': {'subagents': True}}, protected=[]),
             'research_policy': research_policy(team=True), 'effort': 'high', 'max_open_reviews': 0,
-            **(overrides or {})})
+            'pablo_team_protected_roots': [str(host.REPO)], **(overrides or {})})
 
     def opened(self, args):
         store = Store(args.root)
@@ -62,6 +62,8 @@ class HostTeamPreflightTests(unittest.TestCase):
         self.assertEqual(config['max_effective_context_bytes'], 4194304)
         self.assertEqual(config['prospective_rebuild_history_bytes'], 4194304)
         self.assertEqual(config['pablo_not_blind'], team.NOT_BLIND)
+        self.assertEqual(config['pablo_team_protected_roots'],
+                         [str(host.REPO), str(self.base / 'source'), str(self.base / 'parent'), str(args.root)])
         self.assertEqual(config['research_policy'], research_policy(team=True))
         goal = config['goal']
         self.assertIn(' ' + team.GOAL + ' For every scoring batch first execute pablo.select_candidates', goal)
@@ -108,17 +110,19 @@ class HostTeamPreflightTests(unittest.TestCase):
         self.assert_no_execution(store, 'child')
 
     def test_a_readable_root_that_could_hand_over_the_objective_is_refused_before_anything_is_written(self):
-        for folder in ('source', 'parent', 'runs'):
+        for folder in ('source', 'parent', 'prior', 'runs'):
             (self.base / folder).mkdir()
         roots = {'checkout': (host.REPO / 'experiments', 'lies inside'),
                  'frozen source copy': (self.base / 'source', 'is the protected folder'),
                  'parent run root': (self.base / 'parent', 'is the protected folder'),
+                 'prior attempt root': (self.base / 'prior', 'is the protected folder'),
                  'folder of the new run root': (self.base / 'runs', 'contains the protected folder')}
         for name, (root, reason) in roots.items():
             with self.subTest(root=name):
                 given = {'lab': {'subagents': True, 'terminal': {'readable_roots': [str(root)]}}}
                 args = argparse.Namespace(root=self.base / 'runs' / 'child', run_id='child',
                     parent_root=self.base / 'parent', parent_run_id='parent', parent_source_root=self.base / 'source',
+                    prior_attempt_root=self.base / 'prior',
                     new_evaluations=2, max_model_calls=24, literature_max_calls=3, integration_smoke=False,
                     team=True, native_capabilities=self.native_file(given))
                 with patch.object(host, 'load_parent') as load:
@@ -241,12 +245,55 @@ class HostTeamPreflightTests(unittest.TestCase):
         for changes in ({'pablo_harness': copy.deepcopy(harness.DEFAULT_CONFIG)}, {'pablo_harness': None},
                         {'batch_interpretation_capabilities': []}, {'batch_interpretation_capabilities': None},
                         {'native_capabilities': {'lab': {'subagents': True}}}, {'native_capabilities': only_local},
-                        {'native_capabilities': {}}):
+                        {'native_capabilities': {}}, {'pablo_team_protected_roots': None},
+                        {'pablo_team_protected_roots': []}, {'pablo_team_protected_roots': ['relative/place']}):
             with self.subTest(changes=changes):
                 store = self.team_store(changes)
-                with self.assertRaisesRegex(ValueError, 'team run requires'):
+                with self.assertRaisesRegex(ValueError, 'team run requires|team run needs pablo_team_protected_roots'):
                     host.make_runtime(store, 'run')
                 self.assert_no_execution(store)
+
+    def test_every_start_checks_the_readable_roots_again(self):
+        readable = self.base / 'readable'
+        (readable / 'nested').mkdir(parents=True)
+        given = {'lab': {'subagents': True, 'terminal': {'readable_roots': [str(readable)]}}}
+        args = self.prepared_child(team=True, native_capabilities=self.native_file(given))
+        store, _ = self.opened(args)
+        host.make_runtime(store, 'child')
+        appeared = readable / 'nested' / 'Guacamol.egg-link'
+        appeared.write_text('')
+        with self.assertRaisesRegex(ValueError, 'readable_roots: .*' + str(appeared) + ', named like the guacamol'):
+            host.make_runtime(store, 'child')
+        store.close()
+        with patch.object(host, 'CodexExecutor') as executor, contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(host.drive(args), 2)
+        executor.assert_not_called()
+        self.assertIn('named like the guacamol package',
+                      json.loads((args.root / 'attention.json').read_text())['reason'])
+        appeared.unlink()
+        store, _ = self.opened(args)
+        host.make_runtime(store, 'child')
+        self.assert_no_execution(store, 'child')
+
+    def test_every_roles_readable_roots_are_checked_at_start(self):
+        readable = self.base / 'meta-readable'
+        readable.mkdir()
+        block = team.native_block({'lab': {'subagents': True},
+                                   'meta': {'terminal': {'readable_roots': [str(readable)]}}}, protected=[])
+        store = self.team_store({'native_capabilities': block})
+        host.make_runtime(store, 'run')
+        Store(readable / 'earlier-run').close()
+        with self.assertRaisesRegex(ValueError, "meta.terminal.readable_roots: .*holds a run's store"):
+            host.make_runtime(store, 'run')
+        self.assert_no_execution(store)
+
+    def test_runs_that_are_not_team_runs_are_not_checked_at_start(self):
+        with patch.object(team, 'check_readable_roots', side_effect=AssertionError('checked')) as checked:
+            host.make_runtime(self.open_run(), 'run')
+            host.make_runtime(self.open_run({'research_architecture': host.ARCHITECTURE,
+                'pablo_harness': copy.deepcopy(harness.DEFAULT_CONFIG),
+                'batch_interpretation_capabilities': [adapter.ADAPTER_ID]}), 'run')
+        checked.assert_not_called()
 
     def session_with_rollout(self, store, runtime, role):
         """A session that names a native rollout, as one whose turn was committed does."""

@@ -82,31 +82,37 @@ Lab 可以再次联系更早启动的子代理，而不是新开一个；那个�
 
 ## 网络搜索使运行不再是盲测
 
-网络搜索允许打开。打开后，隐藏目标只靠目标文本中的指令（“Do not search for or infer hidden benchmark identity”）保护，而不是靠 Lab 能接触到什么。`lab.web_search` 为 true 时，冻结配置的 `pablo_not_blind` 是下面这句原文，团队运行写出的每个 `progress.json` 和 `result.json` 都带有同值的 `not_blind`：
+网络搜索允许打开。打开后，隐藏目标只靠目标文本中的指令（“Do not search for or infer hidden benchmark identity”）保护，而不是靠 Lab 能接触到什么。设置块按内核自己的读法读取（`rsi_lab.native.capabilities`），任何角色（`lab`、`meta`、`literature`）的网络搜索打开时，冻结配置的 `pablo_not_blind` 是下面这句，团队运行写出的每个 `progress.json` 和 `result.json` 都带有同值的 `not_blind`：
+
+> Web search is on for <who>: the hidden objective is protected by instruction only, and this run is not a blind run.
+
+`<who>` 按 lab、meta、literature 的顺序列出打开的角色，写作 `the Lab`、`Meta`、`Literature`，用逗号连接，最后两项之间用 `and`，例如 `the Lab`、`Meta`、`the Lab and Meta`、`the Lab, Meta and Literature`。只有 Lab 打开时，原文是：
 
 > Web search is on for the Lab: the hidden objective is protected by instruction only, and this run is not a blind run.
 
-没有打开网络搜索的团队运行，`pablo_not_blind` 和 `not_blind` 为 null。其他运行的配置和报告没有这两个键。
+没有任何角色打开网络搜索的团队运行，`pablo_not_blind` 和 `not_blind` 为 null。其他运行的配置和报告没有这两个键。
 
 ## 被拒绝的终端可读目录
 
-任何角色的 `terminal.readable_roots` 中，下列目录在准备时被拒绝，运行目录尚未创建：
+任何角色的 `terminal.readable_roots` 中，下列目录被拒绝：
 
-- 等于、包含或位于以下目录之内（按解析后的路径比较）：宿主所在的仓库 checkout、父运行的冻结源码副本（`--parent-source-root`）、父运行目录、新运行目录；
-- 其下能找到名为 `guacamol` 且含 `__init__.py` 的文件夹；
-- 检查无法在界限内完成：搜索不跟随符号链接，最多向下 6 层、最多访问 20,000 个文件夹，超出任一界限即视为太大无法检查而拒绝；无法读取的目录同样拒绝。
+- 等于、包含或位于以下目录之内（按解析后的路径比较）：宿主所在的仓库 checkout、父运行的冻结源码副本（`--parent-source-root`）、父运行目录、`--prior-attempt-root`、新运行目录；
+- 没有列出的地方按内容识别，在同一次有界的遍历中：其下（包括目录本身的名字）有名字以 `guacamol` 开头的任何条目（文件夹、文件或符号链接，不区分大小写，例如 `guacamol`、`guacamol-0.5.2.dist-info`、`Guacamol.egg-link`、`guacamol.zip`）；其下有 `pablo_task` 文件夹中的 `oracle.py`，即某个 checkout 或冻结源码副本中的评分器源码；其下有运行的存储，即内核 `Store` 在每个运行目录中创建的 `ledger.sqlite3`，这样更早的祖先运行也能被认出。拒绝原因写明找到了什么、在哪里；
+- 检查无法在界限内完成：遍历不跟随符号链接，最多向下 6 层、最多访问 20,000 个文件夹，超出任一界限即视为太大无法检查而拒绝；无法读取的目录同样拒绝。
+
+检查在两个时候进行。准备时，在写入任何内容之前检查，并把受保护的路径（解析后的绝对路径）冻结在配置的 `pablo_team_protected_roots` 中。之后宿主每次启动（`make_runtime`，包括 `--resume`）对每个角色的每个可读目录按这些路径重新检查一遍，因为目录中的内容在准备之后可能变化；有一个不通过就拒绝启动并写明原因。不是团队运行的运行不做这项检查。
 
 内核自己的规则仍然适用：可读目录不能是或位于运行目录、Codex home 之内，也不能是共享临时目录。
 
 ## 宿主检查
 
-`make_runtime` 拒绝缺少 Lab-led Harness、批次解释屏障（`batch_interpretation_capabilities=["pablo.evaluate"]`）或 Lab 角色中没有 `local` 和 `challenge` 的团队配置。Lab-led 运行注册带 `decision` 契约和派出检查的选点工具；其他运行的工具注册不变。
+`make_runtime` 拒绝缺少 Lab-led Harness、批次解释屏障（`batch_interpretation_capabilities=["pablo.evaluate"]`）、`pablo_team_protected_roots`，或 Lab 角色中没有 `local` 和 `challenge` 的团队配置，并重新检查可读目录（见上一节）。Lab-led 运行注册带 `decision` 契约和派出检查的选点工具；其他运行的工具注册不变。
 
 ## 验证
 
 全部是离线测试，使用临时目录和合成数据，没有调用模型、评分器或网络：
 
-- `tests/test_team.py`：角色文字、原生设置块的拒绝条件、可读目录检查、非盲陈述、团队设置，以及一个端到端测试：在真实 Runtime 中注册 Lab-led 工具，用脚本化的 Lab 回答提出声称已派出 Challenge 的选点请求；调用记录中没有 `challenge` 子代理时被拒绝，有时被接收。
-- `tests/test_host_team_preflight.py`：`--team` 准备冻结的架构、Harness、设置块、上限和 `pablo_not_blind`；各选项的误用都是参数错误；不带 `--team` 的准备不变；父运行是团队运行时，不带 `--team` 的准备被拒绝，`--team` 准备成功；`make_runtime` 拒绝不完整的团队配置；两个记录读取点传入的原生设置。
+- `tests/test_team.py`：角色文字、原生设置块的拒绝条件、可读目录检查的每个拒绝原因、按角色组合的非盲陈述、团队设置，以及一个端到端测试：在真实 Runtime 中注册 Lab-led 工具，用脚本化的 Lab 回答提出声称已派出 Challenge 的选点请求；调用记录中没有 `challenge` 子代理时被拒绝，有时被接收。
+- `tests/test_host_team_preflight.py`：`--team` 准备冻结的架构、Harness、设置块、上限和 `pablo_not_blind`；各选项的误用都是参数错误；不带 `--team` 的准备不变；父运行是团队运行时，不带 `--team` 的准备被拒绝，`--team` 准备成功；`make_runtime` 拒绝不完整的团队配置；`--prior-attempt-root` 受保护；每次启动重新检查可读目录，准备后变得暴露的目录使启动被拒绝；两个记录读取点传入的原生设置。
 
 这些测试证明准备和检查的接线成立，不证明团队方式能提高分数；团队运行至今没有执行过。
