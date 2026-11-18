@@ -313,8 +313,8 @@ class Runtime:
 
     def _context(self, work, orchestration=None, *, read_only=False):
         """Build the visible context and its dependency manifest in one snapshot."""
+        role = work['kind'] if work['kind'] in {'lab', 'literature'} else 'meta'
         if not read_only:
-            role = work['kind'] if work['kind'] in {'lab', 'literature'} else 'meta'
             if role == 'literature':
                 # Refuse a stale or foreign delegation before any child session exists.
                 self._literature_task(work)
@@ -329,6 +329,10 @@ class Runtime:
             if orchestration is not None and digest(orchestration) != digest(self.orchestration.snapshot()):
                 raise decision_dependencies.StaleDecision('Orchestration changed while building the decision context')
             agent, mode, task, options = self._build_context(work, orchestration, read_only=True)
+            # The role's native settings travel with its request only when something is on.
+            settings = native.validate(self.native[role])
+            if settings != native.OFF:
+                task['constraints']['native_capabilities'] = settings
             if mode == 'literature':
                 # The delegated child is bound to its task revision. Research-state
                 # decision dependencies belong to its Lab and Meta owners.
@@ -575,7 +579,8 @@ class Runtime:
                 snapshot = read_native_snapshot(previous['native_session_ref'],
                     expected_thread_id=session['provider_thread_id'],
                     expected_cwd=str(self.store.root / 'agents' / session['id'] / 'workspace'),
-                    expected_prefix=previous.get('native_prefix'))
+                    expected_prefix=previous.get('native_prefix'),
+                    native=task['constraints'].get('native_capabilities'))
                 if snapshot['prefix_sha256'] != previous.get('native_prefix', {}).get('prefix_sha256'):
                     raise ValueError('Native session advanced outside its committed turn; reconcile before resume')
             except (ValueError, OSError) as exc:
@@ -644,6 +649,8 @@ class Runtime:
                    if 'recommendation_admission' in task['constraints'].get('research_loop', {}) else {}),
                 **({'final_review_only':True} if task['constraints'].get('final_review_only') else {}),
                 **({'interpretation_only': True} if task['constraints'].get('interpretation_only') else {}),
+                **({'native_capabilities': task['constraints']['native_capabilities']}
+                   if 'native_capabilities' in task['constraints'] else {}),
                 # The executor recomputes the response schema from this record.
                 **({'orchestration': self.orchestration.metadata(mode, orchestration)}
                    if orchestration and mode != 'literature' else {}),

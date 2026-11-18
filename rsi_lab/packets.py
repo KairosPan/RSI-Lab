@@ -137,8 +137,11 @@ class PacketBuilder:
 
     def build(self, *, mode, instruction, schema, task, evidence_ids=(), required_evidence_ids=(),
               model='gpt-6-astra', effort='medium', strategy='complete', page_cursors=None,
-              owner_interpretation=None, prior_review=None):
-        """One exact builder shared by planning, effects and final dispatch checks."""
+              owner_interpretation=None, prior_review=None, preamble=None):
+        """One exact builder shared by planning, effects and final dispatch checks.
+
+        ``preamble`` prefixes the prompt; ``None`` is the transport's, which forbids tools.
+        """
         if mode not in ('lab', 'literature', 'discovery', 'disposition') or strategy not in ('complete', 'paged', 'deduplicated', 'narrowed'):
             raise ValueError('Unknown role mode or bounded context strategy')
         if not isinstance(instruction, str) or not instruction or not isinstance(schema, dict) or not isinstance(task, dict):
@@ -185,7 +188,7 @@ class PacketBuilder:
         view = input_view.render(data, presentation)
         render_audit = input_view.audit_render(data, view, presentation)
         body = instruction + '\nINPUT_DATA_JSON:\n' + view
-        prompt = transport.PREAMBLE + body
+        prompt = (transport.PREAMBLE if preamble is None else preamble) + body
         envelope = {'schema_version': self.envelope_schema, 'mode': mode, 'model': model,
                     'effort': effort, 'prompt': prompt, 'response_schema': copy.deepcopy(schema),
                     'input_view_mode': presentation}

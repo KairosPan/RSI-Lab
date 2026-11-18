@@ -13,6 +13,7 @@ import json
 from pathlib import Path
 
 from . import input_view, transport
+from . import native as native_tools
 from .packets import PacketBuilder, digest, encoded
 from . import images
 from .improvements import enabled
@@ -100,6 +101,15 @@ COMMON = (
     'Partial delivery cannot support a claim that the full source was checked. '
     'Return exactly the requested JSON schema. Copy the issue identity and expected versions '
     'from the task. Do not invent a missing user answer, successful test or capability. '
+)
+# With native tools on, each role's sentences that forbid running tools change
+# and the Literature child's sentence that says they are disabled is dropped.
+NATIVE_SENTENCES = (
+    ('You only propose typed commands. ', 'Your final answer proposes one typed command. '),
+    ('Do not execute tools, install software,', 'Do not execute registered capabilities yourself, install software,'),
+    ('Do not run tools directly or invent results. Only the controller executes and publishes source-backed facts. ',
+     'Do not invent results. Only the controller executes registered capabilities and publishes source-backed facts. '),
+    ('Native tools remain disabled; propose typed requests. ', ''),
 )
 
 # A general decision policy, not a task-specific research trigger. The Lab
@@ -312,6 +322,8 @@ class MetaAgent:
         orchestration = task.get('constraints',{}).get('orchestration')
         lab_settings = lab_settings_enabled(orchestration)
         admission = task.get('constraints',{}).get('research_loop',{}).get('recommendation_admission')
+        native_settings = native_tools.validate(task.get('constraints', {}).get('native_capabilities'))
+        native_on = native_settings != native_tools.OFF
         response_schema(mode,research_features=features,final_review_only=final_review_only,research_policy=policy,
                         lab_settings=lab_settings, recommendation_admission=admission,
                         interpretation_only=interpretation_only,
@@ -402,6 +414,10 @@ class MetaAgent:
                     'on the child\'s behalf, or call literature capabilities through request_diagnostic. '
                     'Preserve explicit user-supplied sources and constraints as task requirements. Describe '
                     'the evidence needed and the acceptance/stopping criteria, not tool orchestration. ')
+        if native_on:
+            # Only the role's own sentences change, before any host-supplied text is appended.
+            for old, new in NATIVE_SENTENCES:
+                instructions = instructions.replace(old, new)
         if orchestration is not None:
             from .orchestration import LAB_INSTRUCTION, META_INSTRUCTION, LAB_SETTINGS_INSTRUCTION
             if mode == 'lab':
@@ -502,6 +518,7 @@ class MetaAgent:
                 'Narrowing may only reduce the existing object/field/page/byte scope. A park requires a '
                 'specific producer, dependency version, wake condition, deadline and expiry action. '
                 'Closing an unresolved issue must remain explicitly unresolved; the controller checks duties. ')
+        instructions += native_tools.instruction(native_settings)
         return dict(mode=mode, instruction=instructions, schema=response_schema(mode, working_memory='agent_state' in task,
                     research_features=features,final_review_only=final_review_only,research_policy=policy,
                     lab_settings=lab_settings, recommendation_admission=admission,
@@ -509,7 +526,7 @@ class MetaAgent:
                     literature_delegation_version=delegation_version), task=task,
                     evidence_ids=evidence_ids, required_evidence_ids=required_evidence_ids, model=self.model,
                     effort=self.effort, owner_interpretation=owner_interpretation, prior_review=prior_review,
-                    page_cursors=page_cursors)
+                    page_cursors=page_cursors, **({'preamble': native_tools.PREAMBLE} if native_on else {}))
 
     def prepare(self, mode, task, **kwargs):
         return self.builder.plan(**self.arguments(mode, task, **kwargs))
