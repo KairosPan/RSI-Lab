@@ -793,10 +793,26 @@ class CodexExecutor:
         except ValueError as exc:
             raise ValueError('Unsupported exact model request envelope') from exc
         native_on = native_tools.any_on(settings)
+
+        def refused(error):
+            # A call refused before dispatch never reaches the provider. Settle
+            # its reservations as known zero without certifying a native
+            # turn or accepting any private memory update.
+            return {'status': 'failed_definite',
+                'actual_costs': {name: 0 for name in effect.get('reservations', {})},
+                'response': None, 'usage': None, 'usage_complete': False,
+                'terminal_received': False, 'native_writer_quiesced': True,
+                'never_dispatched': True, 'protocol_valid': False,
+                'provider_thread_id': (session or {}).get('provider_thread_id'),
+                'context_manifest': None, 'journal': None, 'parse_error': None,
+                'receipt_ref': None, 'receipt_sha256': None,
+                'sent_packet_sha256': expected_hash, 'sent_prompt_sha256': digest(request['prompt']),
+                'error': error,
+                'unknown_usage_is_zero': False}
         # Declared sub-agent roles reach Codex as files in the session's folder, so they need a session.
         declared_roles = (settings['subagents'] or {}).get('roles', {})
         if declared_roles and session is None:
-            raise ValueError('Sub-agent roles need a persistent session')
+            return refused('Sub-agent roles need a persistent session')
         preamble = native_tools.PREAMBLE if native_on else transport.PREAMBLE
         expected_keys = {'schema_version', 'mode', 'model', 'effort', 'prompt', 'response_schema', 'input_view_mode'}
         if (('native_capabilities' in metadata) != native_on
@@ -864,6 +880,10 @@ class CodexExecutor:
                     if os.path.lexists(workspace / '.tmp') and not (workspace / '.tmp').is_dir():
                         raise ValueError("The workspace's .tmp, where the terminal's temporary files go, "
                                          'is not a directory')
+                if declared_roles:
+                    # Written here so that what cannot be written refuses the call; the transport writes them
+                    # again, from the same settings, just before Codex starts.
+                    transport.write_role_files(roles_dir, declared_roles)
                 prior = session.get('context_manifest') or {}
                 if session.get('committed_turn', 0) and not session.get('provider_thread_id'):
                     raise ValueError('Committed persistent session has no native thread; reconstruct explicitly')
@@ -887,23 +907,9 @@ class CodexExecutor:
                              'agent_id': session['agent_instance_id'], 'session_id': sid,
                              'turn_id': metadata['agent_turn_id'], 'fence': metadata['session_fence']}}
                 if declared_roles:
-                    # The transport writes the role files there afresh before Codex starts.
                     extra['roles_dir'] = roles_dir
             except (ValueError, OSError, KeyError, TypeError) as exc:
-                # A rejected local preflight never reaches the provider. Settle
-                # its reservations as known zero without certifying a native
-                # turn or accepting any private memory update.
-                return {'status': 'failed_definite',
-                    'actual_costs': {name: 0 for name in effect.get('reservations', {})},
-                    'response': None, 'usage': None, 'usage_complete': False,
-                    'terminal_received': False, 'native_writer_quiesced': True,
-                    'never_dispatched': True, 'protocol_valid': False,
-                    'provider_thread_id': session.get('provider_thread_id'),
-                    'context_manifest': None, 'journal': None, 'parse_error': None,
-                    'receipt_ref': None, 'receipt_sha256': None,
-                    'sent_packet_sha256': expected_hash, 'sent_prompt_sha256': digest(request['prompt']),
-                    'error': 'Persistent session preflight failed: ' + str(exc),
-                    'unknown_usage_is_zero': False}
+                return refused('Persistent session preflight failed: ' + str(exc))
         if loaded_images:
             extra['images'] = loaded_images
         if native_on:

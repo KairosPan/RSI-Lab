@@ -21,7 +21,7 @@ from rsi_lab import native, roles, transport
 from rsi_lab.session_context import read_native_snapshot
 from rsi_lab.store import digest
 from tests.v2.liveness_support import Scripted, none, open_run
-from tests.v2.native_fixtures import (PLAIN, PROFILE, ROLES, SEARCH, TERMINAL, TERMINAL_AND_SUBAGENTS, WITH_ROLES,
+from tests.v2.native_fixtures import (PLAIN, PROFILE, R, ROLES, SEARCH, TERMINAL, TERMINAL_AND_SUBAGENTS, WITH_ROLES,
                                       account, child_rollout, sub_agent_started, tool_call, turn_context, usage_row)
 from tests.v2.test_session_context import THREAD, fixture
 
@@ -501,28 +501,86 @@ class NativeExecutorTests(unittest.TestCase):
         self.assertEqual(self.calls[0]['native'], PLAIN)
         self.assertEqual(receipt['native_capabilities'], PLAIN)
 
-    def test_executor_refuses_roles_without_a_persistent_session(self):
+    def dispatch_refused_roles(self, *, arrange=None, alter=None):
+        """Dispatch a Lab call whose Effect declares ``ROLES`` through the Controller, the executor and the real
+        transport, with a ``Popen`` that fails if Codex is started, and check that the call settles as a definite
+        failure that was never dispatched, its reservations released. ``arrange(session_folder)`` prepares the
+        session's folder first; ``alter(dispatching, raw)`` returns the Effect and packet the executor is handed.
+        Returns the executor's receipt."""
         store, controller, runtime = open_run(self, config={'native_capabilities': {'lab': config_form(WITH_ROLES)}})
+        self.store = store
         effect = runtime.prepare_meta(runtime.enqueue_lab('lab-2')['id'], RESERVATION)
         self.assertEqual(effect['status'], 'prepared', effect)
-        raised = []
+        if arrange is not None:
+            arrange(store.root / 'agents' / effect['metadata']['agent_session_id'])
+        receipts = []
 
         def executor(dispatching, raw):
+            if alter is not None:
+                dispatching, raw = alter(dispatching, raw)
+            receipts.append(roles.CodexExecutor(store.root / 'calls')(dispatching, raw))
+            return receipts[-1]
+        with patch.object(transport.subprocess, 'Popen', side_effect=AssertionError('Codex started')) as popen:
+            settled = controller.dispatch_effect('r', effect['id'], executor)
+        popen.assert_not_called()
+        # The executor returned a receipt; it raised nothing. Else the Controller's receipt says what it raised.
+        self.assertEqual(len(receipts), 1, store.read_blob(settled['receipt_ref']))
+        receipt = receipts[0]
+        self.assertEqual((receipt['status'], receipt['never_dispatched']), ('failed_definite', True))
+        self.assertEqual(receipt['actual_costs'], {name: 0 for name in RESERVATION})
+        self.assertEqual(settled['status'], 'failed_definite')
+        for name in RESERVATION:
+            budget = store.get('r', 'budget', name)
+            self.assertEqual((budget['reserved'], budget['spent']), (0, 0), name)
+        self.assertFalse((store.root / 'calls' / effect['id']).exists())
+        return receipt
+
+    def test_executor_refuses_roles_without_a_persistent_session(self):
+        def without_session(dispatching, raw):
             # The same Effect, but for the persistent session its call would run in.
             metadata = {key: value for key, value in dispatching['metadata'].items() if key != 'agent_session'}
-            try:
-                return roles.CodexExecutor(store.root / 'calls')({**dispatching, 'metadata': metadata}, raw)
-            except ValueError as exc:
-                raised.append(exc)
-                raise
-        with patch.object(roles.transport, 'invoke', side_effect=AssertionError('The call was dispatched')) as invoke, \
-                patch.object(transport.subprocess, 'Popen', side_effect=AssertionError('Codex started')) as popen:
-            controller.dispatch_effect('r', effect['id'], executor)
-        self.assertEqual([str(exc) for exc in raised], ['Sub-agent roles need a persistent session'])
+            return {**dispatching, 'metadata': metadata}, raw
+        with patch.object(roles.transport, 'invoke', side_effect=AssertionError('The call was dispatched')) as invoke:
+            receipt = self.dispatch_refused_roles(alter=without_session)
         invoke.assert_not_called()
-        popen.assert_not_called()
-        self.assertFalse((store.root / 'calls' / effect['id']).exists())
-        self.assertEqual(list((store.root / 'agents').glob('*/roles')), [])
+        self.assertEqual(receipt['error'], 'Sub-agent roles need a persistent session')
+        self.assertEqual(list((self.store.root / 'agents').glob('*/roles')), [])
+
+    def test_a_role_file_that_cannot_be_written_refuses_the_call(self):
+        elsewhere = Path(tempfile.mkdtemp(prefix='rsi-native-elsewhere-'))
+        self.addCleanup(shutil.rmtree, elsewhere, ignore_errors=True)
+
+        def linked_folder(session):
+            session.mkdir(parents=True, exist_ok=True)
+            (session / 'roles').symlink_to(elsewhere, target_is_directory=True)
+
+        def linked_file(session):
+            (session / 'roles').mkdir(parents=True)
+            (session / 'roles' / 'local.toml').symlink_to(elsewhere / 'outside.toml')
+        for case, arrange in (('a symlinked role folder', linked_folder), ('a symlinked role file', linked_file)):
+            with self.subTest(case=case):
+                receipt = self.dispatch_refused_roles(arrange=arrange)
+                self.assertTrue(receipt['error'].startswith('Persistent session preflight failed: '), receipt['error'])
+                self.assertIn('symlink', receipt['error'])
+                self.assertEqual(list(elsewhere.iterdir()), [])
+
+    def test_role_text_that_cannot_be_utf8_refuses_the_call(self):
+        # A run config cannot carry a lone surrogate into an Effect; here the packet and the Effect are made to.
+        settings = {**WITH_ROLES, 'subagents': {'max_concurrent': 3, 'roles': {
+            **ROLES, 'local': {**R, 'instructions': 'Refine \ud800.'}}}}
+
+        def lone_surrogate(dispatching, raw):
+            request = json.loads(raw)
+            self.assertEqual(request['prompt'].count('"instructions":"Refine."'), 1)
+            request['prompt'] = request['prompt'].replace('"instructions":"Refine."',
+                                                          '"instructions":"Refine \\ud800."')
+            raw = json.dumps(request, ensure_ascii=False).encode()
+            return {**dispatching, 'packet_sha256': digest(raw),
+                    'metadata': {**dispatching['metadata'], 'native_capabilities': settings}}, raw
+        receipt = self.dispatch_refused_roles(alter=lone_surrogate)
+        self.assertTrue(receipt['error'].startswith('Persistent session preflight failed: '), receipt['error'])
+        self.assertIn('cannot be encoded as UTF-8', receipt['error'])
+        self.assertEqual(list((self.store.root / 'agents').glob('*/roles/*')), [])
 
 
 if __name__ == '__main__':
