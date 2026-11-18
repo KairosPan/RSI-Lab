@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import tomllib
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -453,6 +454,45 @@ class NativeTransportTests(unittest.TestCase):
                     self.assertFalse(transport._terminate(codex))
                 ps.assert_called_once()
                 self.assertEqual(codex.wait(timeout=5), -signal.SIGKILL)
+
+    def terminate_with_tables(self, *reads, alive=()):
+        """``_terminate`` on Codex pid 100 with the process table read as ``reads`` (an exception is raised),
+        the last read repeated; signals are recorded, not sent, and only the pids in ``alive`` answer one."""
+        signals, reads = [], list(reads)
+
+        def read():
+            table = reads.pop(0) if len(reads) > 1 else reads[0]
+            if isinstance(table, Exception):
+                raise table
+            return table
+
+        def kill(pid, sig):
+            if sig == 0:
+                if pid not in alive:
+                    raise ProcessLookupError(pid)
+            else:
+                signals.append(('kill', pid))
+        with patch.object(transport, '_process_table', side_effect=read), \
+                patch.object(transport.os, 'kill', side_effect=kill), \
+                patch.object(transport.os, 'killpg', side_effect=lambda group, sig: signals.append(('killpg', group))), \
+                patch.object(transport.os, 'getpgid', side_effect=lambda pid: 200 if pid == 400 else pid):
+            return transport._terminate(SimpleNamespace(pid=100)), signals
+
+    # Codex 100 started 200 and 300, each leading its own group, and 200 started 400 in 200's group.
+    LISTED = {1: (0, 'boot'), 100: (1, 'T0'), 200: (100, 'T1'), 300: (100, 'T2'), 400: (200, 'T3')}
+
+    def test_a_reused_pid_is_not_signalled_and_counts_as_stopped(self):
+        # By the second read 300 has exited and its pid names a bystander that started later and still runs.
+        again = {1: (0, 'boot'), 200: (1, 'T1'), 300: (1, 'T9'), 400: (1, 'T3')}
+        stopped, signals = self.terminate_with_tables(self.LISTED, again, {1: (0, 'boot'), 300: (1, 'T9')},
+                                                      alive={300})
+        self.assertEqual(signals, [('killpg', 100), ('killpg', 200), ('kill', 400)])
+        self.assertTrue(stopped)
+
+    def test_a_failed_second_read_signals_no_descendant(self):
+        stopped, signals = self.terminate_with_tables(self.LISTED, OSError('ps unavailable'))
+        self.assertEqual(signals, [('killpg', 100)])
+        self.assertFalse(stopped)
 
 
 if __name__ == '__main__':

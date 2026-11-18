@@ -164,12 +164,14 @@ def _events(stdout, allowed_items=frozenset()):
 _POPEN = subprocess.Popen
 
 
-def _descendants(pid):
-    """Every transitive child of ``pid``, from ``ps -axo pid=,ppid=``.
+def _process_table():
+    """Every process as ``{pid: (ppid, start)}``, from ``ps -axo pid=,ppid=,lstart=``.
 
-    Raises ``OSError`` or ``ValueError`` when the process table cannot be read.
+    ``start`` is the raw ``lstart`` text, decoded losslessly: with the pid it
+    names one process, as a pid can be reused once its process is gone.
+    Raises ``OSError`` or ``ValueError`` when the table cannot be read.
     """
-    with _POPEN(['ps', '-axo', 'pid=,ppid='], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+    with _POPEN(['ps', '-axo', 'pid=,ppid=,lstart='], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL) as ps:
         try:
             listing = ps.communicate(timeout=5)[0]
@@ -178,14 +180,22 @@ def _descendants(pid):
             raise OSError('ps did not list the processes within 5 seconds') from None
     if ps.returncode != 0:
         raise OSError(f'ps exited with status {ps.returncode}')
+    table = {}
+    for line in listing.decode('utf-8', 'surrogateescape').splitlines():
+        pid, parent, start = line.split(None, 2)
+        table[int(pid)] = (int(parent), start.strip())
+    return table
+
+
+def _descendants(pid):
+    """Every transitive child of ``pid`` as ``{pid: start}``, from one read of the process table."""
     children = {}
-    for line in listing.decode('ascii').splitlines():
-        child, parent = map(int, line.split())
-        children.setdefault(parent, []).append(child)
-    found, pending = [], [pid]
+    for child, (parent, start) in _process_table().items():
+        children.setdefault(parent, []).append((child, start))
+    found, pending = {}, [pid]
     while pending:
-        for child in children.pop(pending.pop(), ()):
-            found.append(child)
+        for child, start in children.pop(pending.pop(), ()):
+            found[child] = start
             pending.append(child)
     return found
 
@@ -205,37 +215,55 @@ def _terminate(process):
     """Kill the invocation's process group and every process it started.
 
     A command Codex runs can lead its own process group, out of reach of
-    Codex's. The descendants are listed before any signal, since a killed
-    parent's children are reparented and no longer found through it. One that
-    leads its own group is killed through that group, any other by pid, and
-    this process's own group never. Returns whether every listed pid is gone
-    within 5 seconds: ``False`` when the process table cannot be read, as
-    nothing can then be confirmed, though Codex's group is killed all the same.
+    Codex's. The descendants are listed with their start times before any
+    signal, since a killed parent's children are reparented and no longer
+    found through it. A pid can be reused once its process is gone, so the
+    table is read again just before the descendants are signalled, and only a
+    pid still present with its listed start time is signalled: through its
+    group when it leads one, by pid otherwise, and this process's own group
+    never. Codex's own pid cannot have been reused, as Codex is not reaped
+    before this. Returns whether every listed process is gone within 5
+    seconds, a pid that now has another start time counting as gone: ``False``
+    when either read fails, as nothing can then be confirmed, though Codex's
+    group is killed all the same.
     """
     try:
-        descendants = _descendants(process.pid)
+        listed = _descendants(process.pid)
     except (OSError, ValueError):
-        descendants = None
+        listed = None
     try:
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
-    own_group = os.getpgrp()
-    for pid in descendants or ():
-        try:
-            if os.getpgid(pid) == pid and pid != own_group:
-                os.killpg(pid, signal.SIGKILL)
-            else:
-                os.kill(pid, signal.SIGKILL)
-        except OSError:      # Gone already, or not this process's to signal: the check below decides.
-            pass
-    if descendants is None:
+    if listed is None:
         return False
+    if listed:
+        try:
+            table = _process_table()
+        except (OSError, ValueError):
+            return False
+        own_group = os.getpgrp()
+        for pid, start in listed.items():
+            if pid not in table or table[pid][1] != start:
+                continue     # Gone, or the pid now names another process: nothing listed is left to stop.
+            try:
+                if os.getpgid(pid) == pid and pid != own_group:
+                    os.killpg(pid, signal.SIGKILL)
+                else:
+                    os.kill(pid, signal.SIGKILL)
+            except OSError:  # Gone already, or not this process's to signal: the check below decides.
+                pass
     deadline = time.monotonic() + 5
     while True:
-        descendants = [pid for pid in descendants if not _gone(pid)]
-        if not descendants or time.monotonic() >= deadline:
-            return not descendants
+        listed = {pid: start for pid, start in listed.items() if not _gone(pid)}
+        if listed:
+            try:
+                table = _process_table()
+            except (OSError, ValueError):
+                table = {}   # Then no pid still answering counts as reused.
+            listed = {pid: start for pid, start in listed.items() if pid not in table or table[pid][1] == start}
+        if not listed or time.monotonic() >= deadline:
+            return not listed
         time.sleep(.05)
 
 
