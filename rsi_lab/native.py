@@ -58,19 +58,29 @@ def command_parts(settings, *, workspace, run_root, codex_home, model, effort):
     """What one role's settings change in the Codex command.
 
     ``sandbox`` replaces ``--sandbox read-only``: with the terminal on, the
-    permission profile confines commands instead. ``config`` holds the values
-    each passed after its own ``-c``. ``enabled`` names the features that are
-    no longer disabled. The web search value is set by the caller.
+    permission profile confines commands instead. ``flags`` follow
+    ``--ignore-user-config``. ``config`` holds the values each passed after its
+    own ``-c``. ``enabled`` names the features that are no longer disabled.
+    The web search value is set by the caller.
+
+    With the terminal on, the network is closed, commands get only the core
+    environment, and nothing written in the workspace becomes instructions,
+    config or rules on a later turn: project docs and rules are ignored, and
+    the workspace's ``.codex`` and ``AGENTS`` files stay read-only.
     """
     settings = validate(settings)
-    sandbox, config, enabled = ['--sandbox', 'read-only'], [], set()
+    sandbox, flags, config, enabled = ['--sandbox', 'read-only'], [], [], set()
     if settings['terminal'] is not None:
-        sandbox = []
+        sandbox, flags = [], ['--ignore-rules']
         entries = [(':minimal', 'read'), (run_root, 'deny'), (codex_home, 'deny'), (workspace, 'write')]
+        entries += [(os.path.join(workspace, name), 'read') for name in ('.codex', 'AGENTS.md', 'AGENTS.override.md')]
         entries += [(root, 'read') for root in settings['terminal']['readable_roots']]
         config += ['default_permissions=' + toml_string(PROFILE),
                    'permissions.' + PROFILE + '.filesystem=' + toml_table(entries),
-                   'shell_environment_policy.set=' + toml_table([('TMPDIR', os.path.join(workspace, '.tmp'))])]
+                   'permissions.' + PROFILE + '.network={enabled=false}',
+                   'shell_environment_policy.inherit="core"',
+                   'shell_environment_policy.set=' + toml_table([('TMPDIR', os.path.join(workspace, '.tmp'))]),
+                   'project_doc_max_bytes=0']
         enabled |= {'shell_tool', 'unified_exec'}
     if settings['subagents'] is not None:
         config += ['agents.max_depth=1',
@@ -78,7 +88,7 @@ def command_parts(settings, *, workspace, run_root, codex_home, model, effort):
                    'agents.default_subagent_model=' + toml_string(model),
                    'agents.default_subagent_reasoning_effort=' + toml_string(effort)]
         enabled |= {'multi_agent'}
-    return {'sandbox': sandbox, 'config': config, 'enabled': enabled}
+    return {'sandbox': sandbox, 'flags': flags, 'config': config, 'enabled': enabled}
 
 
 def toml_string(text):

@@ -204,7 +204,7 @@ def _command(folder, model, effort, cwd, session, image_paths=(), native=None, r
     # Everything off is today's command; native settings that are on need the
     # session's Codex home and the run root for the permission profile.
     settings = native_tools.validate(native)
-    parts = {'sandbox': ['--sandbox', 'read-only'], 'config': [], 'enabled': set()}
+    parts = {'sandbox': ['--sandbox', 'read-only'], 'flags': [], 'config': [], 'enabled': set()}
     if native_tools.any_on(settings):
         parts = native_tools.command_parts(settings, workspace=cwd, run_root=run_root,
                                            codex_home=session['codex_home'], model=model, effort=effort)
@@ -212,7 +212,7 @@ def _command(folder, model, effort, cwd, session, image_paths=(), native=None, r
                *parts['sandbox'], '-C', cwd]
     if session and session['provider_thread_id']:
         command.append('resume')
-    command.extend(['--ignore-user-config', '--model', model,
+    command.extend(['--ignore-user-config', *parts['flags'], '--model', model,
                     '--skip-git-repo-check', '--json', '--output-schema', str(folder / 'schema.json'),
                     '-c', f'model_reasoning_effort={json.dumps(effort)}',
                     '-c', ('web_search="live"' if settings['web_search'] else 'web_search="disabled"'),

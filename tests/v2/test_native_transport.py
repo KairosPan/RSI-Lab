@@ -16,7 +16,7 @@ from unittest.mock import patch
 from rsi_lab import native, transport
 from rsi_lab.journal import read_journal
 from tests.v2.native_fixtures import SEARCH, SUBAGENTS, TERMINAL, TERMINAL_AND_SEARCH, TERMINAL_AND_SUBAGENTS
-from tests.v2.test_journal_transport import frames
+from tests.v2.test_journal_transport import THREAD, frames
 
 TODAY = ['codex', '--no-daemon', '--ask-for-approval', 'never', 'exec', '--sandbox', 'read-only', '-C', '/w',
          '--ignore-user-config', '--model', 'm', '--skip-git-repo-check', '--json', '--output-schema', '/f/schema.json',
@@ -35,8 +35,8 @@ class NativeTransportTests(unittest.TestCase):
         self.real_popen = subprocess.Popen
         self.commands = []
 
-    def command(self, settings):
-        session = {'provider_thread_id': None, 'codex_home': '/home/.codex'}
+    def command(self, settings, thread=None):
+        session = {'provider_thread_id': thread, 'codex_home': '/home/.codex'}
         return transport._command(Path('/f'), 'm', 'low', '/r/agents/s/workspace', session,
                                   native=settings, run_root='/r')
 
@@ -94,11 +94,36 @@ class NativeTransportTests(unittest.TestCase):
         self.assertIn('default_permissions="rsi_agent"', command)
         table = tomllib.loads('t = ' + self.config_value(command, 'permissions.rsi_agent.filesystem='))['t']
         self.assertEqual(table, {':minimal': 'read', '/r': 'deny', '/home/.codex': 'deny', '/r/agents/s/workspace': 'write',
-                                 '/data': 'read'})
+                                 '/r/agents/s/workspace/.codex': 'read', '/r/agents/s/workspace/AGENTS.md': 'read',
+                                 '/r/agents/s/workspace/AGENTS.override.md': 'read', '/data': 'read'})
         env = tomllib.loads('t = ' + self.config_value(command, 'shell_environment_policy.set='))['t']
         self.assertEqual(env, {'TMPDIR': '/r/agents/s/workspace/.tmp'})
         for feature in ('view_image', 'apps', 'plugins', 'browser_use', 'computer_use', 'multi_agent', 'multi_agent_v2'):
             self.assertEqual(command[command.index(feature) - 1], '--disable')
+
+    def test_terminal_closes_the_network_the_environment_and_workspace_instructions(self):
+        for thread in (None, THREAD):
+            command = self.command(TERMINAL, thread)
+            network = tomllib.loads('t = ' + self.config_value(command, 'permissions.rsi_agent.network='))['t']
+            self.assertEqual(network, {'enabled': False})
+            for value in ('shell_environment_policy.inherit="core"', 'project_doc_max_bytes=0'):
+                self.assertEqual(command[command.index(value) - 1], '-c')
+            self.assertEqual(command[command.index('--ignore-user-config') + 1], '--ignore-rules')
+            self.assertEqual(command.count('--ignore-rules'), 1)
+            self.assertEqual('resume' in command, thread is not None)
+
+    def test_only_the_terminal_gets_the_confinement_flags(self):
+        extras = ('--ignore-rules', 'project_doc_max_bytes=0', 'shell_environment_policy.inherit="core"')
+        for settings in (SEARCH, SUBAGENTS, None, native.OFF):
+            for thread in (None, THREAD):
+                command = self.command(settings, thread)
+                for extra in extras:
+                    self.assertNotIn(extra, command)
+                self.assertFalse(any(part.startswith('permissions.rsi_agent.network') for part in command))
+                self.assertEqual(command[command.index('--ignore-user-config') + 1], '--model')
+        for settings, flags in ((TERMINAL, ['--ignore-rules']), (SEARCH, []), (SUBAGENTS, []), (native.OFF, [])):
+            self.assertEqual(native.command_parts(settings, workspace='/w', run_root='/r', codex_home='/h',
+                                                  model='m', effort='low')['flags'], flags)
 
     def test_subagents_set_depth_concurrency_model_and_effort(self):
         command = self.command({'web_search': False, 'terminal': None, 'subagents': {'max_concurrent': 2}})
