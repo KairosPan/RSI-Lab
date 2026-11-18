@@ -25,6 +25,22 @@ TODAY = ['codex', '--no-daemon', '--ask-for-approval', 'never', 'exec', '--sandb
 # ... followed by '--disable', X for every X in transport.DISABLED_FEATURES, then
 # '--enable', 'skip_host_skill_discovery', the thread id when resuming, and '-'.
 
+NATIVE_STREAM = [
+    {'type': 'thread.started', 'thread_id': THREAD}, {'type': 'turn.started'},
+    {'type': 'item.completed', 'item': {'type': 'agent_message', 'text': 'Starting.'}},
+    {'type': 'item.started', 'item': {'type': 'command_execution', 'command': "/bin/zsh -lc 'cat in.txt'", 'status': 'in_progress'}},
+    {'type': 'item.completed', 'item': {'type': 'command_execution', 'command': "/bin/zsh -lc 'cat in.txt'",
+                                        'aggregated_output': 'x\n', 'exit_code': 0, 'status': 'completed'}},
+    {'type': 'item.completed', 'item': {'type': 'file_change', 'status': 'completed',
+                                        'changes': [{'path': '/w/notes.md', 'kind': 'add'}]}},
+    {'type': 'item.completed', 'item': {'type': 'web_search', 'query': 'q', 'action': {'type': 'search', 'query': 'q'}}},
+    {'type': 'item.completed', 'item': {'type': 'agent_message', 'text': '{"ok":true}'}},
+    {'type': 'turn.completed', 'usage': {'input_tokens': 20, 'output_tokens': 5}}]
+NATIVE_ACTIVITY = {
+    'items': {'agent_message': 2, 'command_execution': 1, 'file_change': 1, 'web_search': 1},
+    'commands': [{'command': "/bin/zsh -lc 'cat in.txt'", 'exit_code': 0, 'status': 'completed'}],
+    'searches': ['q'], 'files_changed': ['/w/notes.md'], 'omitted': 0}
+
 
 class NativeTransportTests(unittest.TestCase):
     def setUp(self):
@@ -51,8 +67,12 @@ class NativeTransportTests(unittest.TestCase):
         return {'session_id': 's', 'workspace': str(self.workspace), 'provider_thread_id': None,
                 'codex_home': str(self.root / 'codex-home')}
 
-    def invoke(self, *, native=None, run_root=None, folder=None):
-        wire = ''.join(json.dumps(event) + '\n' for event in frames())
+    def wire(self, events):
+        return ''.join(json.dumps(event) + '\n' for event in events)
+
+    def invoke(self, events=None, *, native=None, run_root=None, folder=None):
+        """Run ``transport.invoke`` against a local process that writes ``events`` (default ``frames()``)."""
+        wire = self.wire(frames() if events is None else events)
         code = 'import sys; sys.stdin.read(); sys.stdout.write(' + repr(wire) + '); sys.stdout.flush()'
 
         def fake(command, **kwargs):
@@ -245,6 +265,119 @@ class NativeTransportTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'run root'):
             transport.invoke('p', {'type': 'object'}, self.folder, 'm', 'low', session=self.session(), native=SEARCH)
         self.assertFalse(self.folder.exists())
+
+    def archive(self, events, invocation=None, name='archive'):
+        """A call folder written before journals: ``events.jsonl`` and, unless ``None``, ``invocation.json`` text."""
+        folder = self.root / name
+        folder.mkdir()
+        (folder / 'events.jsonl').write_text(self.wire(events))
+        if invocation is not None:
+            (folder / 'invocation.json').write_text(invocation)
+        return folder
+
+    def test_stream_items_follow_the_settings(self):
+        for settings in (None, native.OFF):
+            self.assertEqual(native.stream_items(settings), frozenset())
+        always = {'todo_list', 'error'}
+        self.assertEqual(native.stream_items(SEARCH), always | {'web_search'})
+        self.assertEqual(native.stream_items(TERMINAL), always | {'command_execution', 'file_change'})
+        self.assertEqual(native.stream_items(SUBAGENTS), always | {'collab_tool_call'})
+        self.assertEqual(native.stream_items(TERMINAL_AND_SUBAGENTS),
+                         always | {'command_execution', 'file_change', 'collab_tool_call'})
+        self.assertIsInstance(native.stream_items(SEARCH), frozenset)
+
+    def test_the_last_message_is_the_response_when_tools_are_on(self):
+        allowed = native.stream_items({'web_search': True, 'terminal': {'readable_roots': []}, 'subagents': None})
+        raw, usage, complete, errors = transport._events(self.wire(NATIVE_STREAM), allowed)
+        self.assertEqual((raw, errors, complete), ('{"ok":true}', [], True))
+
+    def test_the_same_stream_is_refused_when_everything_is_off(self):
+        errors = transport._events(self.wire(NATIVE_STREAM))[3]
+        self.assertTrue(any('Forbidden tool' in e for e in errors))
+        self.assertIn('Expected exactly one nonempty final assistant message', errors)
+
+    def test_an_item_outside_the_settings_is_still_forbidden(self):
+        allowed = native.stream_items({'web_search': True, 'terminal': None, 'subagents': None})
+        for kind in ('command_execution', 'collab_tool_call', 'mcp_tool_call'):
+            stream = [*NATIVE_STREAM[:2], {'type': 'item.completed', 'item': {'type': kind}}, *NATIVE_STREAM[-2:]]
+            with self.subTest(kind=kind):
+                self.assertTrue(any('Forbidden tool' in e for e in transport._events(self.wire(stream), allowed)[3]))
+
+    def test_a_tool_turn_needs_a_nonempty_last_message(self):
+        allowed = native.stream_items(TERMINAL_AND_SEARCH)
+        silent = [e for e in NATIVE_STREAM if e.get('item', {}).get('type') != 'agent_message']
+        blank = [*NATIVE_STREAM[:-1], {'type': 'item.completed', 'item': {'type': 'agent_message', 'text': ' \n'}},
+                 NATIVE_STREAM[-1]]
+        for stream in (silent, blank):
+            with self.subTest(messages=len(stream)):
+                self.assertIn('Expected a nonempty final assistant message', transport._events(self.wire(stream), allowed)[3])
+
+    def test_a_turn_that_ends_on_a_progress_note_is_a_parse_error_not_a_crash(self):   # Review Focus 1
+        stream = [e for e in NATIVE_STREAM if e.get('item', {}).get('text') != '{"ok":true}']
+        result = self.invoke(stream, native=TERMINAL_AND_SEARCH)
+        self.assertEqual(result['execution_status'], 'succeeded')
+        self.assertIsNone(result['response']); self.assertIsNotNone(result['parse_error'])
+        self.assertEqual(result['usage'], {'input_tokens': 20, 'output_tokens': 5})
+
+    def test_a_tool_turn_answers_through_invoke(self):
+        result = self.invoke(NATIVE_STREAM, native=TERMINAL_AND_SEARCH)
+        self.assertEqual((result['response'], result['error'], result['protocol_valid']), ({'ok': True}, None, True))
+        self.assertEqual((self.folder / 'raw_response.txt').read_text(), '{"ok":true}')
+
+    def test_a_certified_failed_tool_turn_without_a_message_is_protocol_valid(self):
+        stream = [*NATIVE_STREAM[:2], {'type': 'turn.failed', 'error': {'message': 'Synthetic provider failure'}}]
+        result = self.invoke(stream, native=SEARCH)
+        self.assertEqual(result['execution_status'], 'failed_definite')
+        self.assertTrue(result['protocol_valid'], result['error'])
+
+    def test_audited_events_reads_the_recorded_settings(self):
+        folder = self.archive(NATIVE_STREAM, json.dumps({'backend': 'codex', 'native': TERMINAL_AND_SEARCH}))
+        self.assertEqual(transport.audited_events(folder),
+                         ('{"ok":true}', {'input_tokens': 20, 'output_tokens': 5}, True, []))
+
+    def test_audited_events_reads_a_folder_without_settings_as_today(self):
+        expected = transport._events(self.wire(NATIVE_STREAM))
+        self.assertTrue(any('Forbidden tool' in e for e in expected[3]))
+        # Missing, unreadable, not an object, without settings, and with settings that are not normal form.
+        for index, invocation in enumerate((None, '{"backend": "codex"', '[]', json.dumps({'backend': 'codex'}),
+                                            json.dumps({'native': {'web_search': 'yes'}}))):
+            with self.subTest(invocation=invocation):
+                folder = self.archive(NATIVE_STREAM, invocation, name='archive-' + str(index))
+                self.assertEqual(transport.audited_events(folder), expected)
+
+    def test_stream_activity_summarises_completed_items(self):
+        self.invoke(NATIVE_STREAM, native=TERMINAL_AND_SEARCH)
+        self.assertEqual(transport.stream_activity(self.folder), {
+            'items': {'agent_message': 2, 'command_execution': 1, 'file_change': 1, 'web_search': 1},
+            'commands': [{'command': "/bin/zsh -lc 'cat in.txt'", 'exit_code': 0, 'status': 'completed'}],
+            'searches': ['q'], 'files_changed': ['/w/notes.md'], 'omitted': 0})
+
+    def test_stream_activity_reads_unique_frames_and_completed_searches_only(self):
+        command = {**NATIVE_STREAM[4], 'event_id': 'command-1'}
+        started = {'type': 'item.started', 'item': {'type': 'web_search', 'query': '', 'action': {'type': 'other'}}}
+        stream = [*NATIVE_STREAM[:4], command, command, started, *NATIVE_STREAM[5:]]
+        result = self.invoke(stream, native=TERMINAL_AND_SEARCH)
+        self.assertTrue(result['protocol_valid'], result['error'])
+        self.assertEqual(transport.stream_activity(self.folder), NATIVE_ACTIVITY)
+
+    def test_stream_activity_falls_back_to_the_events_file(self):
+        self.assertEqual(transport.stream_activity(self.archive(NATIVE_STREAM)), NATIVE_ACTIVITY)
+
+    def test_stream_activity_is_bounded(self):
+        def completed(item):
+            return {'type': 'item.completed', 'item': item}
+        stream = [completed({'type': 'command_execution', 'command': 'c' * 300, 'exit_code': 1, 'status': 'failed'})] * 40
+        stream += [completed({'type': 'web_search', 'query': 'q' * 250})] * 33
+        stream += [completed({'type': 'file_change', 'changes': [{'path': 'p' * 201, 'kind': 'update'}] * 35})]
+        stream += [completed({'type': 'command_execution', 'command': ['rm'], 'exit_code': True, 'status': {'s': 1}})]
+        activity = transport.stream_activity(self.archive(stream))
+        self.assertEqual(activity['items'], {'command_execution': 41, 'web_search': 33, 'file_change': 1})
+        self.assertEqual(activity['commands'], [{'command': 'c' * 200, 'exit_code': 1, 'status': 'failed'}] * 32)
+        self.assertEqual(activity['searches'], ['q' * 200] * 32)
+        self.assertEqual(activity['files_changed'], ['p' * 200] * 32)
+        self.assertEqual(activity['omitted'], 9 + 1 + 3)
+        malformed = transport.stream_activity(self.archive(stream[-1:], name='malformed'))
+        self.assertEqual(malformed['commands'], [{'command': None, 'exit_code': None, 'status': None}])
 
 
 if __name__ == '__main__':

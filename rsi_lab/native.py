@@ -57,6 +57,25 @@ def any_on(settings):
     return validate(settings) != OFF
 
 
+def stream_items(settings):
+    """The event-stream item types one role's settings allow beside ``agent_message`` and ``reasoning``.
+
+    Empty when everything is off, which keeps today's strict reading of the
+    stream. ``mcp_tool_call`` is never allowed.
+    """
+    settings = validate(settings)
+    if settings == OFF:
+        return frozenset()
+    items = {'todo_list', 'error'}
+    if settings['web_search']:
+        items.add('web_search')
+    if settings['terminal'] is not None:
+        items |= {'command_execution', 'file_change'}
+    if settings['subagents'] is not None:
+        items.add('collab_tool_call')
+    return frozenset(items)
+
+
 def command_parts(settings, *, workspace, run_root, codex_home, model, effort):
     """What one role's settings change in the Codex command.
 

@@ -75,13 +75,20 @@ def _json(text):
                       parse_constant=lambda value: (_ for _ in ()).throw(ValueError(f"Invalid JSON number: {value}")))
 
 
-def _events(stdout):
-    """Audit the whole event stream, preserving unknown usage instead of zeroes."""
+def _events(stdout, allowed_items=frozenset()):
+    """Audit the whole event stream, preserving unknown usage instead of zeroes.
+
+    ``allowed_items`` are the item types a call's native settings allow beside
+    ``agent_message`` and ``reasoning`` (``native.stream_items``). Empty, the
+    turn must hold exactly one assistant message. Otherwise earlier messages
+    are progress notes and the last completed one is the output.
+    """
     outputs, errors, usages = [], [], []
     completions = 0
     failed = False
     supported = {"thread.started", "turn.started", "turn.completed", "turn.failed", "error",
                  "item.started", "item.updated", "item.completed"}
+    allowed = {"agent_message", "reasoning"} | allowed_items
     for number, line in enumerate(stdout.splitlines(), 1):
         if not line.strip():
             continue
@@ -120,7 +127,7 @@ def _events(stdout):
                 errors.append("Malformed item event")
                 continue
             item_kind = item.get("type")
-            if item_kind not in {"agent_message", "reasoning"}:
+            if item_kind not in allowed:
                 errors.append(f"Forbidden tool or unsupported item: {item_kind!r}")
             if kind == "item.completed" and item_kind == "agent_message":
                 if not isinstance(item.get("text"), str):
@@ -129,8 +136,14 @@ def _events(stdout):
                     outputs.append(item["text"])
     if completions != 1:
         errors.append(f"Expected exactly one completed turn, observed {completions}")
-    if len(outputs) != 1 or not outputs[0].strip():
-        errors.append("Expected exactly one nonempty final assistant message")
+    if not allowed_items:
+        if len(outputs) != 1 or not outputs[0].strip():
+            errors.append("Expected exactly one nonempty final assistant message")
+        raw = "\n".join(outputs)
+    else:
+        if not outputs or not outputs[-1].strip():
+            errors.append("Expected a nonempty final assistant message")
+        raw = outputs[-1] if outputs else ""
     # Codex normally reports usage once at turn.completed. Repeated usage frames
     # are retained as ambiguous rather than silently double-counted or discarded.
     usage = usages[0][1] if len(usages) == 1 else None
@@ -139,7 +152,7 @@ def _events(stdout):
                 and all(key in usage for key in ("input_tokens", "output_tokens")))
     if len(usages) > 1:
         errors.append("Multiple usage records; totals are ambiguous")
-    return "\n".join(outputs), usage, complete, errors
+    return raw, usage, complete, errors
 
 
 def _terminate(process):
@@ -150,26 +163,97 @@ def _terminate(process):
         pass
 
 
-def audited_events(folder):
-    """Parse the durable unique provider frames, retaining all raw duplicates.
+def _provider_stdout(folder):
+    """A call's unique provider stdout frames as text, and its journal capture.
 
-    Older one-shot archives without a journal remain readable. A torn/conflicting
-    journal cannot certify a complete invocation.
+    An older one-shot archive without a journal is read from ``events.jsonl``
+    and has no capture.
     """
-    folder = Path(folder)
     path = folder / 'journal.jsonl'
     if not path.exists():
-        return _events((folder / 'events.jsonl').read_text())
+        return (folder / 'events.jsonl').read_text(), None
     capture = read_journal(path)
     frames = [base64.b64decode(row['raw_base64']).decode('utf-8', errors='replace')
               for row in capture['records']
               if row['stream'] == 'stdout' and row['kind'] in {'event_frame', 'invalid_event_frame'}
               and row.get('duplicate_of') is None]
-    raw, usage, complete, errors = _events(''.join(frames))
-    if capture['gaps']:
+    return ''.join(frames), capture
+
+
+def _recorded_native(folder):
+    """The native settings a call's ``invocation.json`` records, in normal form.
+
+    A missing or unreadable file, one without a ``native`` key, and settings
+    that are not normal form all read as everything off: today's strict reading.
+    """
+    try:
+        invocation = _json((folder / 'invocation.json').read_text())
+        if isinstance(invocation, dict):
+            return native_tools.validate(invocation.get('native'))
+    except (OSError, ValueError):
+        pass
+    return native_tools.validate(None)
+
+
+def audited_events(folder):
+    """Parse the durable unique provider frames, retaining all raw duplicates.
+
+    The item types allowed are those of the native settings recorded in
+    ``invocation.json``. Older one-shot archives without a journal remain
+    readable. A torn/conflicting journal cannot certify a complete invocation.
+    """
+    folder = Path(folder)
+    stdout, capture = _provider_stdout(folder)
+    raw, usage, complete, errors = _events(stdout, native_tools.stream_items(_recorded_native(folder)))
+    if capture is not None and capture['gaps']:
         errors.append('Execution journal has unresolved gaps or conflicting provider events')
         complete = False
     return raw, usage, complete, errors
+
+
+ACTIVITY_ENTRIES = 32
+ACTIVITY_CHARACTERS = 200
+
+
+def stream_activity(folder):
+    """What a call's event stream shows its tools did, from its completed items.
+
+    Reads the unique frames ``audited_events`` reads. ``items`` counts the
+    completed items of each type; ``commands``, ``searches`` and
+    ``files_changed`` keep the first ``ACTIVITY_ENTRIES`` entries in stream
+    order, and ``omitted`` counts the entries left out of the three. Every
+    string is cut to ``ACTIVITY_CHARACTERS``; a value of the wrong type is
+    ``None``. The stream is not a complete record: a command that fails may
+    produce no item.
+    """
+    def text(value):
+        return value[:ACTIVITY_CHARACTERS] if isinstance(value, str) else None
+
+    items, commands, searches, files_changed = {}, [], [], []
+    for line in _provider_stdout(Path(folder))[0].splitlines():
+        try:
+            event = _json(line)
+        except (ValueError, TypeError):
+            continue
+        item = event.get('item') if isinstance(event, dict) and event.get('type') == 'item.completed' else None
+        if not isinstance(item, dict) or not isinstance(item.get('type'), str):
+            continue
+        kind = text(item['type'])
+        items[kind] = items.get(kind, 0) + 1
+        if kind == 'command_execution':
+            exit_code = item.get('exit_code')
+            commands.append({'command': text(item.get('command')),
+                             'exit_code': exit_code if type(exit_code) is int else None,
+                             'status': text(item.get('status'))})
+        elif kind == 'web_search' and isinstance(item.get('query'), str):
+            searches.append(text(item['query']))
+        elif kind == 'file_change' and isinstance(item.get('changes'), list):
+            files_changed += [text(change['path']) for change in item['changes']
+                              if isinstance(change, dict) and isinstance(change.get('path'), str)]
+    lists = {'commands': commands, 'searches': searches, 'files_changed': files_changed}
+    omitted = sum(max(0, len(entries) - ACTIVITY_ENTRIES) for entries in lists.values())
+    return {'items': items, **{name: entries[:ACTIVITY_ENTRIES] for name, entries in lists.items()},
+            'omitted': omitted}
 
 
 def _session_options(session):
@@ -494,6 +578,7 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
         benign_failure_errors = (
             'Expected exactly one completed turn, observed 0',
             'Expected exactly one nonempty final assistant message',
+            'Expected a nonempty final assistant message',
         )
         contract_errors = [message for message in errors if not (expected_failure and (
             message in benign_failure_errors or message.startswith('Codex error event: ')
