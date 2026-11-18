@@ -794,8 +794,12 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
     finally:
         if terminal_on and process is not None and not killed:
             # Codex ended without a kill, however the call ended: what was seen under it and still runs is stopped.
-            descendants_stopped = False      # Stays False if _sweep is interrupted before it confirms.
-            descendants_stopped = _sweep(tracked)
+            descendants_stopped = False      # Recorded as such if _sweep is interrupted before it confirms.
+            try:
+                descendants_stopped = _sweep(tracked)
+            except BaseException as exc:     # The receipts below are written all the same; it is raised after them,
+                if interrupted is None:      # unless the call itself was interrupted first.
+                    interrupted = exc
         if journal is not None:
             journal_snapshot = journal.snapshot()
             journal.close()

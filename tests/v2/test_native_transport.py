@@ -498,6 +498,22 @@ class NativeTransportTests(unittest.TestCase):
                 self.assertTrue(result['descendants_stopped'])
                 self.assert_stopped(marker)
 
+    def test_an_interrupted_sweep_still_writes_every_receipt(self):
+        # The sweep alone is interrupted; then the call itself was interrupted first, after Codex had exited.
+        for name, call, raised in (('sweep', None, 'sweep'), ('call-then-sweep', KeyboardInterrupt('call'), 'call')):
+            with self.subTest(case=name):
+                folder = self.root / 'calls' / name
+                with patch.object(transport, '_sweep', side_effect=KeyboardInterrupt('sweep')), \
+                        patch.object(transport, 'read_journal', wraps=transport.read_journal, side_effect=call), \
+                        self.assertRaises(KeyboardInterrupt) as caught:
+                    self.invoke(native=TERMINAL, folder=folder)
+                self.assertEqual(str(caught.exception), raised)
+                for receipt in ('transport_result.json', 'invocation.json', 'raw_response.txt', 'response.json',
+                                'usage.json'):
+                    self.assertTrue((folder / receipt).is_file(), receipt)
+                self.assertIs(json.loads((folder / 'transport_result.json').read_text())['descendants_stopped'], False)
+                read_journal(folder / 'journal.jsonl')
+
     def test_a_terminal_call_that_times_out_stops_what_it_orphaned(self):
         marker = self.root / 'grandchild.pid'
         self.addCleanup(self.stop_recorded, marker)
