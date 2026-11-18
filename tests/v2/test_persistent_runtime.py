@@ -14,6 +14,7 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+import uuid
 
 from rsi_lab import transport
 from rsi_lab.controller import Controller, identity
@@ -21,6 +22,7 @@ from rsi_lab.journal import read_journal
 from rsi_lab.roles import CodexExecutor
 from rsi_lab.runtime import Runtime
 from rsi_lab.store import Store
+from tests.v2.native_fixtures import usage_row
 
 
 PROVIDER = r'''
@@ -45,6 +47,7 @@ records.extend([
 with path.open('ab') as f:
  for record in records:
   f.write((json.dumps(record,sort_keys=True)+'\n').encode())
+ f.write(spec.get('usage_row','').encode())
  f.flush();os.fsync(f.fileno())
 if spec.get('compact'):
  with path.open('ab') as f:
@@ -96,6 +99,11 @@ class PersistentRuntimeTests(unittest.TestCase):
             raise AssertionError('Unexpected additional model invocation')
         spec = self.outputs.pop(0)
         spec['resume_thread'] = command[-2] if 'resume' in command else None
+        # The one provider request of the turn, in the rollout of the thread PROVIDER writes, as Codex records it.
+        thread = (spec.get('thread_override') or spec['resume_thread']
+                  or str(uuid.uuid5(uuid.NAMESPACE_URL, str(Path(kwargs['cwd']).resolve()))))
+        turn = 'turn-%d' % len(self.calls)
+        spec['usage_row'] = usage_row(thread, turn, turn, 20, 5).decode()
         return self.real_popen([sys.executable, '-u', '-c', PROVIDER, json.dumps(spec)], **kwargs)
 
     def output(self, mode, *, delta=None, raw=None, **faults):
@@ -113,6 +121,20 @@ class PersistentRuntimeTests(unittest.TestCase):
         rows = self.store.list('run', 'agent_session', role=role)
         self.assertEqual(len(rows), 1)
         return rows[0]
+
+    def reconcile_unknown_tokens(self):
+        """Settle, as an operator does, the one resumed call whose own rollout shows no usage rows for its turn.
+
+        Its token usage is unknown, never the stream's running total, so its token reservation stays held until
+        then; the synthetic provider reports 25 tokens per turn.
+        """
+        [effect] = [row for row in self.store.list('run', 'effect') if row['accounting_unknown']]
+        self.assertEqual(json.loads(self.store.read_blob(effect['result_ref']))['token_source'], 'unknown')
+        self.assertNotIn('tokens', effect['actual_costs'])
+        self.assertEqual(self.store.get('run', 'budget', 'tokens')['reserved'], self.reservations['tokens'])
+        self.c.reconcile('run', effect['id'], {'status': effect['status'], 'actual_costs': {'tokens': 25},
+                         'reconciliation': {'effect_id': effect['id'], 'provenance': 'operator: synthetic provider'}},
+                         'reconcile-tokens:' + effect['id'])
 
     def assert_settled(self):
         for budget in self.store.list('run', 'budget'):
@@ -261,6 +283,8 @@ class PersistentRuntimeTests(unittest.TestCase):
                     thread_override='40fe0ebf-361b-471d-b010-b7df90145e48')
         with self.assertRaisesRegex(ValueError, '[Pp]rotocol'):
             self.lab('quarantine-wrong-thread')
+        # Its rows went to the other thread's rollout; recovery applies no proposal while its tokens are unknown.
+        self.reconcile_unknown_tokens()
         old = self.session('lab')
         turn_id = old['active_turn_id']
         effect_id = self.store.get('run', 'agent_turn', turn_id)['effect_ids'][-1]
@@ -473,6 +497,8 @@ raise AssertionError('Crash fixture did not reach its exit boundary')
         self.assertNotEqual(self.session('lab')['committed_turn'], 2)
         self.assertNotIn('Must not commit', json.dumps(self.rt.agents.working_memory(self.session('lab')['id'])))
         self.assertEqual(len(self.store.list('run', 'proposal')), 1)
+        # Its rows went to the other thread's rollout, so its tokens are unknown.
+        self.reconcile_unknown_tokens()
         self.assert_settled()
 
 

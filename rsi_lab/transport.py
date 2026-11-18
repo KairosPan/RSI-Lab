@@ -23,6 +23,7 @@ import uuid
 from .journal import JournalWriter, read_journal, raw_stream
 from .images import (MAX_IMAGES, attachment_manifest, decoded_image_bytes, image_manifest_sha256,
                      validate_image_attachment)
+from . import native as native_tools
 import base64
 
 DISABLED_FEATURES = (
@@ -36,6 +37,13 @@ ARTIFACTS = frozenset({"invocation.json", "prompt.txt", "schema.json", "events.j
 PREAMBLE = (
     "Return only one JSON object matching the supplied response schema. Use only the supplied "
     "task and evidence. Do not use tools, read files, browse, delegate, or inspect your environment.\n\n"
+)
+# What a certified turn.failed may leave in the audit of its stream without breaking the protocol; besides these,
+# a Codex error event and a nonzero exit. Recovery reads a failed turn with the same list.
+BENIGN_FAILURE_ERRORS = (
+    'Expected exactly one completed turn, observed 0',
+    'Expected exactly one nonempty final assistant message',
+    'Expected a nonempty final assistant message',
 )
 
 
@@ -74,14 +82,25 @@ def _json(text):
                       parse_constant=lambda value: (_ for _ in ()).throw(ValueError(f"Invalid JSON number: {value}")))
 
 
-def _events(stdout):
-    """Audit the whole event stream, preserving unknown usage instead of zeroes."""
+def _events(stdout, allowed_items=frozenset()):
+    """Audit the whole event stream, preserving unknown usage instead of zeroes.
+
+    ``allowed_items`` are the item types a call's native settings allow beside
+    ``agent_message`` and ``reasoning`` (``native.stream_items``). Empty, the
+    turn must hold exactly one assistant message. Otherwise earlier messages
+    are progress notes and the last completed one is the output.
+
+    Lines end at ``\\n`` only, as the journal frames them: Codex leaves U+2028,
+    U+2029 and U+0085 unescaped inside strings. A trailing ``\\r`` is JSON
+    whitespace.
+    """
     outputs, errors, usages = [], [], []
     completions = 0
     failed = False
     supported = {"thread.started", "turn.started", "turn.completed", "turn.failed", "error",
                  "item.started", "item.updated", "item.completed"}
-    for number, line in enumerate(stdout.splitlines(), 1):
+    allowed = {"agent_message", "reasoning"} | allowed_items
+    for number, line in enumerate(stdout.split("\n"), 1):
         if not line.strip():
             continue
         try:
@@ -119,7 +138,7 @@ def _events(stdout):
                 errors.append("Malformed item event")
                 continue
             item_kind = item.get("type")
-            if item_kind not in {"agent_message", "reasoning"}:
+            if item_kind not in allowed:
                 errors.append(f"Forbidden tool or unsupported item: {item_kind!r}")
             if kind == "item.completed" and item_kind == "agent_message":
                 if not isinstance(item.get("text"), str):
@@ -128,8 +147,14 @@ def _events(stdout):
                     outputs.append(item["text"])
     if completions != 1:
         errors.append(f"Expected exactly one completed turn, observed {completions}")
-    if len(outputs) != 1 or not outputs[0].strip():
-        errors.append("Expected exactly one nonempty final assistant message")
+    if not allowed_items:
+        if len(outputs) != 1 or not outputs[0].strip():
+            errors.append("Expected exactly one nonempty final assistant message")
+        raw = "\n".join(outputs)
+    else:
+        if not outputs or not outputs[-1].strip():
+            errors.append("Expected a nonempty final assistant message")
+        raw = outputs[-1] if outputs else ""
     # Codex normally reports usage once at turn.completed. Repeated usage frames
     # are retained as ambiguous rather than silently double-counted or discarded.
     usage = usages[0][1] if len(usages) == 1 else None
@@ -138,37 +163,247 @@ def _events(stdout):
                 and all(key in usage for key in ("input_tokens", "output_tokens")))
     if len(usages) > 1:
         errors.append("Multiple usage records; totals are ambiguous")
-    return "\n".join(outputs), usage, complete, errors
+    return raw, usage, complete, errors
 
 
-def _terminate(process):
-    """Kill the invocation's process group, including any lingering child."""
+# The Popen of import time: tests stand a local process in for Codex by
+# replacing ``subprocess.Popen``, and the process table must still be read.
+_POPEN = subprocess.Popen
+
+
+def _process_table():
+    """Every process as ``{pid: (ppid, start)}``, from ``ps -axo pid=,ppid=,lstart=``.
+
+    ``start`` is the raw ``lstart`` text, decoded losslessly: with the pid it
+    names one process, as a pid can be reused once its process is gone.
+    Raises ``OSError`` or ``ValueError`` when the table cannot be read.
+    """
+    with _POPEN(['ps', '-axo', 'pid=,ppid=,lstart='], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL) as ps:
+        try:
+            listing = ps.communicate(timeout=5)[0]
+        except subprocess.TimeoutExpired:
+            ps.kill()
+            raise OSError('ps did not list the processes within 5 seconds') from None
+    if ps.returncode != 0:
+        raise OSError(f'ps exited with status {ps.returncode}')
+    table = {}
+    for line in listing.decode('utf-8', 'surrogateescape').splitlines():
+        pid, parent, start = line.split(None, 2)
+        table[int(pid)] = (int(parent), start.strip())
+    return table
+
+
+# Seconds between samples of the process table while a call with the terminal on runs.
+TRACK_SECONDS = 1.0
+
+
+def _track(tracked, table, root=None):
+    """Add to ``tracked`` (``{pid: start}``) every process ``table`` shows below ``root`` or below a tracked process
+    that is still the same one, with the same start time: a pid reused by a later process is no root."""
+    children = {}
+    for pid, (parent, start) in table.items():
+        children.setdefault(parent, []).append(pid)
+    pending = [pid for pid, start in tracked.items() if pid in table and table[pid][1] == start]
+    if root is not None:
+        pending.append(root)
+    while pending:
+        for child in children.pop(pending.pop(), ()):
+            tracked[child] = table[child][1]
+            pending.append(child)
+
+
+def _gone(pid):
+    """Whether no process has ``pid``: only a signal that finds none says so."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:          # A process this one may not signal still runs.
+        pass
+    return False
+
+
+def _stop(tracked):
+    """Stop every process of ``tracked`` (``{pid: start}``) that is still the same one.
+
+    A pid can be reused once its process is gone, so the table is read just
+    before any signal, and only a pid still present with its recorded start
+    time is signalled: through its group when it leads one, by pid otherwise,
+    and this process's own group never. Returns whether, within 5 seconds, no
+    tracked process is left, a pid that is gone or has another start time
+    counting as stopped; ``False``, with no signal sent, when that read fails.
+    """
+    if not tracked:
+        return True
+    try:
+        table = _process_table()
+    except (OSError, ValueError):
+        return False
+    own_group = os.getpgrp()
+    for pid, start in tracked.items():
+        if pid not in table or table[pid][1] != start:
+            continue         # Gone, or the pid now names another process: nothing tracked is left to stop.
+        try:
+            if os.getpgid(pid) == pid and pid != own_group:
+                os.killpg(pid, signal.SIGKILL)
+            else:
+                os.kill(pid, signal.SIGKILL)
+        except OSError:      # Gone already, or not this process's to signal: the check below decides.
+            pass
+    remaining = tracked
+    deadline = time.monotonic() + 5
+    while True:
+        remaining = {pid: start for pid, start in remaining.items() if not _gone(pid)}
+        if remaining:
+            try:
+                table = _process_table()
+            except (OSError, ValueError):
+                table = {}   # Then no pid still answering counts as reused.
+            remaining = {pid: start for pid, start in remaining.items() if pid not in table or table[pid][1] == start}
+        if not remaining or time.monotonic() >= deadline:
+            return not remaining
+        time.sleep(.05)
+
+
+def _terminate(process, tracked=None):
+    """Kill the invocation's process group and every process seen under it.
+
+    A command Codex runs can lead its own process group, out of reach of
+    Codex's. Before any signal, what now runs below Codex is added to
+    ``tracked``, the processes earlier samples saw under the call (none when
+    the terminal is off), since a killed parent's children are reparented and
+    no longer found through it. Codex's group is then killed, and every
+    tracked process by ``_stop``. Codex's own pid cannot have been reused, as
+    Codex is not reaped before this. Returns whether every process seen under
+    the call, at a sample or at the kill, was stopped; a process that detaches
+    and loses its parent between two samples is not seen. ``False`` when a
+    read of the process table fails, as nothing can then be confirmed, though
+    Codex's group is killed all the same.
+    """
+    tracked = {} if tracked is None else tracked
+    try:
+        _track(tracked, _process_table(), process.pid)
+        listed = True
+    except (OSError, ValueError):
+        listed = False
     try:
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
+    return _stop(tracked) and listed
 
 
-def audited_events(folder):
-    """Parse the durable unique provider frames, retaining all raw duplicates.
+def _sweep(tracked):
+    """Stop what still runs of ``tracked`` once a call has ended without a kill.
 
-    Older one-shot archives without a journal remain readable. A torn/conflicting
-    journal cannot certify a complete invocation.
+    A last sample follows the tracked processes that are still the same to
+    their children. Codex's pid is no root: Codex has been reaped, and its pid
+    can be reused. Returns what ``_stop`` returns, ``False`` when the last
+    sample cannot be read; ``True`` when nothing was tracked.
     """
-    folder = Path(folder)
+    if not tracked:
+        return True
+    try:
+        _track(tracked, _process_table())
+        sampled = True
+    except (OSError, ValueError):
+        sampled = False
+    return _stop(tracked) and sampled
+
+
+def _provider_stdout(folder):
+    """A call's unique provider stdout frames as text, and its journal capture.
+
+    An older one-shot archive without a journal is read from ``events.jsonl``
+    and has no capture.
+    """
     path = folder / 'journal.jsonl'
     if not path.exists():
-        return _events((folder / 'events.jsonl').read_text())
+        return (folder / 'events.jsonl').read_text(encoding='utf-8'), None
     capture = read_journal(path)
     frames = [base64.b64decode(row['raw_base64']).decode('utf-8', errors='replace')
               for row in capture['records']
               if row['stream'] == 'stdout' and row['kind'] in {'event_frame', 'invalid_event_frame'}
               and row.get('duplicate_of') is None]
-    raw, usage, complete, errors = _events(''.join(frames))
-    if capture['gaps']:
+    return ''.join(frames), capture
+
+
+def _recorded_native(folder):
+    """The native settings a call's ``invocation.json`` records, in normal form.
+
+    A missing or unreadable file, one without a ``native`` key, and settings
+    that are not normal form all read as everything off: today's strict reading.
+    """
+    try:
+        invocation = _json((folder / 'invocation.json').read_text(encoding='utf-8'))
+        if isinstance(invocation, dict):
+            return native_tools.validate(invocation.get('native'))
+    except (OSError, ValueError):
+        pass
+    return native_tools.validate(None)
+
+
+def audited_events(folder):
+    """Parse the durable unique provider frames, retaining all raw duplicates.
+
+    The item types allowed are those of the native settings recorded in
+    ``invocation.json``. Older one-shot archives without a journal remain
+    readable. A torn/conflicting journal cannot certify a complete invocation.
+    """
+    folder = Path(folder)
+    stdout, capture = _provider_stdout(folder)
+    raw, usage, complete, errors = _events(stdout, native_tools.stream_items(_recorded_native(folder)))
+    if capture is not None and capture['gaps']:
         errors.append('Execution journal has unresolved gaps or conflicting provider events')
         complete = False
     return raw, usage, complete, errors
+
+
+ACTIVITY_ENTRIES = 32
+ACTIVITY_CHARACTERS = 200
+
+
+def stream_activity(folder):
+    """What a call's event stream shows its tools did, from its completed items.
+
+    Reads the unique frames ``audited_events`` reads, split as ``_events``
+    splits them. ``items`` counts the
+    completed items of each type; ``commands``, ``searches`` and
+    ``files_changed`` keep the first ``ACTIVITY_ENTRIES`` entries in stream
+    order, and ``omitted`` counts the entries left out of the three. Every
+    string is cut to ``ACTIVITY_CHARACTERS``; a value of the wrong type is
+    ``None``. The stream is not a complete record: a command that fails may
+    produce no item.
+    """
+    def text(value):
+        return value[:ACTIVITY_CHARACTERS] if isinstance(value, str) else None
+
+    items, commands, searches, files_changed = {}, [], [], []
+    for line in _provider_stdout(Path(folder))[0].split('\n'):
+        try:
+            event = _json(line)
+        except (ValueError, TypeError):
+            continue
+        item = event.get('item') if isinstance(event, dict) and event.get('type') == 'item.completed' else None
+        if not isinstance(item, dict) or not isinstance(item.get('type'), str):
+            continue
+        kind = text(item['type'])
+        items[kind] = items.get(kind, 0) + 1
+        if kind == 'command_execution':
+            exit_code = item.get('exit_code')
+            commands.append({'command': text(item.get('command')),
+                             'exit_code': exit_code if type(exit_code) is int else None,
+                             'status': text(item.get('status'))})
+        elif kind == 'web_search' and isinstance(item.get('query'), str):
+            searches.append(text(item['query']))
+        elif kind == 'file_change' and isinstance(item.get('changes'), list):
+            files_changed += [text(change['path']) for change in item['changes']
+                              if isinstance(change, dict) and isinstance(change.get('path'), str)]
+    lists = {'commands': commands, 'searches': searches, 'files_changed': files_changed}
+    omitted = sum(max(0, len(entries) - ACTIVITY_ENTRIES) for entries in lists.values())
+    return {'items': items, **{name: entries[:ACTIVITY_ENTRIES] for name, entries in lists.items()},
+            'omitted': omitted}
 
 
 def _session_options(session):
@@ -199,20 +434,30 @@ def _session_options(session):
             'explicit_codex_home': session.get('codex_home') is not None}
 
 
-def _command(folder, model, effort, cwd, session, image_paths=()):
+def _command(folder, model, effort, cwd, session, image_paths=(), native=None, run_root=None):
+    # Everything off is today's command; native settings that are on need the
+    # session's Codex home and the run root for the permission profile.
+    settings = native_tools.validate(native)
+    parts = {'sandbox': ['--sandbox', 'read-only'], 'flags': [], 'config': [], 'enabled': set()}
+    if native_tools.any_on(settings):
+        parts = native_tools.command_parts(settings, workspace=cwd, run_root=run_root,
+                                           codex_home=session['codex_home'], model=model, effort=effort)
     command = ['codex', '--no-daemon', '--ask-for-approval', 'never', 'exec',
-               '--sandbox', 'read-only', '-C', cwd]
+               *parts['sandbox'], '-C', cwd]
     if session and session['provider_thread_id']:
         command.append('resume')
-    command.extend(['--ignore-user-config', '--model', model,
+    command.extend(['--ignore-user-config', *parts['flags'], '--model', model,
                     '--skip-git-repo-check', '--json', '--output-schema', str(folder / 'schema.json'),
                     '-c', f'model_reasoning_effort={json.dumps(effort)}',
-                    '-c', 'web_search="disabled"',
+                    '-c', ('web_search="live"' if settings['web_search'] else 'web_search="disabled"'),
                     '-c', 'suppress_unstable_features_warning=true'])
+    for value in parts['config']:
+        command.extend(['-c', value])
     if session is None:
         command.append('--ephemeral')
     for feature in DISABLED_FEATURES:
-        command.extend(['--disable', feature])
+        if feature not in parts['enabled']:
+            command.extend(['--disable', feature])
     command.extend(['--enable', 'skip_host_skill_discovery'])
     for path in image_paths:
         command.extend(['-i', str(path)])
@@ -246,11 +491,15 @@ def _archive_images(folder, images, manifest):
     return [record['path'] for record in files]
 
 
-def _stream_process(process, prompt, journal, folder, timeout):
+def _stream_process(process, prompt, journal, folder, timeout, stop, tracked=None):
     """Drain both pipes while sending input; no turn-sized communicate buffer.
 
     Each received chunk is durable before parsing complete event frames. This
     also preserves non-UTF8 data and unfinished frames if the writer is killed.
+    ``stop`` kills the process tree when the deadline elapses; the pipes then
+    have 5 seconds to drain. Given ``tracked``, the process table is sampled
+    every ``TRACK_SECONDS`` until then, adding to it what runs under the
+    process; a sample that cannot be read is skipped.
     """
     selector = selectors.DefaultSelector()
     pending = memoryview(prompt.encode('utf-8'))
@@ -258,6 +507,7 @@ def _stream_process(process, prompt, journal, folder, timeout):
     captures = {name: (folder / ('events.jsonl' if name == 'stdout' else 'stderr.log')).open('xb', buffering=0)
                 for name in buffers}
     deadline = time.monotonic() + timeout
+    next_sample = time.monotonic() if tracked is not None else math.inf
     timed_out, drain_deadline = False, None
     try:
         for name in ('stdout', 'stderr'):
@@ -268,10 +518,16 @@ def _stream_process(process, prompt, journal, folder, timeout):
         selector.register(process.stdin, selectors.EVENT_WRITE, 'stdin')
         while selector.get_map():
             now = time.monotonic()
+            if not timed_out and now >= next_sample:
+                next_sample = now + TRACK_SECONDS
+                try:
+                    _track(tracked, _process_table(), process.pid)
+                except (OSError, ValueError):
+                    pass     # The next sample tries again.
             if not timed_out and now >= deadline:
                 timed_out = True
-                _terminate(process)
-                drain_deadline = now + 5
+                stop()
+                drain_deadline = time.monotonic() + 5
                 journal.append('control', b'Invocation deadline elapsed', kind='stream_incomplete')
             if timed_out and now >= drain_deadline:
                 raise TimeoutError('Unable to drain killed invocation pipes')
@@ -331,12 +587,24 @@ def _stream_process(process, prompt, journal, folder, timeout):
 
 
 def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, timeout=300,
-           *, session=None, journal_metadata=None, images=None) -> dict:
+           *, session=None, journal_metadata=None, images=None, native=None, run_root=None) -> dict:
     """Run one admitted request and durably capture text and optional PNG inputs.
 
     A session binding opts into persistent create/resume. Calls without a binding
     remain explicitly ephemeral for compatibility with one-shot validators.
     Execution completion, parsing, and application validation are separate.
+    Native settings that switch anything on need a session and the run root;
+    they are recorded as ``native`` in the invocation and the result, which
+    carry no such key when everything is off.
+
+    The result's ``descendants_stopped`` says whether every process seen under
+    the call was stopped by its end. With the terminal on, the process table
+    is sampled every ``TRACK_SECONDS`` while Codex runs, and whatever was seen
+    and still runs is stopped however the call ends. A timeout or an
+    interruption that kills Codex also stops what runs under it at the kill.
+    A process that detaches and loses its parent between two samples is not
+    seen. With the terminal off nothing is sampled, and a call Codex ends on
+    its own reports ``True``.
     """
     if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError('Prompt must be nonempty text')
@@ -356,6 +624,13 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
     images = [validate_image_attachment(record, with_data=True) for record in images]
     image_manifest = attachment_manifest(images)
     image_digest = image_manifest_sha256(images) if images else None
+    settings = native_tools.validate(native)
+    native_on = native_tools.any_on(settings)
+    if native_on:
+        if session is None or run_root is None:
+            raise ValueError('Native capabilities require a persistent session and a run root')
+        # Denied by its resolved path, as the session's workspace and Codex home are named.
+        run_root = str(Path(run_root).resolve())
     binding = _session_options(session)
     folder = Path(folder)
     if folder.is_symlink():
@@ -369,7 +644,7 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
         json.dump({'backend': 'codex', 'model': model, 'effort': effort}, stream)
         stream.flush()
         os.fsync(stream.fileno())
-    sent_prompt = PREAMBLE + prompt
+    sent_prompt = (native_tools.PREAMBLE if native_on else PREAMBLE) + prompt
     with (folder / 'prompt.txt').open('xb') as stream:
         stream.write(sent_prompt.encode()); stream.flush(); os.fsync(stream.fileno())
     _write_json(folder / 'schema.json', schema)
@@ -384,9 +659,22 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
     temporary = None
     stream_complete = False
     journal_snapshot = None
+    descendants_stopped = True
+    tracked = {}                             # Every process seen under the call, as pid: start time.
+    terminal_on = settings['terminal'] is not None
+    killed = False
+
+    def stop():
+        nonlocal descendants_stopped, killed
+        killed = True
+        descendants_stopped = False          # Stays False if _terminate is interrupted before it confirms.
+        descendants_stopped = _terminate(process, tracked)
+
     invocation = {'backend': 'codex', 'model': model, 'effort': effort,
                   'timeout_seconds': timeout, 'started_at_unix': time.time(), 'dispatched': False,
                   'session': binding}
+    if native_on:
+        invocation['native'] = settings
     if images:
         invocation.update(requested_image_manifest=image_manifest,
                           requested_image_manifest_sha256=image_digest)
@@ -396,8 +684,11 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
         else:
             temporary = tempfile.TemporaryDirectory(prefix='rsi-codex-')
             cwd = temporary.name
+        if native_on:
+            # TMPDIR of the terminal's commands; the workspace is their only writable place.
+            Path(cwd, '.tmp').mkdir(exist_ok=True)
         image_paths = _archive_images(folder, images, image_manifest) if images else []
-        command = _command(folder, model, effort, cwd, binding, image_paths)
+        command = _command(folder, model, effort, cwd, binding, image_paths, native=settings, run_root=run_root)
         invocation.update(command=command, cwd=cwd)
         _write_json(folder / 'invocation.json', invocation)
         journal = JournalWriter(folder / 'journal.jsonl', {
@@ -414,7 +705,8 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
             invocation.update(sent_image_manifest=image_manifest,
                               sent_image_manifest_sha256=image_digest)
         _write_json(folder / 'invocation.json', invocation)
-        returncode, timed_out, partial_tail = _stream_process(process, sent_prompt, journal, folder, timeout)
+        returncode, timed_out, partial_tail = _stream_process(process, sent_prompt, journal, folder, timeout, stop,
+                                                              tracked if terminal_on else None)
         captured = read_journal(folder / 'journal.jsonl')
         stdout = raw_stream(captured, 'stdout').decode('utf-8', errors='replace')
         raw, usage, usage_complete, errors = audited_events(folder)
@@ -465,12 +757,8 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
         # protocol. Keep its error text while permitting the controller to close
         # the native turn without inventing output or a working-memory update.
         expected_failure = stream_complete and terminal == ['turn.failed']
-        benign_failure_errors = (
-            'Expected exactly one completed turn, observed 0',
-            'Expected exactly one nonempty final assistant message',
-        )
         contract_errors = [message for message in errors if not (expected_failure and (
-            message in benign_failure_errors or message.startswith('Codex error event: ')
+            message in BENIGN_FAILURE_ERRORS or message.startswith('Codex error event: ')
             or message.startswith('Codex exited with status ')))]
         protocol_valid = not contract_errors
         if errors:
@@ -487,17 +775,18 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
                        'execution_status': execution_status, 'parse_error': parse_error,
                        'error': error}).encode(), kind='attempt_finished')
     except BaseException as exc:
+        # Recorded before the kill, which can take seconds: a second interruption during it still leaves them.
+        error = f'{type(exc).__name__}: {exc}'
+        response = None
+        usage_complete = protocol_valid = False
+        execution_status = 'unknown' if invocation['dispatched'] else 'failed_definite'
         if process is not None and process.poll() is None:
-            _terminate(process)
+            stop()
             try:
                 process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 pass
         returncode = process.returncode if process is not None else None
-        error = f'{type(exc).__name__}: {exc}'
-        response = None
-        usage_complete = protocol_valid = False
-        execution_status = 'unknown' if invocation['dispatched'] else 'failed_definite'
         if journal is not None and not journal.failed:
             try:
                 journal.append('control', error.encode(), kind='stream_incomplete')
@@ -506,6 +795,14 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
         if not isinstance(exc, Exception):
             interrupted = exc
     finally:
+        if terminal_on and process is not None and not killed:
+            # Codex ended without a kill, however the call ended: what was seen under it and still runs is stopped.
+            descendants_stopped = False      # Recorded as such if _sweep is interrupted before it confirms.
+            try:
+                descendants_stopped = _sweep(tracked)
+            except BaseException as exc:     # The receipts below are written all the same; it is raised after them,
+                if interrupted is None:      # unless the call itself was interrupted first.
+                    interrupted = exc
         if journal is not None:
             journal_snapshot = journal.snapshot()
             journal.close()
@@ -526,7 +823,8 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
         if binding and thread_id:
             try:
                 from .session_context import find_owned_rollout
-                native_path = find_owned_rollout(binding['codex_home'], thread_id, binding['workspace'])
+                native_path = find_owned_rollout(binding['codex_home'], thread_id, binding['workspace'],
+                                                 native=settings)
                 native_session_ref = str(native_path)
                 native_session_sha256 = hashlib.sha256(native_path.read_bytes()).hexdigest()
             except (OSError, ValueError) as exc:
@@ -535,7 +833,7 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
                   'error': error, 'protocol_valid': protocol_valid, 'parse_error': parse_error, 'execution_status': execution_status,
                   'terminal_received': terminal_received, 'stream_complete': stream_complete,
                   'wall_seconds': time.monotonic() - started, 'returncode': returncode,
-                  'backend': 'codex', 'provider_thread_id': thread_id,
+                  'descendants_stopped': descendants_stopped, 'backend': 'codex', 'provider_thread_id': thread_id,
                   'session_id': binding['session_id'] if binding else None,
                   'codex_home': binding['codex_home'] if binding else None,
                   'workspace': binding['workspace'] if binding else None,
@@ -544,6 +842,8 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
                   'native_session_error': native_session_error}
         if images and invocation['dispatched']:
             result.update(sent_image_manifest=image_manifest, sent_image_manifest_sha256=image_digest)
+        if native_on:
+            result['native'] = settings
         invocation.update(finished_at_unix=time.time(), returncode=returncode)
         _write_json(folder / 'invocation.json', invocation)
         with (folder / 'raw_response.txt').open('xb') as stream:

@@ -13,6 +13,7 @@ from pathlib import Path
 import time
 
 from .store import digest
+from . import native as native_tools
 
 QUARANTINE_KIND = 'interrupted_codex_model_v1'
 ATTESTATION_SCHEMA = 'codex_interruption_operator_attestation_v1'
@@ -41,6 +42,12 @@ def certify_interruption(effect, packet, folder, request, invocation, capture, f
     def require(condition, reason):
         if not condition:
             raise RecoveryBlocked('interruption_not_certified', reason)
+    # Codex's own tools act without a trace these checks could read; settings that cannot be read count as on.
+    try:
+        native_on = native_tools.any_on(effect.get('metadata', {}).get('native_capabilities'))
+    except ValueError:
+        native_on = True
+    require(not native_on, 'A call with native capabilities cannot be certified free of tool activity')
     require(set(effect.get('reservations', {})) == {'model_calls', 'tokens', 'wall_seconds'}
             and effect['reservations']['model_calls'] == 1, 'Model invocation lacks the explicit bounded model resource contract')
     require(effect.get('kind') in {'lab', 'meta', 'literature'}
@@ -207,7 +214,7 @@ def certify_interruption(effect, packet, folder, request, invocation, capture, f
     implementation = Path(__file__).resolve().parent
     code = {name: digest((implementation / name).read_bytes()) for name in (
         'interruption.py', 'call_recovery.py', 'controller.py', 'agent_state.py', 'store.py',
-        'transport.py', 'journal.py', 'session_context.py', 'images.py')}
+        'transport.py', 'journal.py', 'session_context.py', 'images.py', 'native.py')}
     proof = {'schema_version': QUARANTINE_KIND, 'effect_id': effect['id'], 'run_id': effect['run_id'],
         'work_id': effect['work_id'], 'session_id': meta['agent_session_id'], 'turn_id': meta['agent_turn_id'],
         'session_fence': meta['session_fence'], 'packet_sha256': digest(packet),

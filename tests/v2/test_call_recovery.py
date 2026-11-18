@@ -8,6 +8,7 @@ from rsi_lab.call_recovery import RecoveryBlocked, recover_codex_receipt
 from rsi_lab.journal import JournalWriter
 from rsi_lab.store import digest, encode
 from rsi_lab.transport import PREAMBLE
+from tests.v2.native_fixtures import usage_row
 
 THREAD = '018fe27b-a111-7222-8333-123456789abc'
 
@@ -36,7 +37,7 @@ class CallRecoveryTests(unittest.TestCase):
                 'effective_context_hash': 'context_hash'}}
 
     def fixture(self, *, saved=True, terminal=True, finished=True, raw='{"answer":"synthetic"}',
-                usage=True, journal_delta=None, failed=False):
+                usage=True, journal_delta=None, failed=False, rollout_tail=b''):
         binding = {'session_id': 'session_test', 'workspace': str(self.workspace),
             'provider_thread_id': self.session['provider_thread_id'], 'codex_home': str(self.home)}
         invocation = {'backend': 'codex', 'model': self.request['model'], 'effort': 'low',
@@ -69,7 +70,7 @@ class CallRecoveryTests(unittest.TestCase):
         native.write_bytes(b'\n'.join(encode(row) for row in [
             {'type': 'session_meta', 'payload': {'id': THREAD, 'cwd': str(self.workspace)}},
             {'type': 'response_item', 'payload': {'type': 'message', 'role': 'user',
-                'content': [{'type': 'input_text', 'text': self.request['prompt']}]}}]) + b'\n')
+                'content': [{'type': 'input_text', 'text': self.request['prompt']}]}}]) + b'\n' + rollout_tail)
         if saved:
             try:
                 response = json.loads(raw)
@@ -125,9 +126,13 @@ class CallRecoveryTests(unittest.TestCase):
 
     def test_changed_resume_prefix_keeps_known_cost_but_blocks_memory_commit(self):
         self.session['provider_thread_id'] = THREAD
+        # The turn's one provider request, which a resumed turn is charged from.
+        self.fixture(rollout_tail=usage_row(THREAD, 'turn_test', 'turn_test', 11, 7))
+        native = self.home / 'sessions' / ('rollout-synthetic-' + THREAD + '.jsonl')
+        # The prefix's length ends on a record boundary, so its rows can be read; its bytes changed.
         self.session['context_manifest'] = {'native_prefix': {
-            'prefix_bytes': 5, 'prefix_sha256': '0' * 64, 'provider_thread_id': THREAD}}
-        self.fixture()
+            'prefix_bytes': native.read_bytes().index(b'\n') + 1, 'prefix_sha256': '0' * 64,
+            'provider_thread_id': THREAD}}
         result = self.recover()
         self.assertEqual(result['status'], 'succeeded')
         self.assertFalse(result['protocol_valid'])

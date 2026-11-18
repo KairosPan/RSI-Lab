@@ -1483,7 +1483,7 @@ outcome = suspected_problem | no_issue_found | insufficient_evidence | not_appli
 <p>日志至少覆盖 turn/request 起止、用户/系统输入、工具请求与结果、模型可见输出、接口暴露的 reasoning 摘要/事件、压缩前后清单、恢复/分叉、错误、超时、取消、退出和 usage；缺少某类可观察能力须声明，不声称保存模型未暴露的完整内部推理。每条绑定 <code>agent/session/turn/effect/attempt/runtime_generation, collector_seq, provider_event_id/cursor?, kind, raw_ref/hash, prev_hash</code>；墙钟仅辅助审计，排序依靠登记序号。</p>
 <p>采集日志和控制器事件是两层：<code>durable_seq</code> 表示已持久原始前缀，<code>applied_seq</code> 表示已经事务化应用的前缀。按稳定 provider event ID/cursor 去重派生处理；没有 provider ID 时保留每次接收的独立序号，不仅凭相同文本 hash 删除可能真实重复的事件。结果登记依靠 Effect/result 身份幂等，恢复先重放已持久且未应用前缀；序号缺口/尾帧损坏单列，不自动跳过后声称完整。日志分段封存、保留策略及删除清单可审计，未提交或未对账义务所需日志禁止提前回收。</p>
 <p>逐事件落盘降低丢失窗口，但不能保证收到前或持久提交前的事件绝不丢失。崩溃恢复只能承诺已确认 durable 的前缀；未确定尾部向 provider 按 cursor 补取或显式标记 <code>journal_gap / stream_incomplete</code>。日志写失败/磁盘满时停止该作用域的新派发，不继续产生未留档的后续工具动作；在途动作保留 unknown/费用责任并按能力取消或对账，不能假定外部执行已经停止。没有补取能力时保留缺口并阻塞依赖完整尾部的恢复。</p>
-<p>工具请求只有在原始请求事件持久化、控制器登记子 Effect 并通过权限/预算准入后才可执行；原生工具调度必须接入同一代理，不能仅靠事后日志计费。子请求终态日志持久后，TX3 才提交该请求结果、交付和费用；父 turn 的可信终态及必需子结果对齐后，turn_commit 再提交工作记忆与会话 head。已知完成但格式无效保留终态与原文，不抹去交付；费用、解析状态和科学有效性分别记录。</p>
+<p>已注册工具的请求只有在原始请求事件持久化、控制器登记子 Effect 并通过权限/预算准入后才可执行。Codex 自身的原生工具（网页搜索、受限终端、子 agent）不再要求接入同一代理逐次准入：运行配置按角色开启后，由 Codex 在一轮内自行调用，调用结束后记录，token 按 Codex 自己的用量记录结算，见<a href="superpowers/specs/2026-11-17-native-codex-capabilities-design.md">原生 Codex 能力设计</a>。子请求终态日志持久后，TX3 才提交该请求结果、交付和费用；父 turn 的可信终态及必需子结果对齐后，turn_commit 再提交工作记忆与会话 head。已知完成但格式无效保留终态与原文，不抹去交付；费用、解析状态和科学有效性分别记录。</p>
 <h4 id="session-checkpoint-recovery">9.4 检查点与会话恢复</h4>
 <p>checkpoint 不是模型自写总结。控制器在该 session 的安全 turn 边界封存受信清单：原生 prefix/hash、journal durable/applied 水位、controller ledger_seq、工作记忆 head、compaction、runtime/config/schema、当前 Work 与未决 Effect/Wait。捕获期间防止该 session 新写入；原生快照和 blob 持久后才原子发布 checkpoint_ref。其他角色可继续合法工作，checkpoint 不要求全局所有 unknown 已解决，也不复制第二份预算权威状态。</p>
 <ol>
@@ -1976,7 +1976,7 @@ AcceptanceSpec
 <p><strong>b. 自动发现、定位和准入</strong></p>
 <p>Inspector 按 §7 的周期与停滞机制独立读取 Codex 的事件流、调用输入输出、进程退出/超时、工具往返、压缩前后必要证据、重试和会话恢复记录。即使 CLI 返回成功，也可发现工具结果未进入上下文、必要约束丢失、重复调度或恢复后状态偏离。授权代码与确切版本可作为取证材料；发现缺少诊断能力时，可提出范围内的观测补丁并走同一验收路径。</p>
 <p>Meta Worker 先区分领域错误、RSI 适配器错误、远端服务失败和 Codex harness 缺陷。只有证据支持修改执行层时，才创建 <code>change_kind=codex_runtime_patch</code>，列出复现输入、目标机制、预期行为、受影响角色/步骤、冻结验收和回退目标。规则可以直接登记提议，但不能跳过定位与准入；同一根因/版本重复告警合并到原 Issue，调查、失败候选和重试共用其预算与次数。</p>
-<p>Codex 内部工具调用必须保留在 RSI 的资源与效果控制范围：科学工具、外部写操作经授权代理/MCP 网关进入内核 Effect 账本，使用稳定的任务/Work/逻辑调用标识去重。候选 runtime 不能获得绕过账本的执行通道；本地编辑、构建和测试也在对应隔离执行器内计费。无法关联或约束的副作用使该 runtime 契约不满足，不得靠 prompt 声称幂等或严格预算。</p>
+<p>科学工具与外部写操作必须保留在 RSI 的资源与效果控制范围：它们作为已注册能力进入内核 Effect 账本，使用稳定的任务/Work/逻辑调用标识去重。候选 runtime 不能获得绕过账本执行这些操作的通道；本地编辑、构建和测试也在对应隔离执行器内计费。Codex 自身的原生工具（网页搜索、受限终端、子 agent）不再要求经授权代理/MCP 网关逐次准入：运行配置按角色开启后由 Codex 在一轮内调用，调用结束后记录，token 按 Codex 自己的用量记录结算；终端只能读写会话工作目录、只读宿主列出的目录，且不能联网，见<a href="superpowers/specs/2026-11-17-native-codex-capabilities-design.md">原生 Codex 能力设计</a>。无法关联或约束的副作用使该 runtime 契约不满足，不得靠 prompt 声称幂等或严格预算。</p>
 <p>每次真实模型请求、自动重试和上下文压缩请求也必须通过登记的调用代理或 runtime 计量接口先预约，再关联子 Effect 并结算；最终一条 turn usage 只能用于核对，不能替代事前准入。无法观测/限制内部请求的 runtime 标为不满足该资源契约。长驻进程、会话和父 agent turn 是协调生命周期，不持有包住子请求的外部执行许可；父预算只转拨、不重复计费，许可按实际模型/工具请求持有和释放。模型返回工具请求后释放本次请求许可，再调度工具，因此单槽配置也能推进完整回合；未知子 Effect 按 §6 保留责任。</p>
 <p>父 AgentTurn/子 Effect 的持久身份、session fence 与提交边界见 §6、§9.1。每个真实模型请求使用当时的独立有效上下文 manifest/hash；工具消息、重试或压缩改变上下文后重新计量与检查，不以初始 turn packet 覆盖后续实际输入。内部调用若无法被观察、准入和关联，适配器不可标为满足该契约。</p>
 <p><strong>c. 隔离修改、真实编译和验收</strong></p>

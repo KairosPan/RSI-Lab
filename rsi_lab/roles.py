@@ -10,9 +10,11 @@ from __future__ import annotations
 import copy
 import base64
 import json
+import os
 from pathlib import Path
 
-from . import input_view, transport
+from . import codex_ledger, input_view, transport
+from . import native as native_tools
 from .packets import PacketBuilder, digest, encoded
 from . import images
 from .improvements import enabled
@@ -100,6 +102,15 @@ COMMON = (
     'Partial delivery cannot support a claim that the full source was checked. '
     'Return exactly the requested JSON schema. Copy the issue identity and expected versions '
     'from the task. Do not invent a missing user answer, successful test or capability. '
+)
+# With native tools on, each role's sentences that forbid running tools change
+# and the Literature child's sentence that says they are disabled is dropped.
+NATIVE_SENTENCES = (
+    ('You only propose typed commands. ', 'Your final answer proposes one typed command. '),
+    ('Do not execute tools, install software,', 'Do not execute registered capabilities yourself, install software,'),
+    ('Do not run tools directly or invent results. Only the controller executes and publishes source-backed facts. ',
+     'Do not invent results. Only the controller executes registered capabilities and publishes source-backed facts. '),
+    ('Native tools remain disabled; propose typed requests. ', ''),
 )
 
 # A general decision policy, not a task-specific research trigger. The Lab
@@ -312,6 +323,8 @@ class MetaAgent:
         orchestration = task.get('constraints',{}).get('orchestration')
         lab_settings = lab_settings_enabled(orchestration)
         admission = task.get('constraints',{}).get('research_loop',{}).get('recommendation_admission')
+        native_settings = native_tools.validate(task.get('constraints', {}).get('native_capabilities'))
+        native_on = native_settings != native_tools.OFF
         response_schema(mode,research_features=features,final_review_only=final_review_only,research_policy=policy,
                         lab_settings=lab_settings, recommendation_admission=admission,
                         interpretation_only=interpretation_only,
@@ -402,6 +415,10 @@ class MetaAgent:
                     'on the child\'s behalf, or call literature capabilities through request_diagnostic. '
                     'Preserve explicit user-supplied sources and constraints as task requirements. Describe '
                     'the evidence needed and the acceptance/stopping criteria, not tool orchestration. ')
+        if native_on:
+            # Only the role's own sentences change, before any host-supplied text is appended.
+            for old, new in NATIVE_SENTENCES:
+                instructions = instructions.replace(old, new)
         if orchestration is not None:
             from .orchestration import LAB_INSTRUCTION, META_INSTRUCTION, LAB_SETTINGS_INSTRUCTION
             if mode == 'lab':
@@ -502,6 +519,7 @@ class MetaAgent:
                 'Narrowing may only reduce the existing object/field/page/byte scope. A park requires a '
                 'specific producer, dependency version, wake condition, deadline and expiry action. '
                 'Closing an unresolved issue must remain explicitly unresolved; the controller checks duties. ')
+        instructions += native_tools.instruction(native_settings)
         return dict(mode=mode, instruction=instructions, schema=response_schema(mode, working_memory='agent_state' in task,
                     research_features=features,final_review_only=final_review_only,research_policy=policy,
                     lab_settings=lab_settings, recommendation_admission=admission,
@@ -509,7 +527,7 @@ class MetaAgent:
                     literature_delegation_version=delegation_version), task=task,
                     evidence_ids=evidence_ids, required_evidence_ids=required_evidence_ids, model=self.model,
                     effort=self.effort, owner_interpretation=owner_interpretation, prior_review=prior_review,
-                    page_cursors=page_cursors)
+                    page_cursors=page_cursors, **({'preamble': native_tools.PREAMBLE} if native_on else {}))
 
     def prepare(self, mode, task, **kwargs):
         return self.builder.plan(**self.arguments(mode, task, **kwargs))
@@ -769,9 +787,17 @@ class CodexExecutor:
         request = json.loads(packet_bytes)
         metadata = effect.get('metadata', {})
         session = metadata.get('agent_session')
+        # The role's native settings are frozen in the Effect, which names them only when something is on.
+        try:
+            settings = native_tools.validate(metadata.get('native_capabilities'))
+        except ValueError as exc:
+            raise ValueError('Unsupported exact model request envelope') from exc
+        native_on = native_tools.any_on(settings)
+        preamble = native_tools.PREAMBLE if native_on else transport.PREAMBLE
         expected_keys = {'schema_version', 'mode', 'model', 'effort', 'prompt', 'response_schema', 'input_view_mode'}
-        if (set(request) not in (expected_keys, expected_keys | {'image_attachments'}) or request['schema_version'] != self.request_schema
-                or request['mode'] not in ACTIONS or not request['prompt'].startswith(transport.PREAMBLE)
+        if (('native_capabilities' in metadata) != native_on
+                or set(request) not in (expected_keys, expected_keys | {'image_attachments'}) or request['schema_version'] != self.request_schema
+                or request['mode'] not in ACTIONS or not request['prompt'].startswith(preamble)
                 or request['response_schema'] != response_schema(request['mode'], working_memory=session is not None,
                     research_features=metadata.get('research_features'),final_review_only=metadata.get('final_review_only',False),
                     interpretation_only=metadata.get('interpretation_only', False),
@@ -785,6 +811,8 @@ class CodexExecutor:
             packet_policy = normalize_research_policy(data['task'].get('constraints',{}).get('research_policy'))
         except (ValueError, TypeError, KeyError, IndexError) as exc:
             raise ValueError('Model packet must contain its exact research task and policy') from exc
+        if data['task'].get('constraints', {}).get('native_capabilities') != metadata.get('native_capabilities'):
+            raise ValueError('Unsupported exact model request envelope')
         if packet_policy != normalize_research_policy(metadata.get('research_policy')):
             raise ValueError('Model packet policy differs from the admitted effect policy')
         literature_context = data['task'].get('literature_context', {})
@@ -818,6 +846,18 @@ class CodexExecutor:
                         or not metadata.get('agent_turn_id') or type(metadata.get('session_fence')) is not int):
                     raise ValueError('Persistent model request lacks a fenced session/turn')
                 workspace = self.calls_root.parent / 'agents' / sid / 'workspace'
+                if settings['terminal'] is not None:
+                    # The terminal cannot write these names: anything there would reach Codex as instructions
+                    # or configuration nobody admitted.
+                    found = [name for name in native_tools.WORKSPACE_INSTRUCTIONS
+                             if os.path.lexists(workspace / name)]
+                    if found:
+                        raise ValueError('The workspace holds Codex instructions or configuration that the '
+                                         'Controller did not put there: ' + ', '.join(found))
+                    # The terminal's temporary files go to .tmp, which the transport creates as a directory.
+                    if os.path.lexists(workspace / '.tmp') and not (workspace / '.tmp').is_dir():
+                        raise ValueError("The workspace's .tmp, where the terminal's temporary files go, "
+                                         'is not a directory')
                 prior = session.get('context_manifest') or {}
                 if session.get('committed_turn', 0) and not session.get('provider_thread_id'):
                     raise ValueError('Committed persistent session has no native thread; reconstruct explicitly')
@@ -828,7 +868,7 @@ class CodexExecutor:
                         raise ValueError('Persistent session has no verified native snapshot; reconstruct explicitly')
                     snapshot = read_native_snapshot(native,
                         expected_thread_id=session['provider_thread_id'], expected_cwd=str(workspace),
-                        expected_prefix=prior.get('native_prefix'))
+                        expected_prefix=prior.get('native_prefix'), native=settings)
                 checked = build_effective_context(packet_bytes, session_id=sid, owner=session['owner'],
                     snapshot=snapshot, working_memory_revision=metadata.get('expected_memory_revision'),
                     max_input_bytes=metadata.get('max_effective_context_bytes', 131072),
@@ -857,7 +897,10 @@ class CodexExecutor:
                     'unknown_usage_is_zero': False}
         if loaded_images:
             extra['images'] = loaded_images
-        result = transport.invoke(request['prompt'][len(transport.PREAMBLE):], request['response_schema'], folder,
+        if native_on:
+            # Everything off keeps today's call; the permission profile denies the run root.
+            extra.update(native=settings, run_root=self.calls_root.parent)
+        result = transport.invoke(request['prompt'][len(preamble):], request['response_schema'], folder,
                                   request['model'], request['effort'], timeout=self.timeout_seconds, **extra)
         if (folder / 'prompt.txt').read_bytes() != request['prompt'].encode():
             raise ValueError('Actual transport prompt differs from the final capacity-checked packet')
@@ -865,7 +908,8 @@ class CodexExecutor:
         if image_manifest and result.get('dispatched') is not False:
             images.verify_image_transport(folder, image_manifest, result)
             image_delivery_verified = True
-        output, event_usage, complete, errors = (transport.audited_events(folder) if (folder / 'journal.jsonl').exists() else transport._events((folder / 'events.jsonl').read_text()))
+        # Read with the settings invocation.json records; a call without a journal is read from events.jsonl.
+        output, event_usage, complete, errors = transport.audited_events(folder)
         # Execution completion and cost completeness are independent. Missing
         # counters retain accounting holds without reclassifying known execution.
         execution = result.get('execution_status')
@@ -873,9 +917,19 @@ class CodexExecutor:
                    and result.get('returncode') == 0) if execution is not None else (
                    result.get('error') is None and complete and not errors and result.get('returncode') == 0)
         usage = result.get('usage')
+        # A result written before transports recorded it says so through its audited events.
+        terminal_received = result.get('terminal_received', complete)
         costs = {'model_calls': 0 if result.get('dispatched') is False else 1, 'wall_seconds': result['wall_seconds']}
-        if usage is not None and all(type(usage.get(k)) is int for k in ('input_tokens', 'output_tokens')):
-            costs['tokens'] = usage['input_tokens'] + usage['output_tokens']
+        # Codex has exited, so its rollout is complete. On a resumed thread the stream's usage is the
+        # thread's running total; the usage rows the call added after its committed prefix are what it spent.
+        # A turn without its terminal event is not charged: what was in flight when it was stopped wrote no rows.
+        # Recovery settles a call it rebuilds from its folder with the same function and inputs.
+        charge = codex_ledger.settle_call(folder, settings, session=session, codex_home=result.get('codex_home'),
+            path=result.get('native_session_ref'), thread_id=result.get('provider_thread_id'), stream_usage=usage,
+            run_root=self.calls_root.parent, finished=terminal_received is True,
+            dispatched=result.get('dispatched') is not False)
+        if charge['tokens'] is not None:
+            costs['tokens'] = charge['tokens']
         context = None
         if session is not None:
             context = {'effective_context_hash': metadata['effective_context_hash'],
@@ -886,7 +940,8 @@ class CodexExecutor:
             if result.get('native_session_ref') and result.get('provider_thread_id'):
                 try:
                     after = read_native_snapshot(result['native_session_ref'],
-                        expected_thread_id=result['provider_thread_id'], expected_cwd=str(workspace), expected_prefix=snapshot)
+                        expected_thread_id=result['provider_thread_id'], expected_cwd=str(workspace), expected_prefix=snapshot,
+                        native=settings)
                     context['native_prefix'] = {'prefix_bytes': after['prefix_bytes'], 'prefix_sha256': after['prefix_sha256'], 'provider_thread_id': after['provider_thread_id']}
                     image_check = verify_snapshot_images(after, image_manifest,
                         after_record=snapshot['record_count'] if snapshot else 0)
@@ -903,10 +958,16 @@ class CodexExecutor:
                 result['protocol_valid'] = False
                 result['error'] = 'Native session continuation is unverifiable: ' + str(
                     context.get('native_session_error') or 'missing native session snapshot')
+        if charge['profile_error']:
+            result['protocol_valid'] = False
+            result['error'] = '; '.join(filter(None, (charge['profile_error'], result.get('error'))))
         return {'status': 'succeeded' if success else 'failed_definite' if execution == 'failed_definite' else 'unknown', 'actual_costs': costs,
-                'response': result.get('response'), 'usage': usage, 'usage_complete': result.get('usage_complete', False),
-                'terminal_received': result.get('terminal_received', complete),
-                'native_writer_quiesced': result.get('returncode') is not None,
+                'response': result.get('response'), 'usage': usage,
+                'usage_complete': result.get('usage_complete', False) and charge['usage_known'],
+                **charge['receipt'],
+                'terminal_received': terminal_received,
+                'native_writer_quiesced': result.get('returncode') is not None and (
+                    not native_on or result.get('descendants_stopped') is not False),
                 'never_dispatched': result.get('dispatched') is False,
                 'protocol_valid': result.get('protocol_valid', not errors),
                 'provider_thread_id': result.get('provider_thread_id'), 'context_manifest': context,

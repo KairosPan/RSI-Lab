@@ -10,7 +10,7 @@
 
 | 层 | 保存内容 | 权威与共享范围 |
 | --- | --- | --- |
-| 原生 Codex 会话 | 对话消息、原生历史和可观察运行信息 | 每个 Lab、Meta 和 Literature 实例各用精确的 `provider_thread_id`，不使用 `--last`，也不续接对方 thread。原生文件由 Codex 保存，不作为预算或已执行状态的权威 |
+| 原生 Codex 会话 | 对话消息、原生历史和可观察运行信息 | 每个 Lab、Meta 和 Literature 实例各用精确的 `provider_thread_id`，不使用 `--last`，也不续接对方 thread。原生文件由 Codex 保存；每次调用的 token 从其中的用量记录读出后记入共享账本，预算与已执行状态仍以共享账本为准 |
 | Agent 工作记忆 | 目标引用、计划、尝试、理由摘要、暂定假设、未决问题、下一步和相关来源引用 | SQLite 中追加不可变修订，按 task/run/branch/agent owner 归属；会话重建保留当前 head。内容标记为 `unverified_working_state` |
 | 执行日志 | 每次调用的原始 stdout/stderr、事件、输入、输出、错误、用量和终态 | `calls/<effect_id>/journal.jsonl` 保存逐条持久事件与 hash 链；模型无权确认水位或改写旧事件 |
 | 共享执行账本 | Work、Effect、Wait、真实回执、来源事实和资源消耗 | `ledger.sqlite3` 与 `objects/`；控制器是唯一写入入口，恢复与去重以这些状态为准 |
@@ -88,6 +88,22 @@
 
 其他取值会使 Runtime 拒绝启动该运行。
 
+可选的 `native_capabilities` 也写在顶层，为每个角色打开 Codex 自身的工具：网页搜索、受限终端和子 agent。它按角色分别设置，键只能是 `lab`、`meta` 和 `literature`；没有这个块，或块里没有写某个角色时，该角色全部关闭。没有这个块的运行发出的 Codex 命令、提示词和请求包与没有这项功能时逐字节相同。有这个块时，全部关闭的角色发出的 Codex 命令仍然相同；提示词和请求包只有运行配置的 hash（`decision_dependencies.config_hash` 及由它生成的 token，它们随任务数据写在提示词里）不同，因为运行配置本身不同。完整的运行配置示例见 [`examples/native-capabilities-run.json`](../examples/native-capabilities-run.json)，它在上面的模板上加了这个块，把 `model_timeout_seconds` 设为 1800、`max_effective_context_bytes` 设为 4,194,304，并为使用工具的轮次放大了预算：`model_reservation` 预约 200,000 tokens 和 1800 秒（与超时相同），`budgets.tokens` 为 20,000,000，`budgets.wall_seconds` 为 36,000。块的写法如下，其中的目录是占位符：
+
+```json
+"native_capabilities": {
+  "lab": {"web_search": true, "terminal": {"readable_roots": ["/abs/path/to/task-data"]}, "subagents": {"max_concurrent": 3}},
+  "meta": {"web_search": true, "terminal": true, "subagents": true},
+  "literature": {"web_search": true}
+}
+```
+
+- `web_search`：`true` 或 `false`，打开 Codex 的实时网页搜索。
+- `terminal`：`false`、`true` 或 `{"readable_roots": [...]}`。打开后模型可以在自己会话的工作目录里运行命令和编辑文件，不能联网；`readable_roots` 列出它另外可以只读的目录，`true` 表示没有这样的目录。
+- `subagents`：`false`、`true` 或 `{"max_concurrent": N}`。打开后模型可以在一轮内派出子 agent，`N` 是同时运行的上限，取 1 到 8 的整数，`true` 取默认值 3。
+
+写错的键或取值会使 `init` 拒绝建立运行；`init` 和之后每次 Runtime 启动都会检查。开启后 Codex 在一轮内自行调用这些工具，Controller 不逐次准入，调用结束后才记录。命令与权限的变化、记录内容、计费和限制见[Codex 原生工具](#codex-原生工具)。
+
 ```sh
 python3 -m rsi_lab --root runs/my-task --run main \
   init --config runs/my-task/run-config.json
@@ -104,8 +120,8 @@ python3 -m rsi_lab --root runs/my-task --run main status
 | `lab-step` | 只推进指定 Lab Work 的一次模型决策 |
 | `meta-step` | 推进指定 Meta Work；Inspector/Worker 模式使用 Meta 自己的会话 |
 | `run-until-wait --max-steps 20` | 推进就绪的 Lab/Meta/Literature/工具工作后返回，保留尚未完成的义务 |
-| `status` | 查看会话、turn、待执行/阻塞工作、预算和需要对账的 Effect |
-| `features` | 只读地打印这次运行启用了哪些科研功能、加载了哪些适配器、各模式下模型可用的动作；见 [启动前检查](rsi-lab-core.md#启动前检查) |
+| `status` | 查看会话、turn、待执行/阻塞工作、预算、需要对账的 Effect，以及最近一次记录的 Codex 账户快照（`codex_account`） |
+| `features` | 只读地打印这次运行启用了哪些科研功能、加载了哪些适配器、各模式下模型可用的动作，以及各角色的 Codex 原生工具设置和与之相关的提醒（`native_warnings`）；见 [启动前检查](rsi-lab-core.md#启动前检查) |
 | `recover` | 摄取持久回执，或从所属调用日志恢复已知终态；补做幂等发布/提议处理，不盲目重发未知调用 |
 | `reconcile --effect EFFECT_ID --receipt PATH` | 用操作者写的、绑定该 Effect 的回执结算一次 `unknown` 调用，随后执行 `recover`；可加 `--key KEY`，同一回执重复执行无副作用 |
 | `agent-checkpoint` | 在当前会话没有活动 turn 的安全边界保存检查点 |
@@ -137,6 +153,90 @@ Scientific Memory 的领域身份及经验解释继续通过 `scientific_identit
 内核负责对象修订、来源闭包、交付预算和负结果保留；对象身份规范化、具体指标、来源主题及
 结束条件保留在领域模块和任务宿主中。
 
+## Codex 原生工具
+
+运行配置的 `native_capabilities`（写法见[运行入口](#运行入口)）为每个角色打开 Codex 自身的网页搜索、受限终端和子 agent。这些工具由 Codex 在一轮内自行调用，Controller 不逐次准入；调用结束后，系统从事件流和 rollout 记下它们做了什么，并按 Codex 自己的用量记录结算 token。已注册的科学工具不受影响，仍由 Controller 准入、执行和登记。设计与取舍见[设计文档](superpowers/specs/2026-11-17-native-codex-capabilities-design.md)。
+
+通过这些工具得到的内容只是线索，不是证据。命令引用的证据 ID 必须来自本轮请求；要让某项内容可以引用，仍须通过已注册能力取得并交付。
+
+### 可读目录
+
+`readable_roots` 的每一项必须是已存在目录的绝对路径，按解析后的路径保存，重复的只保留第一次出现的位置。位于运行根目录或 Codex 配置目录（`CODEX_HOME`，默认 `~/.codex`）之内的目录会被拒绝；是否位于其中按文件身份判断，所以符号链接或改写大小写都绕不过去。目录本身就是共享临时目录（`/tmp`、`/private/tmp`、`/var/tmp`、`/private/var/tmp`）时也拒绝，位于其中的子目录可以。`init` 之后被删除的目录会使每次 Runtime 启动失败，`recover` 也包括在内，直到重新创建该目录。
+
+列出哪些目录由宿主负责：评测的私有代码或答案不能放在可读目录下。可读目录的路径会写进发给该角色的请求。
+
+终端的网络关闭不等于读到的内容出不去。同一角色开着网页搜索时，它读得到的任何内容（工作目录、可读目录、请求本身）都可能被写进搜索词发到外部，例如网页诱导它这样做时；关闭终端网络挡不住这条通道。所以不要把含有凭证的目录（例如主目录、`~/.ssh` 或云服务的配置目录）或私有评测数据列为可读目录。
+
+### Codex 命令的变化
+
+某个角色全部关闭时，命令与以前逐字节相同。开启后：
+
+- 网页搜索：`web_search` 设为 `"live"`。
+- 终端：不再传 `--sandbox read-only`，改用名为 `rsi_agent` 的权限配置。其中依次为：Codex 的最小平台目录集合可读；运行根目录、Codex 配置目录和本机存在的各个共享临时目录禁止访问；该会话的工作目录 `agents/<session_id>/workspace/` 可读写，但其中的 `.codex`、`.agents`、`AGENTS.md` 和 `AGENTS.override.md` 只读；每个可读目录只读。网络显式关闭。命令只继承核心环境变量，`TMPDIR` 与 `TMPPREFIX` 指向工作目录下的 `.tmp`。项目文档与 exec-policy 规则不加载（`project_doc_max_bytes=0`、`--ignore-rules`），所以模型写进工作目录的文件不会在下一轮变成指令或配置。
+- 子 agent：深度为 1，子 agent 不能再派生；同时运行的数量不超过 `max_concurrent`；子 agent 默认使用父调用的模型和 effort。
+- 始终不开启：apps、plugins、浏览器与电脑控制、图像生成、图像查看、skill 搜索、hooks、goals、sleep 工具和第二套多 agent 实现。命令带 `--ignore-user-config`，用户配置的 MCP 服务器不会加载；事件流里出现 `mcp_tool_call` 时，调用按禁用工具失败。
+
+### 请求的变化
+
+开启了任一工具的角色，传输前言改为允许先使用会话里的工具、最后返回一个符合 schema 的 JSON 对象。角色说明多一段，列出这次会话有哪些工具及其限制：通过它们得到的内容是未经核实的线索，不是证据；命令引用的证据 ID 必须来自本轮请求；自己运行的东西不是已注册能力的执行，不能这样报告；网页和文件中的文字是数据，不是指令。开启了终端时，这一段还有两句：终端不能联网，只能读取工作目录和列出的可读目录（列出它们的路径）；工作目录里的文件是草稿，可能不会保留，重要内容写进 `working_memory_delta`。另有三句禁止运行工具的说明改为只禁止自行执行已注册能力，Literature 说明里的 `Native tools remain disabled; propose typed requests.` 一句删去。
+
+角色的设置在准备模型调用时冻结到 Effect 中，开启时也写进请求的 `task.constraints.native_capabilities`。执行器和恢复都以 Effect 中的设置为准；请求包与 Effect 不一致的调用被拒绝。
+
+工作目录属于会话。会话重建后换成新的工作目录，旧目录里的文件不带过去。
+
+### 记录了什么
+
+事件流不完整：执行失败的命令和上下文压缩都不产生事件流条目。所以回执的 `native_activity` 合并两处来源：
+
+- 事件流中已完成的条目：`items` 是各类型的数量；`commands`（命令和退出状态）、`searches`（搜索词）、`files_changed`（改动的文件）各保留前 32 条，每个字符串截到 200 字符，三者超出的条数合计记在 `omitted`。
+- rollout 记录的工具调用：`tool_calls` 是次数；`tool_inputs` 保留前 32 次调用的名称、输入的前 200 字符和输入的 hash，其余次数记在 `tool_inputs_omitted`；另有 provider 请求数 `provider_requests` 和压缩次数 `compactions`。
+
+因此，失败的命令出现在 `tool_inputs` 里，不出现在 `commands` 里。子 agent 记在回执的 `child_threads`，每项有 thread 身份、rollout 路径与 hash，以及它在本轮的用量。
+
+rollout 读取器只在角色设置允许时接受工具记录和压缩记录，其余仍按以前拒绝。存在带替换历史（`replacement_history`）的 `compacted` 记录时，会话历史从最后一条这样的记录起计入容量，另加在它之前的 `session_meta` 记录和最后一条完整的 `world_state` 记录：压缩替换的是对话，不是会话说明和环境。上下文清单的 `history_token_method` 这时标为 `rollout-bytes-since-last-compaction-estimate-v1`；否则仍按整个文件计算。使用工具会让 rollout 很快变大，开启原生工具的运行应把 `max_effective_context_bytes` 设得足够大，让 Codex 自己的压缩先于这项容量检查发生；否则 Work 会因容量阻塞，需要用 `agent-rebuild` 换新会话。示例设为 4 MiB。有角色开启了原生工具、而实际的容量上限（`max_effective_context_bytes`，没有时取 `max_input_bytes`，再没有时为 131,072）低于 1,048,576 字节时，`features` 输出的 `native_warnings` 会给出一条提醒；否则它是空列表。
+
+读取器接受的 rollout 记录种类来自 2026-11-17 用模型 `gpt-6.1-sol` 和 Codex CLI 0.163.0 做的实测：这个模型的搜索和终端调用都经过 code-mode 的 `exec` 工具。直接调用工具的模型会写出别的记录（例如 `function_call`、`web_search_call` 或 `local_shell_call`），读取器会拒绝它们，这样的每一轮都会以无效告终。开始一次较长的原生运行之前，先用该运行自己的模型做一次简短的试调用，确认它写出的记录能被接受。
+
+### Token 与其他资源
+
+以下计费规则适用于每次模型调用，无论是否开启原生工具。Codex 每发出一次 provider 请求，就在 rollout 写一行用量记录（`token_usage_record`）。一次调用计入的 token 是它新增到 rollout 的这些行的输入加输出，再加上本轮涉及的每个子 agent 的用量行。本轮涉及的子 agent 是这一轮 rollout 中任何一条子 agent 活动记录（`SubAgentActivity`，不论种类）所指的子 agent，包括早先派出、本轮再次联系的；它们的行在各自的 rollout 里，按父调用本轮的 turn 身份找出。
+
+事件流报告的用量只在一种情况下使用：新 thread 上没有用量行，并且没有开启子 agent。在续接的 thread 上，事件流的数是整个 thread 的累计值，从不计费。以下情况用量为未知，按 `unknown_usage_policy` 处理：调用没有收到终态事件（超时、中断或 Codex 中途退出）；续接的 thread 没有新增用量行；开启了子 agent 却没有用量行；某个子 agent 的 rollout 读不出来；调用自己的 rollout 读不出来。没有终态事件的调用即使已有用量行也不按它们计费，因为被终止时仍在进行的请求不写用量行；已读到的行汇总在回执的 `ledger` 里，只是下限，供对账参考。上下文读取器拒绝某个 rollout（例如出现不允许的记录）时，仍按 thread 身份找到该文件读取用量行。
+
+用量行的局限：子 agent 被中止（例如父调用的这一轮没有等它就结束了）或调用被终止时，仍在进行的 provider 请求不写用量行，它们的用量不会被计入。调用被终止时，整次调用的用量因此记为未知（见上），token 预约保持；在正常结束的一轮里被中止的子 agent，其未完成请求的用量则无法从用量行看出，也不计费。
+
+每次已派发调用的回执都有：
+
+- `token_source`：`ledger`（用量行）、`stream`（事件流）或 `unknown`；`token_reason`：用量未知时的原因，否则为 `null`。
+- `stream_usage`：事件流报告的用量，只供核对。
+- `ledger`：读到的用量行汇总，`requests`、`input_tokens`、`output_tokens` 和 `cached_input_tokens`，以及这些行所属的本轮 turn 身份 `turn_ids`（读不到调用自己的 rollout 时为空列表）。用量未知时这些数只是下限。
+- `account_snapshot`：本轮 rollout 读得出来时才有，是 Codex 在这一轮最后记录的账户快照（套餐、当前窗口已用百分比与长度、重置时间、额度余额等），这一轮没有记录时为 `null`。
+- 开启了原生工具时另有 `native_capabilities`、`native_activity` 和 `child_threads`。
+
+`status` 的 `codex_account` 按 Effect 的创建顺序，显示最近一次带账户快照的模型调用回执中的 `account_snapshot`，没有时为 `null`；之后才对账的旧调用不会取代它。快照反映整个 Codex 账户的使用，只用于查看，不参与准入。
+
+一轮计一次 `model_calls`，不论其中有多少次 provider 请求。`tool_calls` 仍只计 Controller 执行的已注册工具。token 数包含缓存命中的输入，所以使用了工具的一轮 token 数很大：每次工具往返都会把上下文再发一次。进行中的一轮只有 `model_timeout_seconds` 能停止；`tokens` 预算只会拒绝下一次调用。示例把 `budgets.tokens` 设为 20,000,000、`budgets.wall_seconds` 设为 36,000，每次调用预约 200,000 tokens 和 1800 秒（与 `model_timeout_seconds` 相同）；这些只是起点，应按任务调整。
+
+此前记录的 token 总数是把每次调用事件流的计数相加得到的。续接 thread 时这个计数包含之前各轮，所以早先的轮次被重复计入。2026-11-13 的 400 轮运行中，运行账本记为 22,572,043 tokens，Codex 的用量行相加为 11,265,297。
+
+### 终端调用前后的检查
+
+派发前，工作目录里已有 `.codex`、`.agents`、`AGENTS.md` 或 `AGENTS.override.md` 时，调用被拒绝，什么也不发送，Effect 结算为 `failed_definite`，回执标记 `never_dispatched`。工作目录里的 `.tmp`（终端命令的临时目录）存在却不是目录时，调用同样被拒绝，原因中写明 `.tmp`；删除它即可。调用结束后，rollout 中这一轮最后的 `turn_context` 必须表明它在受管理的受限权限配置下运行，禁止访问运行根目录和 Codex 配置目录，网络受限；否则调用无效，错误为 `Permission profile was not in force`。
+
+### 进程
+
+终端调用运行时，系统大约每秒读取一次进程表，记录出现在这次调用之下的每个进程及其启动时间。调用无论怎样结束，被记录且仍在运行的进程都会被终止；终止前再次核对 pid 与启动时间，确认是同一个进程。回执的 `native_writer_quiesced` 要求没有这样的进程留下；为 `false` 时，这一轮不能提交，会话保持锁定，处理方式与旧 CLI writer 未确认退出时相同。
+
+限制：在两次采样之间启动并脱离父进程的进程看不到；启动时间只精确到秒；核对与发信号之间仍有很短的间隔；读不到进程表时，这次调用报告为未确认停止。
+
+### 恢复与隔离
+
+从调用日志恢复时，使用 Effect 中冻结的设置；日志记录的设置与之不同的调用拒绝恢复。恢复与执行器用同一段代码结算，得到相同的结算结果。开启了原生工具、却没有保存传输结果的调用报告为未确认停止。操作员隔离暂停调用（`Controller.quarantine_interrupted_model`）对开启了任一原生工具的调用一律拒绝，因为无法证明其中没有发生工具活动。
+
+### 尚不支持
+
+PABLO 宿主和文献评测脚本自己生成运行配置，目前不能开启这个块。终端联网、外部 MCP 服务器，以及前端对原生活动的展示，都不在这次改动的范围内。
+
 ## 工作记忆更新
 
 每个模型响应在受控命令之外提供 `working_memory_delta`，其内容是 JSON 对象编码成的字符串；`"{}"` 表示无变化。例如：
@@ -163,7 +263,7 @@ Scientific Memory 的领域身份及经验解释继续通过 `scientific_identit
 
 未知 Effect 保留许可和预算责任，阻塞与其冲突的动作。session lease 到期、进程消失或原生文件缺失都不是重新发送同一 prompt 的许可。先对账，再恢复或显式重建；重建不重做已经成功的工具调用。没有可靠对账能力时，系统保留未知状态。
 
-用户主动暂停可能在 CLI 已开始请求、但尚未记录回答和用量时中断模型。针对这一个边界，可信操作员可以调用 `Controller.quarantine_interrupted_model`：核验原始暂停记录、已退出的所属进程、确切请求与禁用原生工具的命令、持久中断日志、未改写的原生前缀，以及确实没有回答或工具活动。它仅隔离该模型调用的执行许可；Effect 仍为 `unknown`，只结算已测得的调用次数和时间，未知 token 不填零、其预约不释放。普通工具调用、缺失记录、仍有 writer 或已有回答均不能使用这条路径。
+用户主动暂停可能在 CLI 已开始请求、但尚未记录回答和用量时中断模型。针对这一个边界，可信操作员可以调用 `Controller.quarantine_interrupted_model`：核验原始暂停记录、已退出的所属进程、确切请求与禁用原生工具的命令、持久中断日志、未改写的原生前缀，以及确实没有回答或工具活动。它仅隔离该模型调用的执行许可；Effect 仍为 `unknown`，只结算已测得的调用次数和时间，未知 token 不填零、其预约不释放。普通工具调用、缺失记录、仍有 writer、已有回答或开启了任一 Codex 原生工具的调用均不能使用这条路径。
 
 隔离会保留原 Effect、packet 和审计证明，取消旧 Work、拒绝旧 turn 的输出，并从同一 owner 当前已提交的记忆建立新会话。自动恢复与提议处理永久跳过隔离调用；后续真实费用回执仍可对账。后续科研工作必须生成新的 Work 和请求，不能重发旧 packet。实验宿主可以允许这种已认证的隔离义务继续占用预算而不占物理执行槽，但必须分别报告“评分与复核已完成”和“费用尚待核对”；后者存在时不得宣称完整工作流已结清。
 
@@ -227,9 +327,9 @@ python3 -m rsi_lab --root runs/my-task --run main lab-start --event after-timeou
 
 ## 当前 CLI 上下文边界
 
-每次续接前核验指定原生 rollout 的 `session_meta.id`、独立工作目录和已登记的字节前缀。只按确切 thread 文件名定位，不扫描其他聊天内容。原生历史缩短、改写、截断、出现不支持的 compaction 或原生工具项目时，要求显式处置/重建。
+每次续接前核验指定原生 rollout 的 `session_meta.id`、独立工作目录和已登记的字节前缀。只按确切 thread 文件名定位，不扫描其他聊天内容。原生历史缩短、改写、截断，或出现该角色设置不允许的 compaction 或原生工具记录时，要求显式处置/重建。
 
-容量覆盖完整可观察 rollout 与本轮请求信封，包含历史和本轮工作记忆，而不是只数新增 prompt。文本计量扣除已验证图像的 base64 载荷，以 `max_effective_context_bytes` 限制；未配置时沿用 `max_input_bytes`，默认 131,072 B。解码后的图像字节另受 `max_image_bytes`（本轮）与 `max_effective_image_bytes`（历史加本轮）限制。原始历史仍含审计元数据，文本计量因此可能比实际保留的模型消息更保守。
+容量覆盖完整可观察 rollout 与本轮请求信封，包含历史和本轮工作记忆，而不是只数新增 prompt。开启了原生工具的角色，rollout 中有带替换历史的 `compacted` 记录时，历史从最后一条这样的记录起算（见[Codex 原生工具](#codex-原生工具)）。文本计量扣除已验证图像的 base64 载荷，以 `max_effective_context_bytes` 限制；未配置时沿用 `max_input_bytes`，默认 131,072 B。解码后的图像字节另受 `max_image_bytes`（本轮）与 `max_effective_image_bytes`（历史加本轮）限制。原始历史仍含审计元数据，文本计量因此可能比实际保留的模型消息更保守。
 
 CLI rollout 不是每次 provider 请求完整输入的认证副本，所以记录明确包含：
 
@@ -239,7 +339,7 @@ CLI rollout 不是每次 provider 请求完整输入的认证副本，所以记�
 
 当前科研命令仍要求证据在本轮 packet 中重新交付。保留在会话里的历史有助于工作连续性，但不能单独作为新的引用授权。摘要也不授予原文 locator。token/时间预约仍沿用核心的软计量边界；纯上下文 helper 可接登记 tokenizer 和输出预留，但不能把 UTF-8 字节估计冒充完整 provider token 测量。
 
-当前后端禁用 Codex 原生工具，实际科学工具走控制器的显式 Effect。原生内部多请求、自动重试、压缩的逐请求准入代理、完整 provider-input attestation、全部 PS 验收以及 runtime 自动升级/回退仍属后续实现范围。会话保存、工作记忆和逐事件日志的机制测试，不证明模型科研判断质量或整个目标系统已完成。
+角色没有开启 `native_capabilities` 时，后端仍禁用 Codex 原生工具；开启后，Codex 在一轮内自行调用这些工具，Controller 不逐次准入，调用结束后记录并按 Codex 的用量记录计费（见[Codex 原生工具](#codex-原生工具)）。已注册的科学工具始终走控制器的显式 Effect。一轮内的多次 provider 请求、自动重试和压缩同样没有逐请求准入，按用量记录事后结算。完整 provider-input attestation、全部 PS 验收以及 runtime 自动升级/回退仍属后续实现范围。会话保存、工作记忆和逐事件日志的机制测试，不证明模型科研判断质量或整个目标系统已完成。
 
 ## 验证与发布
 

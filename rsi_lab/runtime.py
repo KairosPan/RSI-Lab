@@ -26,7 +26,7 @@ from .research_policy import normalize_research_policy
 from .driver_report import build_report
 from .orchestration import Orchestration, orchestration_config
 from .preflight import feature_report, preflight, request_report
-from . import work_claims, decision_dependencies
+from . import work_claims, decision_dependencies, native
 
 
 COMPLETION_KIND = 'runtime_effect_completion'
@@ -77,6 +77,8 @@ class Runtime:
         self.config = store.run(run_id)['config']
         unknown_usage_policy(self.config)
         model_failure_retries(self.config)
+        self.native = native.capabilities(self.config)
+        native.check_roots(self.native, run_root=store.root, codex_home=native.default_codex_home())
         orchestration = orchestration_config(self.config)
         self.research_policy = normalize_research_policy(self.config.get('research_policy'))
         self.agents = AgentState(store, run_id)
@@ -311,8 +313,8 @@ class Runtime:
 
     def _context(self, work, orchestration=None, *, read_only=False):
         """Build the visible context and its dependency manifest in one snapshot."""
+        role = work['kind'] if work['kind'] in {'lab', 'literature'} else 'meta'
         if not read_only:
-            role = work['kind'] if work['kind'] in {'lab', 'literature'} else 'meta'
             if role == 'literature':
                 # Refuse a stale or foreign delegation before any child session exists.
                 self._literature_task(work)
@@ -327,6 +329,10 @@ class Runtime:
             if orchestration is not None and digest(orchestration) != digest(self.orchestration.snapshot()):
                 raise decision_dependencies.StaleDecision('Orchestration changed while building the decision context')
             agent, mode, task, options = self._build_context(work, orchestration, read_only=True)
+            # The role's native settings travel with its request only when something is on.
+            settings = native.validate(self.native[role])
+            if settings != native.OFF:
+                task['constraints']['native_capabilities'] = settings
             if mode == 'literature':
                 # The delegated child is bound to its task revision. Research-state
                 # decision dependencies belong to its Lab and Meta owners.
@@ -573,7 +579,8 @@ class Runtime:
                 snapshot = read_native_snapshot(previous['native_session_ref'],
                     expected_thread_id=session['provider_thread_id'],
                     expected_cwd=str(self.store.root / 'agents' / session['id'] / 'workspace'),
-                    expected_prefix=previous.get('native_prefix'))
+                    expected_prefix=previous.get('native_prefix'),
+                    native=task['constraints'].get('native_capabilities'))
                 if snapshot['prefix_sha256'] != previous.get('native_prefix', {}).get('prefix_sha256'):
                     raise ValueError('Native session advanced outside its committed turn; reconcile before resume')
             except (ValueError, OSError) as exc:
@@ -642,6 +649,8 @@ class Runtime:
                    if 'recommendation_admission' in task['constraints'].get('research_loop', {}) else {}),
                 **({'final_review_only':True} if task['constraints'].get('final_review_only') else {}),
                 **({'interpretation_only': True} if task['constraints'].get('interpretation_only') else {}),
+                **({'native_capabilities': task['constraints']['native_capabilities']}
+                   if 'native_capabilities' in task['constraints'] else {}),
                 # The executor recomputes the response schema from this record.
                 **({'orchestration': self.orchestration.metadata(mode, orchestration)}
                    if orchestration and mode != 'literature' else {}),
@@ -2221,7 +2230,25 @@ class Runtime:
                 'literature_tasks': self.store.list(self.run_id, 'registration', kind='literature_task'),
                 'agent_sessions': self.store.list(self.run_id, 'agent_session'),
                 'agent_turns': self.store.list(self.run_id, 'agent_turn'),
+                'codex_account': self._codex_account(),
                 **({'orchestration': self.orchestration.status()} if self.orchestration else {})}
+
+    def _codex_account(self):
+        """The ``account_snapshot`` of the newest model receipt that records one, else ``None``.
+
+        Receipts are taken newest first by when their Effect was created, which
+        with model calls made one at a time is the order they ran in: a later
+        reconciliation of an older call does not make its snapshot the newest.
+        The snapshot is shared by everything the Codex account does; it is
+        shown, never used to admit or refuse work.
+        """
+        effects = [e for e in self.store.list(self.run_id, 'effect')
+                   if e['kind'] in {'lab', 'meta', 'literature'} and e.get('result_ref')]
+        for effect in sorted(effects, key=lambda e: e['created_seq'], reverse=True):
+            snapshot = json.loads(self.store.read_blob(effect['result_ref'])).get('account_snapshot')
+            if snapshot is not None:
+                return snapshot
+        return None
 
     def _agent_available(self, work):
         if work['kind'] not in {'lab', 'literature', 'meta_discovery', 'meta_disposition', 'disposition'}:
