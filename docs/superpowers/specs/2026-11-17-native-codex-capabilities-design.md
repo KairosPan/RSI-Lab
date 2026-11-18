@@ -368,3 +368,75 @@ permission profile's name, the bounds on `native_activity`, the wording of the
 prompts and documentation, and the shape of the tests. Each change starts from
 a failing test; the tests use synthetic streams and rollouts and make no model
 call.
+
+## Changes made while building
+
+What the code does differently from the sections above. The earlier sections
+are left as they were written.
+
+**Terminal hardening (sections 2 and 8).**
+- The profile switches the network off explicitly
+  (`permissions.rsi_agent.network={enabled=false}`) instead of relying on the
+  default.
+- Commands inherit only the core environment
+  (`shell_environment_policy.inherit="core"`); `TMPDIR` and `TMPPREFIX` point
+  into the workspace's `.tmp`.
+- Project documents and exec-policy rules are not loaded
+  (`project_doc_max_bytes=0`, `--ignore-rules`), and `.codex`, `.agents`,
+  `AGENTS.md` and `AGENTS.override.md` inside the workspace are read-only, so
+  nothing a command writes becomes instructions, configuration or rules on a
+  later turn.
+- Each shared temporary folder that exists (`/tmp`, `/private/tmp`, `/var/tmp`,
+  `/private/var/tmp`) is denied. A readable root may not be one of them; a root
+  inside one is allowed. Whether a root lies inside the run root or the Codex
+  home is judged by file identity, so symlinks and letter case do not get
+  around it; duplicate roots are dropped, and a root deleted after `init` stops
+  every Runtime start until it is recreated.
+- Before dispatch, a terminal call is refused, with nothing sent, when the
+  workspace already holds one of those four names.
+- After the call, the last `turn_context` of the rollout must show a managed,
+  restricted profile with restricted network that denies the run root and the
+  Codex home; otherwise the call is invalid with
+  `Permission profile was not in force`.
+
+**Process tracking (section 9).** A command can lead its own process group,
+out of reach of a kill of Codex's group, and once its parent is gone it can no
+longer be found through Codex. So with the terminal on, the
+process table is sampled about once a second while Codex runs, and every
+process seen under the call is tracked by pid and start time. However the call
+ends, tracked processes still alive are stopped, each only after a fresh read
+of the table confirms its pid and start time. `native_writer_quiesced` requires
+that none remains. Limits: a process that detaches and loses its parent between
+two samples is not seen; start times have one-second resolution; a short gap
+remains between the confirming read and the signal; a table that cannot be read
+leaves the call reported as not confirmed.
+
+**Settling a call's tokens (section 6).**
+- When the context reader refuses a call's rollout, its usage rows are still
+  read: the rollout is located by its exact thread id under the Codex home, as
+  a sub-agent's is.
+- The stream's number is charged only on a fresh thread whose turn added no
+  usage rows and whose role has sub-agents off. It is never charged on a
+  resumed thread, and never with sub-agents on, since it leaves them out; those
+  cases without rows are unknown. A rollout that cannot be read makes usage
+  unknown on any thread.
+- Every receipt says where its number came from (`token_source`: `ledger`,
+  `stream` or `unknown`) and, when unknown, why (`token_reason`). The executor
+  and recovery settle through the same function, `codex_ledger.settle_call`.
+
+**Compaction (section 5).** Only the outer `compacted` record is accepted;
+other compaction kinds and thread rollback stay unsupported. History is counted
+from the last `compacted` record that carries a `replacement_history` list; one
+without it leaves the count where it was, and before any such record the whole
+file counts. The context manifest then labels the method
+`rollout-bytes-since-last-compaction-estimate-v1`.
+
+**Account snapshot (sections 6 and 10).** `account_snapshot` is recorded on the
+receipt of every dispatched call whose turn was read from the rollout, with
+settings on or off (`null` when the turn recorded none), and left out when the
+turn could not be read. `status()['codex_account']` shows the newest one.
+
+**Reading the stream (section 4).** The event stream is split on `\n` only, for
+every call: Codex leaves U+2028, U+2029 and U+0085 unescaped inside JSON
+strings, and splitting on them broke valid frames. The rollout's usage rows are
+read with the same rule.

@@ -202,6 +202,7 @@ Adapter 的可选 `progress(effect, publication)` 返回 `query`、`state`、`re
 | 推荐类别与复核指引 | 运行配置 `research_policy`，至少一个字段 | `task.constraints.research_policy` |
 | Meta 调整 Lab 编排 | 运行配置里有 `orchestration` 块 | `task.constraints.orchestration`；`max_changes` 大于 0 时处置模式多出动作 `propose_lab_settings` |
 | 工具 | `Runtime(..., adapters=[...])`，命令行用 `--adapter-factory`。`requires_acceptance=True` 的适配器还要有验收记录 | `task.capability_catalog` |
+| Codex 原生工具 | 运行配置 `native_capabilities`，按角色开启网页搜索、受限终端和子 agent，见[持久 Agent 说明](persistent-agents.md#codex-原生工具) | 开启了任一工具的角色：`task.constraints.native_capabilities`，提示词中说明可用工具及其限制的一段 |
 
 两个 `research_features` 开关只认 JSON 布尔值 `true`，写成 `"true"` 或 `1` 不生效。运行配置在 `init` 时冻结，续跑沿用同一份配置，所以缺的键只能靠新建运行补上；`Runtime(...)` 的参数则每次构造都要传。
 
@@ -223,7 +224,7 @@ for work in runtime.controller.ready(run_id):      # 第一次模型调用之前
 
 | 接口 | 作用 |
 | --- | --- |
-| `runtime.feature_report()` | 报告三项功能各自是否在配置里声明（`declared`）、服务是否已创建（`service`），是否传入了可调用的身份提供者，配置里是否有 `research_policy`，已加载的适配器及其是否进入能力目录，以及 Lab、discovery、disposition 三种模式下模型可用的动作和 `command` 之外的响应字段 |
+| `runtime.feature_report()` | 报告三项功能各自是否在配置里声明（`declared`）、服务是否已创建（`service`），是否传入了可调用的身份提供者，配置里是否有 `research_policy`，已加载的适配器及其是否进入能力目录，Lab、discovery、disposition 三种模式下模型可用的动作和 `command` 之外的响应字段，以及 `native_capabilities`：`lab`、`meta`、`literature` 各自的原生工具设置，形如 `{"web_search": false, "terminal": null, "subagents": null}`，开启的终端给出解析后的 `readable_roots`，开启的子 agent 给出 `max_concurrent` |
 | `runtime.preflight(expect, work_id=None)` | 逐项核对期望。全部满足时返回 `feature_report()` 的结果，给了 `work_id` 时结果里多一项 `request`；否则抛 `ValueError`，每条一行，写明缺什么、该改运行配置的哪个键或 `Runtime(...)` 的哪个参数 |
 | `runtime.request_report(work_id)` | 对一个就绪的 Lab 或 Meta Work 按真实路径构建请求包但不准备 Effect，报告请求包里实际有什么 |
 
@@ -248,6 +249,7 @@ for work in runtime.controller.ready(run_id):      # 第一次模型调用之前
 - 检查只说明功能已经接通，不说明模型会用它们，也不说明结果有科研收益。
 - `request_report` 报告的是请求包的内容，不预判这次调用会不会被接纳。持久会话上下文容量、预算、并发容量、会话是否空闲、Issue 版本是否已变、运行是否已进入收尾，都在真正派发时才检查。
 - 命令行的 `features` 子命令只打印 `feature_report()`。命令行传不了身份提供者，所以它的输出里 `identity_provider` 是 `false`；要核对身份提供者和请求包，得在宿主脚本里调用 `preflight`。
+- `expect` 没有原生工具的键。要核对各角色开了哪些 Codex 原生工具，读 `feature_report()['native_capabilities']`；写错的 `native_capabilities` 块在 `init` 和 Runtime 启动时就会报错。
 
 实现见 [preflight](../rsi_lab/preflight.py)，验收见 [测试](../tests/v2/test_preflight.py)。
 
@@ -274,6 +276,8 @@ print(report["trial_outcome"])
 ## 命令与运行边界
 
 入口为 `python3 -m rsi_lab`。`init` 登记运行配置，`register-plan` 冻结任务计划，`adapter-run` 执行已注册能力，`run-until-wait` 推进就绪工作直到等待、预算或步数边界，`features` 打印这次运行启用了哪些科研功能（见[启动前检查](#启动前检查)）。只有合法准备态调用能继续派发，未知调用不能因重启而重发。
+
+`status`（`runtime.status()`）的 `codex_account` 是最近一份带账户快照的 Lab、Meta 或 Literature 模型回执中的 `account_snapshot`：Codex 在那次调用里最后记录的套餐、当前窗口已用百分比与长度、重置时间和额度余额。没有这样的回执时为 `null`。快照反映整个 Codex 账户的使用，只用于查看，不参与准入。回执里的这个字段见[持久 Agent 说明](persistent-agents.md#token-与其他资源)。
 
 ```sh
 python3 -m rsi_lab --help
