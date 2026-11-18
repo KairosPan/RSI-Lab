@@ -262,9 +262,10 @@ that created the thread. A thread whose role cannot be read is recorded with
   larger. **(my call)**
 - `prospective_rebuild_history_bytes`, the rollout size at which the host
   replaces an idle session, is today copied from the parent run. A team run
-  sets it at preparation, by default to the same 4,194,304 bytes, so a session
-  is never rebuilt later than the point where its next request could be
-  refused. `--rebuild-history-bytes` changes it. **(my call)** A rebuild drops
+  sets it at preparation, by default to 3,145,728 bytes: the context limit
+  minus 1,048,576, the largest request the host allows, so a session is rebuilt
+  before its next request could be refused. `--rebuild-history-bytes` changes
+  it, up to that value. **(my call)** A rebuild drops
   the Lab's conversation and its sub-agent threads, so this value is part of
   what an arm of an experiment is.
 
@@ -311,8 +312,9 @@ and the scoring request that consumes the plan takes it from there.
 
 - Either role, unless `required_role` is `challenge`, in which case only
   `challenge`.
-- A required challenge batch must have `challenge_dispatched` true: the
-  proposal has to come from the Challenge sub-agent. **(my call)** When nothing
+- A required challenge batch must have `challenge_dispatched` and
+  `challenge_adopted` true: the proposal has to come from the Challenge
+  sub-agent. **(my call)** When nothing
   is required, the Lab may also run a challenge batch of its own design.
 - `challenge_dispatched` must match the record of the Lab call that made the
   request: true needs at least one sub-agent with role `challenge` among that
@@ -431,6 +433,46 @@ beyond the sections above, each **(my call)**:
   one of its candidates was scored.
 - In a run with roles, the lead's request shows it the full instructions of its
   sub-agents, because the frozen settings are part of the request's constraints.
+
+## Changes made while building
+
+What the code does differently from, or beyond, the sections above. Each was a
+ruling made during the build; the ledger of the build lists them all.
+
+**Kernel**
+- A role name is also refused when it is a fixed key of Codex's `[agents]`
+  table (such as `max_depth`), which the command sets as well.
+- Anything wrong with roles before a call (a symlinked role folder or file,
+  role text that cannot be encoded, roles on a call without a persistent
+  session) settles the call as a definite failure that was never dispatched.
+- A `child_threads` entry takes `model` and `effort` from the sub-agent's own
+  record of the call when it has one, so a sub-agent addressed again is covered.
+- A new optional adapter hook, `admit_request(store, run_id, inputs, effect)`,
+  hands a host the model call that made a tool request. This is how the host
+  reads that call's `child_threads`.
+
+**PABLO host**
+- Only a Lab call may request a selection in a team run; a request from any
+  other role is refused. `local` and `challenge` are refused as role names
+  under every role in the block file, not only under the Lab.
+- The request hook and the contract that lists `decision` are on the selection
+  tool only in team runs, so every other run's tools are exactly as before.
+- A preparation without `--team` from a team parent is refused: the parent's
+  original limits are gone, and a plain run could not use the team's.
+- The check that the terminal is not handed the objective also looks at
+  content: any entry whose name starts with `guacamol`, the scorer's source
+  file, or a run's ledger under a readable root. `--prior-attempt-root` is
+  protected too. The check runs at preparation and again at every host start.
+- The not-blind statement is computed over every role, through the kernel's
+  own reading of the block, and names the roles that have web search on. It is
+  also written into the research report.
+- A Runtime built outside the host's `make_runtime` (the kernel's own command
+  line) gets neither the dispatch check nor the start-time check of readable
+  roots. `TEAM_V1.md` says so.
+
+**Tests**
+- `test_methods.py` and the team preflight tests do run on the build machine;
+  21 older tests in four files still need the scorer's package and do not.
 
 ## Left to the builder
 
