@@ -1,5 +1,6 @@
 """The native_capabilities block of a run config: read, normalised and checked before any call."""
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -15,6 +16,7 @@ from rsi_lab.controller import Controller
 from rsi_lab.runtime import Runtime
 from rsi_lab.store import Store
 from tests.v2.liveness_support import BUDGETS
+from tests.v2.native_fixtures import PLAIN, R, ROLES, WITH_ROLES
 
 INVALID = {'lab': {'shell': True}}
 EXAMPLE = Path(__file__).resolve().parents[2] / 'examples' / 'native-capabilities-run.json'
@@ -248,6 +250,101 @@ class NativeSettingsTests(unittest.TestCase):
             main(['--root', ledger, '--run', 'r', 'features'])
         self.assertEqual(json.loads(printed.getvalue())['native_capabilities'],
                          native.capabilities(json.loads(EXAMPLE.read_text())))
+
+
+def lab(subagents):
+    """The Lab's settings from a run config whose Lab block sets only ``subagents``."""
+    return native.capabilities({'native_capabilities': {'lab': {'subagents': subagents}}})['lab']
+
+
+class RoleSettingsTests(unittest.TestCase):
+    """Named sub-agent roles: their normal form, their limits, the role file, the command and the prompt."""
+
+    def test_roles_reach_the_normal_form_in_name_order(self):
+        got = lab({'roles': {'local': R, 'challenge': ROLES['challenge']}})
+        self.assertEqual(got['subagents'], {'max_concurrent': 3, 'roles': ROLES})
+        self.assertEqual(list(got['subagents']['roles']), ['challenge', 'local'])
+
+    def test_no_roles_leaves_the_settings_as_they_are_today(self):          # Review Focus 1
+        for given in (True, {'max_concurrent': 3}, {'roles': {}}):
+            self.assertEqual(lab(given)['subagents'], {'max_concurrent': 3})
+        old = {'web_search': False, 'terminal': None, 'subagents': {'max_concurrent': 2}}
+        self.assertEqual(native.validate(old), old)
+
+    def test_validate_keeps_roles_in_name_order(self):
+        given = {**PLAIN, 'subagents': {'max_concurrent': 3, 'roles': {'local': R, 'challenge': ROLES['challenge']}}}
+        self.assertEqual(native.validate(given), WITH_ROLES)
+        self.assertEqual(list(native.validate(given)['subagents']['roles']), ['challenge', 'local'])
+        self.assertEqual(native.validate({**PLAIN, 'subagents': {'max_concurrent': 3, 'roles': {}}}), PLAIN)
+        with self.assertRaisesRegex(ValueError, r'^native_capabilities\.subagents\.roles'):
+            native.validate({**PLAIN, 'subagents': {'max_concurrent': 3, 'roles': {'default': R}}})
+
+    def test_roles_at_the_limits_are_accepted(self):
+        widest = {'description': 'd' * 300, 'instructions': 'i' * 8000}
+        roles = {'a' * 32: widest, 'b': R, 'c_-9': R, **{'r' + str(i): R for i in range(5)}}
+        self.assertEqual(len(roles), native.MAX_ROLES)
+        self.assertEqual(lab({'roles': roles})['subagents']['roles'], dict(sorted(roles.items())))
+
+    def test_bad_roles_are_refused(self):
+        bad = [{'Local': R}, {'default': R}, {'explorer': R}, {'worker': R}, {'a' * 33: R}, {'1x': R}, {'x.y': R},
+               {'x': {**R, 'description': ''}}, {'x': {**R, 'description': 'a\nb'}},
+               {'x': {**R, 'description': 'd' * 301}}, {'x': {**R, 'instructions': ' \n'}},
+               {'x': {**R, 'instructions': 'i' * 8001}}, {'x': {'description': 'd'}}, {'x': {**R, 'model': 'm'}},
+               {'r' + str(i): R for i in range(9)}, ['local'], {'x': 'text'},
+               {'x': {**R, 'description': 'a\rb'}}, {'x': {**R, 'description': ' '}}, {'x\n': R},
+               {'x': {**R, 'instructions': 7}}]
+        for roles in bad:
+            with self.subTest(roles=roles), self.assertRaisesRegex(
+                    ValueError, r'^native_capabilities\.lab\.subagents\.roles'):
+                lab({'roles': roles})
+
+    def test_role_file_survives_toml(self):                                  # Review Focus 2
+        import tomllib
+        for name, role in ROLES.items():
+            text = native.role_file_text(name, role)
+            self.assertEqual(tomllib.loads(text),
+                             {'name': name, 'description': role['description'],
+                              'developer_instructions': role['instructions']})
+            self.assertEqual(len(text.splitlines()), 3)
+            self.assertTrue(text.endswith('\n'))
+
+    def test_command_names_each_role_after_the_agent_limits(self):
+        config = native.command_parts(WITH_ROLES, workspace='/w', run_root='/r', codex_home='/h', model='m',
+                                      effort='low', roles_dir='/r/agents/s1/roles')['config']
+        self.assertEqual(config, [
+            'agents.max_depth=1', 'agents.max_concurrent_threads_per_session=3',
+            'agents.default_subagent_model="m"', 'agents.default_subagent_reasoning_effort="low"',
+            'agents.challenge.description="Argues against the \\"leading\\" series."',
+            'agents.challenge.config_file="/r/agents/s1/roles/challenge.toml"',
+            'agents.local.description="Advances the leading series."',
+            'agents.local.config_file="/r/agents/s1/roles/local.toml"'])
+
+    def test_command_without_roles_is_unchanged(self):
+        self.assertEqual(native.command_parts(PLAIN, workspace='/w', run_root='/r', codex_home='/h',
+                                              model='m', effort='low')['config'],
+                         ['agents.max_depth=1', 'agents.max_concurrent_threads_per_session=3',
+                          'agents.default_subagent_model="m"', 'agents.default_subagent_reasoning_effort="low"'])
+
+    def test_roles_need_a_roles_folder(self):
+        with self.assertRaisesRegex(ValueError, 'roles_dir'):
+            native.command_parts(WITH_ROLES, workspace='/w', run_root='/r', codex_home='/h', model='m', effort='low')
+
+    def test_prompt_paragraph_names_the_roles(self):
+        self.assertIn('Sub-agent roles declared for this session, started with agent_type: '
+                      'challenge (Argues against the "leading" series.); local (Advances the leading series.). '
+                      'Start any other helper with agent_type default. ', native.instruction(WITH_ROLES))
+        self.assertNotIn('Sub-agent roles declared', native.instruction(PLAIN))
+        # With the terminal on too, the roles sentence stays the paragraph's last.
+        text = native.instruction({**WITH_ROLES, 'terminal': {'readable_roots': []}})
+        self.assertIn('The terminal has no network access', text)
+        self.assertTrue(text.endswith('Start any other helper with agent_type default. '))
+
+    def test_receipt_form_names_roles_by_digest_and_leaves_plain_settings_alone(self):
+        self.assertEqual(native.receipt_form(WITH_ROLES)['subagents']['roles']['local'],
+                         {'description': 'Advances the leading series.',
+                          'instructions_sha256': hashlib.sha256(b'Refine.').hexdigest()})
+        self.assertEqual(native.receipt_form(PLAIN), PLAIN)
+        self.assertEqual(WITH_ROLES['subagents']['roles'], ROLES)   # The settings given are not changed.
 
 
 if __name__ == '__main__':

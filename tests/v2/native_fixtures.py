@@ -13,6 +13,15 @@ SUBAGENTS = {'web_search': False, 'terminal': None, 'subagents': {'max_concurren
 TERMINAL_AND_SEARCH = {'web_search': True, 'terminal': {'readable_roots': []}, 'subagents': None}
 TERMINAL_AND_SUBAGENTS = {'web_search': False, 'terminal': {'readable_roots': []}, 'subagents': {'max_concurrent': 3}}
 
+# Named sub-agent roles in normal form, in name order. The challenge role's text carries what TOML and the
+# command line must pass through unchanged: quotes, a backslash, '=', '#' and a line break.
+R = {'description': 'Advances the leading series.', 'instructions': 'Refine.'}
+ROLES = {'challenge': {'description': 'Argues against the "leading" series.',
+                       'instructions': 'Line one.\nSay "no" to C:\\x = y # z.'},
+         'local': R}
+PLAIN = {'web_search': False, 'terminal': None, 'subagents': {'max_concurrent': 3}}
+WITH_ROLES = {'web_search': False, 'terminal': None, 'subagents': {'max_concurrent': 3, 'roles': ROLES}}
+
 
 def PROFILE(run_root, codex_home, workspace):
     """The ``permission_profile`` a terminal turn's ``turn_context`` carries: the run root and the Codex home
