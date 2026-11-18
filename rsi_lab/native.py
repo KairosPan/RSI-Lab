@@ -79,7 +79,9 @@ def command_parts(settings, *, workspace, run_root, codex_home, model, effort):
         sandbox, flags = [], ['--ignore-rules']
         temporary = os.path.join(workspace, '.tmp')
         entries = [(':minimal', 'read'), (run_root, 'deny'), (codex_home, 'deny')]
-        entries += [(folder, 'deny') for folder in SHARED_TEMP_FOLDERS if os.path.isdir(folder)]
+        # A folder already denied as the run root or the Codex home is named once.
+        entries += [(folder, 'deny') for folder in SHARED_TEMP_FOLDERS
+                    if os.path.isdir(folder) and folder not in (run_root, codex_home)]
         entries += [(workspace, 'write')]
         entries += [(os.path.join(workspace, name), 'read')
                     for name in ('.codex', '.agents', 'AGENTS.md', 'AGENTS.override.md')]
@@ -133,8 +135,13 @@ def check_roots(by_role, *, run_root, codex_home):
     There the root's read entry would be more specific than the denial of
     those directories and would override it. A root that merely contains them
     is allowed: the denial covers what lies beneath.
+
+    A root that is itself one of the existing shared temporary folders is
+    refused too: it would contradict that folder's denial. A root inside one
+    is allowed, as its more specific entry.
     """
     denied = (('the run root', Path(run_root).resolve()), ('the Codex home', Path(codex_home).resolve()))
+    shared = [Path(folder) for folder in SHARED_TEMP_FOLDERS if os.path.isdir(folder)]
     for role, settings in by_role.items():
         for root in (settings['terminal'] or {}).get('readable_roots', ()):
             resolved = Path(root).resolve()
@@ -142,6 +149,10 @@ def check_roots(by_role, *, run_root, codex_home):
                 if _inside(resolved, folder):
                     raise ValueError('native_capabilities.' + role + '.terminal.readable_roots entries may not be '
                                      'or lie inside ' + name + ': ' + root)
+            if any(resolved == folder.resolve() or (resolved.exists() and os.path.samefile(resolved, folder))
+                   for folder in shared):
+                raise ValueError('native_capabilities.' + role + '.terminal.readable_roots entries may not be '
+                                 'a shared temporary folder, which the terminal is denied: ' + root)
 
 
 def _inside(path, folder):

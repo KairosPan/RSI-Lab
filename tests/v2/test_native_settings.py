@@ -117,6 +117,22 @@ class NativeSettingsTests(unittest.TestCase):
                 self.check_lab_roots(root)
         self.check_lab_roots(self.root)          # Containing the Codex home stays allowed.
 
+    def test_a_readable_root_may_not_be_a_shared_temp_folder(self):
+        shared = self.root / 'shared-tmp'
+        (shared / 'data').mkdir(parents=True)
+        link = self.root / 'link-to-shared-tmp'
+        link.symlink_to(shared, target_is_directory=True)
+        with mock.patch.object(native, 'SHARED_TEMP_FOLDERS', (str(self.missing), str(shared))):
+            for root in (shared, link):
+                with self.subTest(root=root), self.assertRaisesRegex(
+                        ValueError, '^native_capabilities.*shared temporary folder.*' + str(root)):
+                    self.check_lab_roots(root)
+            self.check_lab_roots(shared / 'data')     # Inside it stays allowed: the more specific entry wins.
+        if os.path.isdir('/tmp'):                     # On macOS a configured /tmp is stored as /private/tmp.
+            for root in ('/tmp', str(Path('/tmp').resolve())):
+                with self.subTest(root=root), self.assertRaisesRegex(ValueError, '^native_capabilities'):
+                    self.check_lab_roots(root)
+
     def test_invalid_blocks_are_refused(self):
         for block in ([], {'planner': {}}, {'lab': []}, {'lab': {'shell': True}}, {'lab': {'web_search': 1}},
                       {'lab': {'terminal': {'network': True}}}, {'lab': {'terminal': {'readable_roots': ['relative']}}},

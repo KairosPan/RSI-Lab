@@ -118,6 +118,20 @@ class NativeTransportTests(unittest.TestCase):
         self.assertEqual((table[str(first)], table[str(second)]), ('deny', 'deny'))
         self.assertNotIn(str(missing), table)
 
+    def test_a_run_root_or_codex_home_that_is_a_shared_temp_folder_is_denied_once(self):
+        shared = self.root / 'shared-tmp'
+        shared.mkdir()
+        key = native.toml_string(str(shared)) + '='
+        for run_root, codex_home in ((str(shared), '/h'), ('/r', str(shared))):
+            with self.subTest(run_root=run_root, codex_home=codex_home), \
+                    patch.object(native, 'SHARED_TEMP_FOLDERS', (str(shared),)):
+                parts = native.command_parts(TERMINAL, workspace=str(shared / 'agents' / 's' / 'workspace'),
+                                             run_root=run_root, codex_home=codex_home, model='m', effort='low')
+                value = next(v for v in parts['config'] if v.startswith('permissions.rsi_agent.filesystem='))
+                table = tomllib.loads('t = ' + value.split('=', 1)[1])['t']
+                self.assertEqual(table[str(shared)], 'deny')
+                self.assertEqual(value.count(key), 1)
+
     def test_the_shared_temp_folders_are_the_four_system_ones(self):
         self.assertEqual(native.SHARED_TEMP_FOLDERS, ('/tmp', '/private/tmp', '/var/tmp', '/private/var/tmp'))
 
