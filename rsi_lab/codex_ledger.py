@@ -202,14 +202,17 @@ def _from_stream(stream_usage, why, turn=None):
 def settle(*, codex_home, path, thread_id, prefix_bytes, resumed, stream_usage):
     """The tokens one call is charged and where the number comes from.
 
-    Without a rollout (``path`` is ``None``) the stream's input plus output tokens are charged. When the call
-    added usage rows, ``ledger``: their input plus output tokens and those of every sub-agent it started, read
-    through ``read_child``. Without rows, a fresh thread's stream number is the turn's own and is charged, but a
-    resumed thread's is the thread's running total, so its usage is ``unknown``. A rollout or a sub-agent rollout
-    that cannot be read makes the usage ``unknown`` too, never zero, with the reason; ``turn`` is then ``None``
-    when the call's own rollout is the one that cannot be read.
+    When the call added usage rows, ``ledger``: their input plus output tokens and those of every sub-agent it
+    started, read through ``read_child``. The stream's input plus output tokens are the turn's own only on a fresh
+    thread; on a resumed one they are the thread's running total and are never charged. So without a rollout
+    (``path`` is ``None``) or without rows, a fresh thread is charged the stream's number and a resumed one's
+    usage is ``unknown``. A rollout or a sub-agent rollout that cannot be read makes the usage ``unknown`` on any
+    thread, never zero and never the stream's, with the reason; ``turn`` is then ``None`` when the call's own
+    rollout is the one that cannot be read.
     """
     if path is None:
+        if resumed:
+            return _settled('unknown', None, "the resumed thread's rollout could not be read")
         return _from_stream(stream_usage, 'the call has no rollout to read')
     try:
         turn = read_turn(path, thread_id=thread_id, prefix_bytes=prefix_bytes)

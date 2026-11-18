@@ -3,6 +3,7 @@
 Synthetic rollouts built from tests/v2/native_fixtures.py in a temporary Codex
 home; no Codex or model process is run.
 """
+import itertools
 from pathlib import Path
 import shutil
 import tempfile
@@ -89,6 +90,10 @@ class CodexLedgerTests(unittest.TestCase):
                                           stream_usage={'input_tokens': 10, 'output_tokens': 1})
                 self.assertEqual((got['source'], got['tokens']), ('unknown', None)); self.assertIn(CHILD, got['reason'])
 
+    def test_a_resumed_thread_without_its_rollout_is_never_charged_the_stream(self):
+        got = self.settle(path=None, resumed=True, stream_usage={'input_tokens': 20, 'output_tokens': 5})
+        self.assertEqual((got['source'], got['tokens']), ('unknown', None)); self.assertIn('resumed', got['reason'])
+
     def test_fallbacks(self):
         base = fixture(self.cwd)
         stream = {'input_tokens': 20, 'output_tokens': 5}
@@ -168,12 +173,12 @@ class CodexLedgerTests(unittest.TestCase):
                  'a row of another session': (base + usage_row(THREAD, 't1', 't1', 1, 1, session=OTHER), 0),
                  'a cut final record': (base + row[:-1], 0), 'a prefix inside a record': (base + row, len(base) - 1),
                  'a prefix past the end': (base, len(base) + 1)}
-        for case, (raw, prefix) in cases.items():
-            with self.subTest(case=case):
+        for (case, (raw, prefix)), resumed in itertools.product(cases.items(), (False, True)):
+            with self.subTest(case=case, resumed=resumed):
                 with self.assertRaises(codex_ledger.LedgerUnavailable):
                     codex_ledger.read_turn(self.write(raw), thread_id=THREAD, prefix_bytes=prefix)
                 got = codex_ledger.settle(codex_home=self.home, path=self.write(raw), thread_id=THREAD,
-                                          prefix_bytes=prefix, resumed=False, stream_usage=stream)
+                                          prefix_bytes=prefix, resumed=resumed, stream_usage=stream)
                 self.assertEqual((got['source'], got['tokens'], got['turn']), ('unknown', None, None))
 
 
