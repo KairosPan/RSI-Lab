@@ -4,6 +4,7 @@ The fake provider is a local Python process that writes the Codex event
 protocol; no model, network request or credential is used.
 """
 import base64
+import itertools
 import json
 import os
 from pathlib import Path
@@ -530,9 +531,10 @@ class NativeTransportTests(unittest.TestCase):
                 ps.assert_called_once()
                 self.assertEqual(codex.wait(timeout=5), -signal.SIGKILL)
 
-    def terminate_with_tables(self, *reads, alive=()):
-        """``_terminate`` on Codex pid 100 with the process table read as ``reads`` (an exception is raised),
-        the last read repeated; signals are recorded, not sent, and only the pids in ``alive`` answer one."""
+    def with_tables(self, run, *reads, alive=()):
+        """``run()`` with the process table read as ``reads`` (an exception is raised), the last read repeated;
+        signals are recorded, not sent, only the pids in ``alive`` answer one, and the clock moves a second per
+        reading without waiting. Returns ``run()``'s result and the signals."""
         signals, reads = [], list(reads)
 
         def read():
@@ -550,8 +552,14 @@ class NativeTransportTests(unittest.TestCase):
         with patch.object(transport, '_process_table', side_effect=read), \
                 patch.object(transport.os, 'kill', side_effect=kill), \
                 patch.object(transport.os, 'killpg', side_effect=lambda group, sig: signals.append(('killpg', group))), \
-                patch.object(transport.os, 'getpgid', side_effect=lambda pid: 200 if pid == 400 else pid):
-            return transport._terminate(SimpleNamespace(pid=100)), signals
+                patch.object(transport.os, 'getpgid', side_effect=lambda pid: 200 if pid == 400 else pid), \
+                patch.object(transport.time, 'monotonic', side_effect=itertools.count()), \
+                patch.object(transport.time, 'sleep'):
+            return run(), signals
+
+    def terminate(self, tracked=None):
+        """``_terminate`` on Codex pid 100, given what earlier samples ``tracked``."""
+        return lambda: transport._terminate(SimpleNamespace(pid=100), tracked)
 
     # Codex 100 started 200 and 300, each leading its own group, and 200 started 400 in 200's group.
     LISTED = {1: (0, 'boot'), 100: (1, 'T0'), 200: (100, 'T1'), 300: (100, 'T2'), 400: (200, 'T3')}
@@ -559,14 +567,34 @@ class NativeTransportTests(unittest.TestCase):
     def test_a_reused_pid_is_not_signalled_and_counts_as_stopped(self):
         # By the second read 300 has exited and its pid names a bystander that started later and still runs.
         again = {1: (0, 'boot'), 200: (1, 'T1'), 300: (1, 'T9'), 400: (1, 'T3')}
-        stopped, signals = self.terminate_with_tables(self.LISTED, again, {1: (0, 'boot'), 300: (1, 'T9')},
-                                                      alive={300})
+        stopped, signals = self.with_tables(self.terminate(), self.LISTED, again, {1: (0, 'boot'), 300: (1, 'T9')},
+                                            alive={300})
         self.assertEqual(signals, [('killpg', 100), ('killpg', 200), ('kill', 400)])
         self.assertTrue(stopped)
 
     def test_a_failed_second_read_signals_no_descendant(self):
-        stopped, signals = self.terminate_with_tables(self.LISTED, OSError('ps unavailable'))
+        stopped, signals = self.with_tables(self.terminate(), self.LISTED, OSError('ps unavailable'))
         self.assertEqual(signals, [('killpg', 100)])
+        self.assertFalse(stopped)
+
+    # 500, seen under the call at a sample, was orphaned before the kill and leads its own group.
+    ORPHANED = {1: (0, 'boot'), 100: (1, 'T0'), 500: (1, 'T5')}
+
+    def test_a_tracked_process_that_survives_the_kill_is_reported(self):
+        stopped, signals = self.with_tables(self.terminate({500: 'T5'}), self.ORPHANED, alive={500})
+        self.assertEqual(signals, [('killpg', 100), ('killpg', 500)])
+        self.assertFalse(stopped)
+
+    def test_a_tracked_process_missing_from_the_confirming_read_is_not_signalled(self):
+        # 500 exits between the kill-time listing and the confirming read.
+        stopped, signals = self.with_tables(self.terminate({500: 'T5'}), self.ORPHANED, {1: (0, 'boot')})
+        self.assertEqual(signals, [('killpg', 100)])
+        self.assertTrue(stopped)
+
+    def test_the_end_of_call_sweep_reports_an_unreadable_table_and_signals_nothing(self):
+        stopped, signals = self.with_tables(lambda: transport._sweep({500: 'T5'}), OSError('ps unavailable'),
+                                            alive={500})
+        self.assertEqual(signals, [])
         self.assertFalse(stopped)
 
 
