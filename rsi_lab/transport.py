@@ -23,6 +23,7 @@ import uuid
 from .journal import JournalWriter, read_journal, raw_stream
 from .images import (MAX_IMAGES, attachment_manifest, decoded_image_bytes, image_manifest_sha256,
                      validate_image_attachment)
+from . import native as native_tools
 import base64
 
 DISABLED_FEATURES = (
@@ -199,20 +200,30 @@ def _session_options(session):
             'explicit_codex_home': session.get('codex_home') is not None}
 
 
-def _command(folder, model, effort, cwd, session, image_paths=()):
+def _command(folder, model, effort, cwd, session, image_paths=(), native=None, run_root=None):
+    # Everything off is today's command; native settings that are on need the
+    # session's Codex home and the run root for the permission profile.
+    settings = native_tools.validate(native)
+    parts = {'sandbox': ['--sandbox', 'read-only'], 'config': [], 'enabled': set()}
+    if native_tools.any_on(settings):
+        parts = native_tools.command_parts(settings, workspace=cwd, run_root=run_root,
+                                           codex_home=session['codex_home'], model=model, effort=effort)
     command = ['codex', '--no-daemon', '--ask-for-approval', 'never', 'exec',
-               '--sandbox', 'read-only', '-C', cwd]
+               *parts['sandbox'], '-C', cwd]
     if session and session['provider_thread_id']:
         command.append('resume')
     command.extend(['--ignore-user-config', '--model', model,
                     '--skip-git-repo-check', '--json', '--output-schema', str(folder / 'schema.json'),
                     '-c', f'model_reasoning_effort={json.dumps(effort)}',
-                    '-c', 'web_search="disabled"',
+                    '-c', ('web_search="live"' if settings['web_search'] else 'web_search="disabled"'),
                     '-c', 'suppress_unstable_features_warning=true'])
+    for value in parts['config']:
+        command.extend(['-c', value])
     if session is None:
         command.append('--ephemeral')
     for feature in DISABLED_FEATURES:
-        command.extend(['--disable', feature])
+        if feature not in parts['enabled']:
+            command.extend(['--disable', feature])
     command.extend(['--enable', 'skip_host_skill_discovery'])
     for path in image_paths:
         command.extend(['-i', str(path)])
@@ -331,12 +342,15 @@ def _stream_process(process, prompt, journal, folder, timeout):
 
 
 def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, timeout=300,
-           *, session=None, journal_metadata=None, images=None) -> dict:
+           *, session=None, journal_metadata=None, images=None, native=None, run_root=None) -> dict:
     """Run one admitted request and durably capture text and optional PNG inputs.
 
     A session binding opts into persistent create/resume. Calls without a binding
     remain explicitly ephemeral for compatibility with one-shot validators.
     Execution completion, parsing, and application validation are separate.
+    Native settings that switch anything on need a session and the run root;
+    they are recorded as ``native`` in the invocation and the result, which
+    carry no such key when everything is off.
     """
     if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError('Prompt must be nonempty text')
@@ -356,6 +370,13 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
     images = [validate_image_attachment(record, with_data=True) for record in images]
     image_manifest = attachment_manifest(images)
     image_digest = image_manifest_sha256(images) if images else None
+    settings = native_tools.validate(native)
+    native_on = native_tools.any_on(settings)
+    if native_on:
+        if session is None or run_root is None:
+            raise ValueError('Native capabilities require a persistent session and a run root')
+        # Denied by its resolved path, as the session's workspace and Codex home are named.
+        run_root = str(Path(run_root).resolve())
     binding = _session_options(session)
     folder = Path(folder)
     if folder.is_symlink():
@@ -369,7 +390,7 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
         json.dump({'backend': 'codex', 'model': model, 'effort': effort}, stream)
         stream.flush()
         os.fsync(stream.fileno())
-    sent_prompt = PREAMBLE + prompt
+    sent_prompt = (native_tools.PREAMBLE if native_on else PREAMBLE) + prompt
     with (folder / 'prompt.txt').open('xb') as stream:
         stream.write(sent_prompt.encode()); stream.flush(); os.fsync(stream.fileno())
     _write_json(folder / 'schema.json', schema)
@@ -387,6 +408,8 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
     invocation = {'backend': 'codex', 'model': model, 'effort': effort,
                   'timeout_seconds': timeout, 'started_at_unix': time.time(), 'dispatched': False,
                   'session': binding}
+    if native_on:
+        invocation['native'] = settings
     if images:
         invocation.update(requested_image_manifest=image_manifest,
                           requested_image_manifest_sha256=image_digest)
@@ -396,8 +419,11 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
         else:
             temporary = tempfile.TemporaryDirectory(prefix='rsi-codex-')
             cwd = temporary.name
+        if native_on:
+            # TMPDIR of the terminal's commands; the workspace is their only writable place.
+            Path(cwd, '.tmp').mkdir(exist_ok=True)
         image_paths = _archive_images(folder, images, image_manifest) if images else []
-        command = _command(folder, model, effort, cwd, binding, image_paths)
+        command = _command(folder, model, effort, cwd, binding, image_paths, native=settings, run_root=run_root)
         invocation.update(command=command, cwd=cwd)
         _write_json(folder / 'invocation.json', invocation)
         journal = JournalWriter(folder / 'journal.jsonl', {
@@ -544,6 +570,8 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
                   'native_session_error': native_session_error}
         if images and invocation['dispatched']:
             result.update(sent_image_manifest=image_manifest, sent_image_manifest_sha256=image_digest)
+        if native_on:
+            result['native'] = settings
         invocation.update(finished_at_unix=time.time(), returncode=returncode)
         _write_json(folder / 'invocation.json', invocation)
         with (folder / 'raw_response.txt').open('xb') as stream:

@@ -11,6 +11,7 @@ A run without the block, and a role absent from it, has everything off.
 """
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -20,6 +21,10 @@ PROFILE = 'rsi_agent'
 OFF = {'web_search': False, 'terminal': None, 'subagents': None}
 DEFAULT_MAX_CONCURRENT = 3
 MAX_CONCURRENT = 8
+PREAMBLE = (
+    "Return one JSON object matching the supplied response schema as your final message. "
+    "You may use the tools available in this session before answering.\n\n"
+)
 
 
 def capabilities(config):
@@ -47,6 +52,53 @@ def validate(settings):
 def any_on(settings):
     """Whether a normal-form settings object (or ``None``) switches anything on."""
     return validate(settings) != OFF
+
+
+def command_parts(settings, *, workspace, run_root, codex_home, model, effort):
+    """What one role's settings change in the Codex command.
+
+    ``sandbox`` replaces ``--sandbox read-only``: with the terminal on, the
+    permission profile confines commands instead. ``config`` holds the values
+    each passed after its own ``-c``. ``enabled`` names the features that are
+    no longer disabled. The web search value is set by the caller.
+    """
+    settings = validate(settings)
+    sandbox, config, enabled = ['--sandbox', 'read-only'], [], set()
+    if settings['terminal'] is not None:
+        sandbox = []
+        entries = [(':minimal', 'read'), (run_root, 'deny'), (codex_home, 'deny'), (workspace, 'write')]
+        entries += [(root, 'read') for root in settings['terminal']['readable_roots']]
+        config += ['default_permissions=' + toml_string(PROFILE),
+                   'permissions.' + PROFILE + '.filesystem=' + toml_table(entries),
+                   'shell_environment_policy.set=' + toml_table([('TMPDIR', os.path.join(workspace, '.tmp'))])]
+        enabled |= {'shell_tool', 'unified_exec'}
+    if settings['subagents'] is not None:
+        config += ['agents.max_depth=1',
+                   'agents.max_concurrent_threads_per_session=' + str(settings['subagents']['max_concurrent']),
+                   'agents.default_subagent_model=' + toml_string(model),
+                   'agents.default_subagent_reasoning_effort=' + toml_string(effort)]
+        enabled |= {'multi_agent'}
+    return {'sandbox': sandbox, 'config': config, 'enabled': enabled}
+
+
+def toml_string(text):
+    """A TOML basic string holding ``text``.
+
+    A JSON string is one, except that TOML also requires DEL to be escaped.
+    Anything but text is refused: ``None`` would otherwise become the bare key ``null``.
+    """
+    if not isinstance(text, str):
+        raise ValueError('A TOML string must be made from text')
+    return json.dumps(text, ensure_ascii=False).replace('\x7f', '\\u007f')
+
+
+def toml_table(pairs):
+    """A TOML inline table of string keys and string values, in the given order."""
+    keys = [key for key, _ in pairs]
+    repeated = sorted({key for key in keys if keys.count(key) > 1})
+    if repeated:
+        raise ValueError('A TOML table cannot hold a repeated key: ' + ', '.join(repeated))
+    return '{' + ','.join(toml_string(key) + '=' + toml_string(value) for key, value in pairs) + '}'
 
 
 def default_codex_home():
