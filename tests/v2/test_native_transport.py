@@ -88,18 +88,38 @@ class NativeTransportTests(unittest.TestCase):
             self.assertEqual(command[command.index(feature) - 1], '--disable')
 
     def test_terminal_replaces_the_sandbox_with_the_profile(self):
-        command = self.command({'web_search': False, 'terminal': {'readable_roots': ['/data']}, 'subagents': None})
+        with patch.object(native, 'SHARED_TEMP_FOLDERS', ()):
+            command = self.command({'web_search': False, 'terminal': {'readable_roots': ['/data']}, 'subagents': None})
         self.assertNotIn('--sandbox', command)
         self.assertNotIn('shell_tool', command); self.assertNotIn('unified_exec', command)
         self.assertIn('default_permissions="rsi_agent"', command)
         table = tomllib.loads('t = ' + self.config_value(command, 'permissions.rsi_agent.filesystem='))['t']
         self.assertEqual(table, {':minimal': 'read', '/r': 'deny', '/home/.codex': 'deny', '/r/agents/s/workspace': 'write',
-                                 '/r/agents/s/workspace/.codex': 'read', '/r/agents/s/workspace/AGENTS.md': 'read',
+                                 '/r/agents/s/workspace/.codex': 'read', '/r/agents/s/workspace/.agents': 'read',
+                                 '/r/agents/s/workspace/AGENTS.md': 'read',
                                  '/r/agents/s/workspace/AGENTS.override.md': 'read', '/data': 'read'})
+        self.assertEqual(list(table), [':minimal', '/r', '/home/.codex', '/r/agents/s/workspace',
+                                       '/r/agents/s/workspace/.codex', '/r/agents/s/workspace/.agents',
+                                       '/r/agents/s/workspace/AGENTS.md', '/r/agents/s/workspace/AGENTS.override.md',
+                                       '/data'])
         env = tomllib.loads('t = ' + self.config_value(command, 'shell_environment_policy.set='))['t']
-        self.assertEqual(env, {'TMPDIR': '/r/agents/s/workspace/.tmp'})
+        self.assertEqual(env, {'TMPDIR': '/r/agents/s/workspace/.tmp', 'TMPPREFIX': '/r/agents/s/workspace/.tmp/zsh'})
         for feature in ('view_image', 'apps', 'plugins', 'browser_use', 'computer_use', 'multi_agent', 'multi_agent_v2'):
             self.assertEqual(command[command.index(feature) - 1], '--disable')
+
+    def test_terminal_denies_the_shared_temp_folders_that_exist(self):
+        first, second, missing = self.root / 'tmp', self.root / 'private-tmp', self.root / 'no-such-tmp'
+        first.mkdir(); second.mkdir()
+        with patch.object(native, 'SHARED_TEMP_FOLDERS', (str(first), str(missing), str(second))):
+            command = self.command(TERMINAL)
+        table = tomllib.loads('t = ' + self.config_value(command, 'permissions.rsi_agent.filesystem='))['t']
+        self.assertEqual(list(table)[:6], [':minimal', '/r', '/home/.codex', str(first), str(second),
+                                           '/r/agents/s/workspace'])
+        self.assertEqual((table[str(first)], table[str(second)]), ('deny', 'deny'))
+        self.assertNotIn(str(missing), table)
+
+    def test_the_shared_temp_folders_are_the_four_system_ones(self):
+        self.assertEqual(native.SHARED_TEMP_FOLDERS, ('/tmp', '/private/tmp', '/var/tmp', '/private/var/tmp'))
 
     def test_terminal_closes_the_network_the_environment_and_workspace_instructions(self):
         for thread in (None, THREAD):
@@ -120,6 +140,9 @@ class NativeTransportTests(unittest.TestCase):
                 for extra in extras:
                     self.assertNotIn(extra, command)
                 self.assertFalse(any(part.startswith('permissions.rsi_agent.network') for part in command))
+                self.assertFalse(any('TMPPREFIX' in part or 'permissions.rsi_agent.filesystem' in part
+                                     or any(folder in part for folder in native.SHARED_TEMP_FOLDERS)
+                                     for part in command))
                 self.assertEqual(command[command.index('--ignore-user-config') + 1], '--model')
         for settings, flags in ((TERMINAL, ['--ignore-rules']), (SEARCH, []), (SUBAGENTS, []), (native.OFF, [])):
             self.assertEqual(native.command_parts(settings, workspace='/w', run_root='/r', codex_home='/h',

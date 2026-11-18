@@ -21,6 +21,9 @@ PROFILE = 'rsi_agent'
 OFF = {'web_search': False, 'terminal': None, 'subagents': None}
 DEFAULT_MAX_CONCURRENT = 3
 MAX_CONCURRENT = 8
+# Shared temporary folders the terminal's commands may neither read nor write;
+# each is denied when it exists as a directory on this machine.
+SHARED_TEMP_FOLDERS = ('/tmp', '/private/tmp', '/var/tmp', '/private/var/tmp')
 PREAMBLE = (
     "Return one JSON object matching the supplied response schema as your final message. "
     "You may use the tools available in this session before answering.\n\n"
@@ -64,22 +67,30 @@ def command_parts(settings, *, workspace, run_root, codex_home, model, effort):
     The web search value is set by the caller.
 
     With the terminal on, the network is closed, commands get only the core
-    environment, and nothing written in the workspace becomes instructions,
-    config or rules on a later turn: project docs and rules are ignored, and
-    the workspace's ``.codex`` and ``AGENTS`` files stay read-only.
+    environment, the shared temporary folders are denied (temporary files go
+    to the workspace's ``.tmp``), and nothing written in the workspace becomes
+    instructions, config, skills or rules on a later turn: project docs and
+    rules are ignored, and the workspace's ``.codex``, ``.agents`` and
+    ``AGENTS`` files stay read-only.
     """
     settings = validate(settings)
     sandbox, flags, config, enabled = ['--sandbox', 'read-only'], [], [], set()
     if settings['terminal'] is not None:
         sandbox, flags = [], ['--ignore-rules']
-        entries = [(':minimal', 'read'), (run_root, 'deny'), (codex_home, 'deny'), (workspace, 'write')]
-        entries += [(os.path.join(workspace, name), 'read') for name in ('.codex', 'AGENTS.md', 'AGENTS.override.md')]
+        temporary = os.path.join(workspace, '.tmp')
+        entries = [(':minimal', 'read'), (run_root, 'deny'), (codex_home, 'deny')]
+        entries += [(folder, 'deny') for folder in SHARED_TEMP_FOLDERS if os.path.isdir(folder)]
+        entries += [(workspace, 'write')]
+        entries += [(os.path.join(workspace, name), 'read')
+                    for name in ('.codex', '.agents', 'AGENTS.md', 'AGENTS.override.md')]
         entries += [(root, 'read') for root in settings['terminal']['readable_roots']]
+        # zsh writes here-documents under TMPPREFIX, which defaults to /tmp/zsh.
+        environment = [('TMPDIR', temporary), ('TMPPREFIX', os.path.join(temporary, 'zsh'))]
         config += ['default_permissions=' + toml_string(PROFILE),
                    'permissions.' + PROFILE + '.filesystem=' + toml_table(entries),
                    'permissions.' + PROFILE + '.network={enabled=false}',
                    'shell_environment_policy.inherit="core"',
-                   'shell_environment_policy.set=' + toml_table([('TMPDIR', os.path.join(workspace, '.tmp'))]),
+                   'shell_environment_policy.set=' + toml_table(environment),
                    'project_doc_max_bytes=0']
         enabled |= {'shell_tool', 'unified_exec'}
     if settings['subagents'] is not None:
