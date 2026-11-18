@@ -793,6 +793,10 @@ class CodexExecutor:
         except ValueError as exc:
             raise ValueError('Unsupported exact model request envelope') from exc
         native_on = native_tools.any_on(settings)
+        # Declared sub-agent roles reach Codex as files in the session's folder, so they need a session.
+        declared_roles = (settings['subagents'] or {}).get('roles', {})
+        if declared_roles and session is None:
+            raise ValueError('Sub-agent roles need a persistent session')
         preamble = native_tools.PREAMBLE if native_on else transport.PREAMBLE
         expected_keys = {'schema_version', 'mode', 'model', 'effort', 'prompt', 'response_schema', 'input_view_mode'}
         if (('native_capabilities' in metadata) != native_on
@@ -846,6 +850,8 @@ class CodexExecutor:
                         or not metadata.get('agent_turn_id') or type(metadata.get('session_fence')) is not int):
                     raise ValueError('Persistent model request lacks a fenced session/turn')
                 workspace = self.calls_root.parent / 'agents' / sid / 'workspace'
+                # Beside the workspace, inside the run root the terminal's commands are denied; Codex reads it.
+                roles_dir = self.calls_root.parent / 'agents' / sid / 'roles'
                 if settings['terminal'] is not None:
                     # The terminal cannot write these names: anything there would reach Codex as instructions
                     # or configuration nobody admitted.
@@ -880,6 +886,9 @@ class CodexExecutor:
                          'journal_metadata': {'run_id': effect['run_id'], 'effect_id': effect_id,
                              'agent_id': session['agent_instance_id'], 'session_id': sid,
                              'turn_id': metadata['agent_turn_id'], 'fence': metadata['session_fence']}}
+                if declared_roles:
+                    # The transport writes the role files there afresh before Codex starts.
+                    extra['roles_dir'] = roles_dir
             except (ValueError, OSError, KeyError, TypeError) as exc:
                 # A rejected local preflight never reaches the provider. Settle
                 # its reservations as known zero without certifying a native

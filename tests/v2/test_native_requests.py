@@ -15,11 +15,15 @@ from rsi_lab.packets import PacketBuilder
 from rsi_lab.session_context import read_native_snapshot
 from rsi_lab.store import digest
 from tests.v2.liveness_support import RES as RESERVATION, Scripted, none, open_run
-from tests.v2.native_fixtures import SEARCH, SUBAGENTS, tool_call
+from tests.v2.native_fixtures import PLAIN, ROLES, SEARCH, SUBAGENTS, WITH_ROLES, tool_call
 from tests.v2.test_literature_runtime import adapter as literature_adapter
 from tests.v2.test_session_context import THREAD, fixture
 
 NONE_YET = {'issue_version': 0, 'evidence_revision': 0, 'scheduling_revision': 0}
+# The SHA-256 of the request packet, and of the Effect metadata as rsi_lab.store encodes it, that this branch's base
+# (b47482e) prepares for the first Lab turn of a run configured with {'lab': {'subagents': {'max_concurrent': 3}}}.
+BASE_PLAIN_PACKET_SHA256 = '2398dba89f171e3b6fc94e0b3d60a0edd14441d46327240f1539b9236fc0e606'
+BASE_PLAIN_METADATA_SHA256 = 'e939a9ee34b4a3740adc5c024708b3f0f528d8239b82a442347d820a9319aec2'
 PARAGRAPH = (
     'Native tools are enabled for this session: web search, a terminal with file editing in your working '
     'directory, up to 2 sub-agents at a time. Use them to explore, compute, check and look things up. '
@@ -119,6 +123,35 @@ class NativeRequestTests(unittest.TestCase):
             sent = sent.replace(with_block[key].encode(), today[key].encode())
         self.assertEqual(self.packet(plain, a), sent)
         self.assertNotIn('native_capabilities', b['metadata'])
+
+    def test_request_of_a_run_without_roles_is_byte_identical(self):          # Review Focus 1
+        runtime = self.runtime({'native_capabilities': {'lab': {'subagents': {'max_concurrent': 3}}}})
+        effect = runtime.prepare_meta(self.lab_work(runtime), RESERVATION)
+        packet = self.packet(runtime, effect)
+        self.assertEqual(digest(packet), BASE_PLAIN_PACKET_SHA256)
+        self.assertEqual(digest(effect['metadata']), BASE_PLAIN_METADATA_SHA256)
+        request = json.loads(packet)
+        self.assertEqual(effect['metadata']['native_capabilities'], PLAIN)
+        self.assertEqual(task_of(request)['constraints']['native_capabilities'], PLAIN)
+        self.assertIn('Native tools are enabled for this session: up to 3 sub-agents at a time. ', request['prompt'])
+        self.assertNotIn('Sub-agent roles declared', request['prompt'])
+        # An empty roles object declares none: the same bytes but for the config's hash and the token made from it.
+        empty = self.runtime({'native_capabilities': {'lab': {'subagents': {'max_concurrent': 3, 'roles': {}}}}})
+        other = empty.prepare_meta(self.lab_work(empty), RESERVATION)
+        today, with_empty = (task_of(json.loads(raw))['decision_dependencies']
+                             for raw in (packet, self.packet(empty, other)))
+        sent = self.packet(empty, other)
+        for key in ('config_hash', 'token'):
+            sent = sent.replace(with_empty[key].encode(), today[key].encode())
+        self.assertEqual(sent, packet)
+        self.assertEqual(other['metadata']['native_capabilities'], PLAIN)
+        # With roles, the request's constraints and the Effect carry both roles' text, and the prompt names them.
+        team = self.runtime({'native_capabilities': {'lab': {'subagents': {'max_concurrent': 3, 'roles': ROLES}}}})
+        effect = team.prepare_meta(self.lab_work(team), RESERVATION)
+        request = json.loads(self.packet(team, effect))
+        self.assertEqual(task_of(request)['constraints']['native_capabilities'], WITH_ROLES)
+        self.assertEqual(effect['metadata']['native_capabilities'], WITH_ROLES)
+        self.assertIn(native.instruction(WITH_ROLES), request['prompt'])
 
     def test_the_reported_request_is_the_native_one_prepare_sends(self):
         runtime = self.runtime({'native_capabilities': {'lab': {'web_search': True}}})

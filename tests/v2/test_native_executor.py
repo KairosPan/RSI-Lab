@@ -7,8 +7,12 @@ tests/v2/native_fixtures.py. No Codex, model, network request or credential is
 used.
 """
 import json
+import os
 import shutil
+import subprocess
+import sys
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -17,8 +21,8 @@ from rsi_lab import native, roles, transport
 from rsi_lab.session_context import read_native_snapshot
 from rsi_lab.store import digest
 from tests.v2.liveness_support import Scripted, none, open_run
-from tests.v2.native_fixtures import (PROFILE, SEARCH, TERMINAL, TERMINAL_AND_SUBAGENTS, account, child_rollout,
-                                      sub_agent_started, tool_call, turn_context, usage_row)
+from tests.v2.native_fixtures import (PLAIN, PROFILE, ROLES, SEARCH, TERMINAL, TERMINAL_AND_SUBAGENTS, WITH_ROLES,
+                                      account, child_rollout, sub_agent_started, tool_call, turn_context, usage_row)
 from tests.v2.test_session_context import THREAD, fixture
 
 CHILD = '33333333-3333-3333-3333-333333333333'
@@ -438,6 +442,87 @@ class NativeExecutorTests(unittest.TestCase):
         receipt = self.execute(settings=SEARCH, workspace_files=[lambda w: (w / 'AGENTS.md').write_text('Notes')])
         self.assertEqual(receipt['status'], 'succeeded', receipt['error'])
         self.assertEqual(len(self.calls), 1)
+
+    def test_executor_writes_role_files_and_names_them(self):
+        # The real transport runs; a local process stands in for Codex, as in tests/v2/test_native_recovery.py.
+        store, controller, runtime = open_run(self, config={'native_capabilities': {'lab': config_form(WITH_ROLES)}})
+        codex_home = Path(tempfile.mkdtemp(prefix='rsi-native-home-'))
+        self.addCleanup(shutil.rmtree, codex_home, ignore_errors=True)
+        effect = runtime.prepare_meta(runtime.enqueue_lab('lab-1')['id'], RESERVATION)
+        self.assertEqual(effect['status'], 'prepared', effect)
+        self.assertEqual(effect['metadata']['native_capabilities'], WITH_ROLES)
+        roles_dir = (store.root / 'agents' / effect['metadata']['agent_session_id'] / 'roles').resolve()
+        events = [{'type': 'thread.started', 'thread_id': THREAD}, {'type': 'turn.started'},
+                  {'type': 'item.completed', 'item': {'type': 'agent_message', 'text': json.dumps(RESPONSE)}},
+                  {'type': 'turn.completed', 'usage': STREAM_USAGE}]
+        wire = ''.join(json.dumps(event) + '\n' for event in events).encode()
+        real_popen = subprocess.Popen
+        found = []
+
+        def spawn(command, **options):
+            found.append(sorted(path.name for path in roles_dir.iterdir()))     # What Codex finds as it starts.
+            workspace = Path(options['cwd'])
+            path = codex_home / 'sessions' / 'fixture' / ('rollout-fixture-' + THREAD + '.jsonl')
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(fixture(workspace) + usage_row(THREAD, 't1', 't1', 10, 1))
+            code = 'import sys; sys.stdin.read(); sys.stdout.buffer.write(%r); sys.stdout.buffer.flush()' % wire
+            return real_popen([sys.executable, '-u', '-c', code], **options)
+        receipts, raised = [], []
+
+        def executor(dispatching, raw):
+            try:
+                receipts.append(roles.CodexExecutor(store.root / 'calls')(dispatching, raw))
+            except ValueError as exc:
+                raised.append(exc)
+                raise
+            return receipts[-1]
+        with patch.dict(os.environ, {'CODEX_HOME': str(codex_home)}), \
+                patch.object(transport.subprocess, 'Popen', side_effect=spawn):
+            controller.dispatch_effect('r', effect['id'], executor)
+        self.assertEqual(raised, [])
+        self.assertEqual(receipts[0]['status'], 'succeeded', receipts[0]['error'])
+        self.assertTrue(receipts[0]['protocol_valid'], receipts[0]['error'])
+        self.assertEqual(found, [['challenge.toml', 'local.toml']])
+        for name, role in ROLES.items():
+            self.assertEqual(tomllib.loads((roles_dir / (name + '.toml')).read_text(encoding='utf-8')),
+                             {'name': name, 'description': role['description'],
+                              'developer_instructions': role['instructions']})
+        command = json.loads((store.root / 'calls' / effect['id'] / 'invocation.json').read_text(encoding='utf-8'))[
+            'command']
+        named = [command[i + 1] for i, part in enumerate(command[:-1])
+                 if part == '-c' and command[i + 1].startswith('agents.') and '.config_file=' in command[i + 1]]
+        self.assertEqual(named, ['agents.' + name + '.config_file=' + native.toml_string(str(roles_dir / (name + '.toml')))
+                                 for name in ('challenge', 'local')])
+
+    def test_a_call_without_roles_gets_no_role_folder(self):
+        receipt = self.execute(settings=PLAIN)
+        self.assertEqual(receipt['status'], 'succeeded', receipt['error'])
+        self.assertEqual(set(self.calls[0]), {'session', 'journal_metadata', 'native', 'run_root'})
+        self.assertEqual(self.calls[0]['native'], PLAIN)
+        self.assertEqual(receipt['native_capabilities'], PLAIN)
+
+    def test_executor_refuses_roles_without_a_persistent_session(self):
+        store, controller, runtime = open_run(self, config={'native_capabilities': {'lab': config_form(WITH_ROLES)}})
+        effect = runtime.prepare_meta(runtime.enqueue_lab('lab-2')['id'], RESERVATION)
+        self.assertEqual(effect['status'], 'prepared', effect)
+        raised = []
+
+        def executor(dispatching, raw):
+            # The same Effect, but for the persistent session its call would run in.
+            metadata = {key: value for key, value in dispatching['metadata'].items() if key != 'agent_session'}
+            try:
+                return roles.CodexExecutor(store.root / 'calls')({**dispatching, 'metadata': metadata}, raw)
+            except ValueError as exc:
+                raised.append(exc)
+                raise
+        with patch.object(roles.transport, 'invoke', side_effect=AssertionError('The call was dispatched')) as invoke, \
+                patch.object(transport.subprocess, 'Popen', side_effect=AssertionError('Codex started')) as popen:
+            controller.dispatch_effect('r', effect['id'], executor)
+        self.assertEqual([str(exc) for exc in raised], ['Sub-agent roles need a persistent session'])
+        invoke.assert_not_called()
+        popen.assert_not_called()
+        self.assertFalse((store.root / 'calls' / effect['id']).exists())
+        self.assertEqual(list((store.root / 'agents').glob('*/roles')), [])
 
 
 if __name__ == '__main__':
