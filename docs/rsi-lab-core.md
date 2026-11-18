@@ -21,6 +21,7 @@ RSI-Lab 的内核负责可追踪执行、Lab/Meta 协作和可恢复的研究状
 - `publication`：把核验结果映射为原始事实、来源陈述、验证结论与应用结果。
 - 可选 `measure`：产生有界任务指标，内核保留原始执行凭据，不解释分数方向。
 - 可选 `required_evidence(store, run_id, inputs)`：声明此请求必须读取并引用的原始事实。Runtime 核对这些事实已完整交付到实际模型请求，并出现在命令引用中；只提交来源 ID 或摘要卡片不够。回调与其他 Adapter 代码一起绑定源码身份。
+- 可选 `admit_request(store, run_id, inputs, effect)`：让宿主对照提出请求的那次模型调用检查工具请求。Lab 或 Meta 的工具请求创建诊断 Work 时，它在同一写事务中、紧接 `admit_work(store, run_id, inputs)` 之后运行；`admit_work` 已拒绝时不再调用。`inputs` 是解析后的 `inputs_json`；`effect` 是提出该请求的模型 Effect 的已保存记录（`proposal['effect_id']`），`json.loads(store.read_blob(effect['result_ref']))` 即该次调用的回执，含 `child_threads` 等字段。它抛出 `ValueError` 与 `admit_work` 拒绝的处理相同：proposal 记为 `blocked_action` 并保存错误文本，不创建依赖或 Work。接纳阶段对 `prepare` 的试运行不调用它，重放已排队或已完成的 Work 不调用它，宿主直接调用 `execute_adapter` 时也不调用它。回调与其他 Adapter 代码一起绑定源码身份。
 
 `Runtime(..., adapters=[...])` 接收宿主选择的能力；`execute_adapter(adapter_id, inputs, trigger_id=...)` 负责调用前预约、保存回执与发布。适配器身份、版本、回调与实现 hash 绑定到执行，恢复时不会按任务名称猜测实现。每个回调的代码 hash 覆盖其字节码、名称与常量，不随这段代码所在的文件名或行号变化，也不随进程内存中的其他内容变化；列出的源文件仍按绝对路径和整个文件内容绑定，因此移动模块或编辑这些文件中的任何内容都会改变描述符，变更前已准备的 Effect 会被报告为 `blocked_adapter`。
 

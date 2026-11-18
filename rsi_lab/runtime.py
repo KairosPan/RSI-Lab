@@ -1467,6 +1467,14 @@ class Runtime:
                             adapter.admit_work(self.store, run, values)
                         except ValueError as exc:
                             refusal = exc
+                    # The host may also check the request against the model
+                    # call that made it, e.g. that call's receipt.
+                    if refusal is None and adapter.admit_request is not None:
+                        try:
+                            adapter.admit_request(self.store, run, values,
+                                                  self.store.get(run, 'effect', proposal['effect_id']))
+                        except ValueError as exc:
+                            refusal = exc
                     if adapter.claim_identities is not None:
                         ids = adapter.claim_identities(self.store, run, values)
                         claim = work_claims.acquire(tx, adapter.adapter_id, wid, ids)
