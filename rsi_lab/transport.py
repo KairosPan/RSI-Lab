@@ -51,6 +51,17 @@ def _write_json(path, value):
     path = Path(path)
     raw = (json.dumps(value, ensure_ascii=False, allow_nan=False, indent=2) + "\n").encode()
     # Atomic metadata publication; event data uses JournalWriter append+fsync.
+    _replace_bytes(path, raw)
+
+
+def _replace_bytes(path, raw):
+    """Publish ``raw`` at ``path`` atomically, with mode ``0o600``.
+
+    ``raw`` goes to a temporary file beside ``path``, named ``.<name>-XXXX``,
+    which is fsynced and moved into place; then the folder is fsynced. The
+    temporary file is removed when the write fails.
+    """
+    path = Path(path)
     fd, temporary = tempfile.mkstemp(prefix='.' + path.name + '-', dir=path.parent)
     try:
         with os.fdopen(fd, 'wb') as stream:
@@ -439,9 +450,9 @@ def write_role_files(roles_dir, roles):
 
     ``roles`` are normal-form roles by name; each file holds
     ``native.role_file_text``. The folder is made with mode ``0o700`` when
-    missing. Each file is written with mode ``0o600`` to a temporary file
-    beside it and moved into place; then every other entry whose name ends in
-    ``.toml`` is deleted, except a directory. Other entries are left alone.
+    missing. Every other entry whose name ends in ``.toml`` is deleted, except
+    a directory; other entries are left alone. Then each file is written with
+    mode ``0o600`` by ``_replace_bytes``.
 
     Refused with ``ValueError`` before anything is written or deleted: a role
     name ``native.ROLE_NAME`` does not match, role text that cannot be encoded
@@ -468,26 +479,13 @@ def write_role_files(roles_dir, roles):
         if os.path.lexists(target) and not target.is_file():
             raise ValueError('A sub-agent role file is not a regular file: ' + str(target))
     roles_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    for file_name, raw in texts.items():
-        # mkstemp creates the file with mode 0o600; its name does not end in .toml.
-        fd, temporary = tempfile.mkstemp(prefix='.' + file_name + '-', dir=roles_dir)
-        try:
-            with os.fdopen(fd, 'wb') as stream:
-                stream.write(raw)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, roles_dir / file_name)
-        finally:
-            if os.path.exists(temporary):
-                os.unlink(temporary)
     for entry in roles_dir.iterdir():
         if entry.name.endswith('.toml') and entry.name not in texts and (entry.is_symlink() or not entry.is_dir()):
             entry.unlink()
-    directory = os.open(roles_dir, os.O_RDONLY)
-    try:
-        os.fsync(directory)
-    finally:
-        os.close(directory)
+    # Each write fsyncs the folder, which also makes the deletions above durable. A temporary file's name does
+    # not end in .toml.
+    for file_name, raw in texts.items():
+        _replace_bytes(roles_dir / file_name, raw)
 
 
 def _command(folder, model, effort, cwd, session, image_paths=(), native=None, run_root=None, roles_dir=None):
