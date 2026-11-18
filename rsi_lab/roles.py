@@ -854,6 +854,10 @@ class CodexExecutor:
                     if found:
                         raise ValueError('The workspace holds Codex instructions or configuration that the '
                                          'Controller did not put there: ' + ', '.join(found))
+                    # The terminal's temporary files go to .tmp, which the transport creates as a directory.
+                    if os.path.lexists(workspace / '.tmp') and not (workspace / '.tmp').is_dir():
+                        raise ValueError("The workspace's .tmp, where the terminal's temporary files go, "
+                                         'is not a directory')
                 prior = session.get('context_manifest') or {}
                 if session.get('committed_turn', 0) and not session.get('provider_thread_id'):
                     raise ValueError('Committed persistent session has no native thread; reconstruct explicitly')

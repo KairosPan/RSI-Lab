@@ -314,6 +314,26 @@ class NativeTransportTests(unittest.TestCase):
             (folder / 'invocation.json').write_text(invocation)
         return folder
 
+    def test_call_files_are_read_as_utf8_whatever_the_locale(self):
+        # Under a locale whose encoding is not UTF-8, a non-ASCII readable root would read as everything off.
+        data = self.root / 'données'
+        data.mkdir()
+        settings = {**TERMINAL_AND_SEARCH, 'terminal': {'readable_roots': [str(data)]}}
+        stream = [*NATIVE_STREAM[:2], {'type': 'item.completed', 'item': {'type': 'agent_message', 'text': 'Début.'}},
+                  *NATIVE_STREAM[3:]]
+        folder = self.archive(stream)
+        (folder / 'invocation.json').write_bytes(json.dumps({'backend': 'codex', 'native': settings},
+                                                            ensure_ascii=False).encode())
+        read_text = Path.read_text
+
+        def ascii_locale(path, encoding=None, errors=None, newline=None):
+            return read_text(path, encoding=encoding or 'ascii', errors=errors, newline=newline)
+        with patch.object(Path, 'read_text', ascii_locale):
+            self.assertEqual(transport._recorded_native(folder), settings)
+            self.assertEqual(transport.audited_events(folder),
+                             ('{"ok":true}', {'input_tokens': 20, 'output_tokens': 5}, True, []))
+            self.assertEqual(transport.stream_activity(folder)['items']['agent_message'], 2)
+
     def test_stream_items_follow_the_settings(self):
         for settings in (None, native.OFF):
             self.assertEqual(native.stream_items(settings), frozenset())
@@ -513,6 +533,26 @@ class NativeTransportTests(unittest.TestCase):
                     self.assertTrue((folder / receipt).is_file(), receipt)
                 self.assertIs(json.loads((folder / 'transport_result.json').read_text())['descendants_stopped'], False)
                 read_journal(folder / 'journal.jsonl')
+
+    def test_a_second_interruption_during_the_kill_still_records_the_first(self):
+        # Ctrl-C while Codex runs, then Ctrl-C again while the kill is under way.
+        for name, settings in (('off', None), ('terminal', TERMINAL)):
+            with self.subTest(settings=name):
+                folder = self.root / 'calls' / ('twice-' + name)
+
+                def interrupted_kill(process, tracked=None):
+                    process.kill(); process.wait()
+                    raise KeyboardInterrupt('second')
+                with patch.object(transport, '_stream_process', side_effect=KeyboardInterrupt('first')), \
+                        patch.object(transport, '_terminate', side_effect=interrupted_kill), \
+                        self.assertRaises(KeyboardInterrupt) as caught:
+                    self.invoke(code='import sys,time;sys.stdin.read();time.sleep(60)', native=settings, folder=folder)
+                self.assertEqual(str(caught.exception), 'second')
+                result = json.loads((folder / 'transport_result.json').read_text())
+                self.assertEqual(result['error'], 'KeyboardInterrupt: first')
+                self.assertEqual((result['execution_status'], result['response'], result['usage_complete'],
+                                  result['protocol_valid']), ('unknown', None, False, False))
+                self.assertIs(result['descendants_stopped'], False)
 
     def test_a_terminal_call_that_times_out_stops_what_it_orphaned(self):
         marker = self.root / 'grandchild.pid'

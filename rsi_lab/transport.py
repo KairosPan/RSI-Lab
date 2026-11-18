@@ -320,7 +320,7 @@ def _provider_stdout(folder):
     """
     path = folder / 'journal.jsonl'
     if not path.exists():
-        return (folder / 'events.jsonl').read_text(), None
+        return (folder / 'events.jsonl').read_text(encoding='utf-8'), None
     capture = read_journal(path)
     frames = [base64.b64decode(row['raw_base64']).decode('utf-8', errors='replace')
               for row in capture['records']
@@ -336,7 +336,7 @@ def _recorded_native(folder):
     that are not normal form all read as everything off: today's strict reading.
     """
     try:
-        invocation = _json((folder / 'invocation.json').read_text())
+        invocation = _json((folder / 'invocation.json').read_text(encoding='utf-8'))
         if isinstance(invocation, dict):
             return native_tools.validate(invocation.get('native'))
     except (OSError, ValueError):
@@ -775,6 +775,11 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
                        'execution_status': execution_status, 'parse_error': parse_error,
                        'error': error}).encode(), kind='attempt_finished')
     except BaseException as exc:
+        # Recorded before the kill, which can take seconds: a second interruption during it still leaves them.
+        error = f'{type(exc).__name__}: {exc}'
+        response = None
+        usage_complete = protocol_valid = False
+        execution_status = 'unknown' if invocation['dispatched'] else 'failed_definite'
         if process is not None and process.poll() is None:
             stop()
             try:
@@ -782,10 +787,6 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
             except subprocess.TimeoutExpired:
                 pass
         returncode = process.returncode if process is not None else None
-        error = f'{type(exc).__name__}: {exc}'
-        response = None
-        usage_complete = protocol_valid = False
-        execution_status = 'unknown' if invocation['dispatched'] else 'failed_definite'
         if journal is not None and not journal.failed:
             try:
                 journal.append('control', error.encode(), kind='stream_incomplete')

@@ -419,6 +419,21 @@ class NativeExecutorTests(unittest.TestCase):
                 self.assertIn(name, receipt['error'])
                 self.assertEqual(self.calls, [])
 
+    def test_a_terminal_call_is_not_sent_when_the_workspace_tmp_is_not_a_directory(self):
+        # The terminal's temporary files go to .tmp, which the transport creates as a directory.
+        makers = {'a file': lambda w: (w / '.tmp').write_text('not a folder'),
+                  'a dangling link': lambda w: (w / '.tmp').symlink_to(w / 'missing')}
+        for case, make in makers.items():
+            with self.subTest(case=case):
+                receipt = self.execute(settings=TERMINAL, workspace_files=[make])
+                self.assertEqual(receipt['status'], 'failed_definite')
+                self.assertTrue(receipt['never_dispatched'])
+                self.assertIn(".tmp", receipt['error'])
+                self.assertIn('is not a directory', receipt['error'])
+                self.assertEqual(self.calls, [])
+        receipt = self.execute(settings=TERMINAL, workspace_files=[lambda w: (w / '.tmp').mkdir()])
+        self.assertEqual(receipt['status'], 'succeeded', receipt['error'])
+
     def test_only_the_terminal_checks_the_workspace(self):
         receipt = self.execute(settings=SEARCH, workspace_files=[lambda w: (w / 'AGENTS.md').write_text('Notes')])
         self.assertEqual(receipt['status'], 'succeeded', receipt['error'])
