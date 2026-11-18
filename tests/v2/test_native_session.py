@@ -168,6 +168,31 @@ class NativeSessionTests(unittest.TestCase):
                 if accepted: call()
                 else: self.assertRaisesRegex(ContextUnavailable, 'context_unverifiable', call)
 
+    def test_a_message_between_agents_may_not_carry_an_image(self):
+        # Images reach a model only as Controller attachments; a sub-agent's message has text and opaque parts.
+        text = {'type': 'input_text', 'text': 'Found it.'}
+        opaque = {'type': 'encrypted_content', 'encrypted_content': 'opaque-sub-agent-payload'}
+        refused = {'an input_image item': [text, native_image()], 'an image type alone': [{'type': 'input_image'}],
+                   'an image_url on a text item': [{**text, 'image_url': 'https://example.invalid/a.png'}],
+                   'another image type': [{'type': 'output_image', 'data': 'AAAA'}],
+                   'an item that is not an object': [text, 'Found it.'], 'no content': None,
+                   'an object as content': text}
+        accepted = {'text and an opaque part': [text, opaque], 'an opaque part alone': [opaque],
+                    'text alone': [text], 'an item of another kind': [text, {'type': 'summary_text', 'text': 's'}],
+                    'a string': 'Found it.'}
+        for cases, kept in ((refused, False), (accepted, True)):
+            for case, content in cases.items():
+                tail = frame('response_item', {'type': 'agent_message', 'author': '/root/a', 'recipient': '/root',
+                                               'content': content})
+                with self.subTest(case=case):
+                    call = lambda: self.read(fixture(self.cwd) + tail, SUBAGENTS)
+                    if kept: call()
+                    else: self.assertRaisesRegex(ContextUnavailable, 'context_unverifiable', call)
+        # The fixture writes the shape the probe saw, which is accepted.
+        self.read(fixture(self.cwd) + agent_message('/root/a', '/root', 'Found it.'), SUBAGENTS)
+        self.assertEqual(json.loads(agent_message('/root', '/root/a', 'Go.'))['payload']['content'][1]['type'],
+                         'encrypted_content')
+
     def test_rollback_and_other_compaction_records_stay_refused_with_everything_on(self):
         for tail in (frame('event_msg', {'type': 'thread_rolled_back'}), frame('thread_rollback', {}),
                      frame('compaction', {}), frame('context_compacted', {}),

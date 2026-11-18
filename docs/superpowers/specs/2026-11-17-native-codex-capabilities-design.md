@@ -448,6 +448,14 @@ hold the session's instructions and environment, which a compaction does not
 replace. The context manifest then labels the method
 `rollout-bytes-since-last-compaction-estimate-v1`.
 
+**Messages between agents (section 5).** With sub-agents on, an
+`agent_message` record is refused when an item of its `content` carries an
+image (the item has an `image_url` key, or its `type` contains `image`) or is
+not a JSON object, so images still reach a model only as Controller
+attachments. Text items and `encrypted_content` items, the shape the probe
+saw, are accepted, as is content that is a plain string; text is not required
+of every item. Tool outputs keep their own rule: a string, or text items only.
+
 **Account snapshot (sections 6 and 10).** `account_snapshot` is recorded on the
 receipt of every dispatched call whose turn was read from the rollout, with
 settings on or off (`null` when the turn recorded none), and left out when the

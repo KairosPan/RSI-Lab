@@ -64,9 +64,11 @@ def sub_agent_activity(child, path, kind):
 
 
 def agent_message(author, recipient, text):
-    """A message between agents: a ``response_item`` of type ``agent_message``."""
+    """A message between agents: a ``response_item`` of type ``agent_message`` whose content is, as observed, an
+    ``input_text`` item followed by an ``encrypted_content`` item holding an opaque string."""
     return frame('response_item', {'type': 'agent_message', 'author': author, 'recipient': recipient,
-                                   'content': [{'type': 'input_text', 'text': text}]})
+                                   'content': [{'type': 'input_text', 'text': text},
+                                               {'type': 'encrypted_content', 'encrypted_content': 'opaque-payload'}]})
 
 
 def compacted(history):

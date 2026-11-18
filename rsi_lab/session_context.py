@@ -111,6 +111,14 @@ def _text_output(output):
         isinstance(item, dict) and isinstance(item.get('text'), str) and 'image_url' not in item for item in output))
 
 
+def _imageless(content):
+    """Whether a message between agents carries no image: text, or a list of objects none of which has an
+    ``image_url`` or a ``type`` that names an image. Text and ``encrypted_content`` items are what Codex writes."""
+    return isinstance(content, str) or (isinstance(content, list) and all(
+        isinstance(item, dict) and 'image_url' not in item
+        and not (isinstance(item.get('type'), str) and 'image' in item['type']) for item in content))
+
+
 def _switched_on(settings):
     """Whether a snapshot's recorded native settings are well formed and switch anything on."""
     try:
@@ -130,7 +138,8 @@ def snapshot_from_bytes(raw, *, expected_thread_id, expected_cwd, expected_prefi
     ``native`` is the session's role settings (``native.validate``). Settings
     that switch anything on also accept the records ``native.rollout_kinds``
     names, ``compacted`` among them, counted in the byte totals and parsed no
-    further except that a tool output must be text. The snapshot then carries
+    further except that a tool output must be text and a message between
+    agents (``agent_message``) may carry no image. The snapshot then carries
     ``native``, ``compactions``, ``compaction_supported: True`` and
     ``history_counted_from_record``: the 1-based number of the last
     ``compacted`` record that holds a ``replacement_history`` list, from which
@@ -197,6 +206,9 @@ def snapshot_from_bytes(raw, *, expected_thread_id, expected_cwd, expected_prefi
             if item_kind in kinds['response']:
                 if item_kind in TOOL_OUTPUT_KINDS and not _text_output(payload.get('output')):
                     unsupported.append({'record': number, 'kind': 'unsupported_tool_output'})
+                # Images reach a model only as Controller attachments, never inside a message between agents.
+                elif item_kind == 'agent_message' and not _imageless(payload.get('content')):
+                    unsupported.append({'record': number, 'kind': 'unsupported_agent_message_content'})
             elif item_kind not in RESPONSE_KINDS:
                 unsupported.append({'record': number, 'kind': item_kind})
             elif item_kind == 'message':
