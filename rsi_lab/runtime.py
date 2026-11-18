@@ -8,8 +8,6 @@ from __future__ import annotations
 
 from datetime import datetime
 import json
-import os
-from pathlib import Path
 import time
 
 from .controller import Controller, identity, effect_holds_execution, effect_is_quarantined
@@ -80,8 +78,7 @@ class Runtime:
         unknown_usage_policy(self.config)
         model_failure_retries(self.config)
         self.native = native.capabilities(self.config)
-        native.check_roots(self.native, run_root=Path(store.root),
-                           codex_home=Path(os.environ.get('CODEX_HOME') or Path.home() / '.codex'))
+        native.check_roots(self.native, run_root=store.root, codex_home=native.default_codex_home())
         orchestration = orchestration_config(self.config)
         self.research_policy = normalize_research_policy(self.config.get('research_policy'))
         self.agents = AgentState(store, run_id)

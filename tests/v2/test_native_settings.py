@@ -5,6 +5,7 @@ from pathlib import Path
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 from rsi_lab import native
 from rsi_lab.__main__ import main
@@ -72,12 +73,49 @@ class NativeSettingsTests(unittest.TestCase):
         self.assertEqual(got['meta'], native.OFF)
         self.assertIsNot(got['meta'], got['literature'])
 
+    def readable_roots(self, *roots):
+        """The Lab's readable roots as capabilities stores them."""
+        block = {'lab': {'terminal': {'readable_roots': [str(root) for root in roots]}}}
+        return native.capabilities({'native_capabilities': block})['lab']['terminal']['readable_roots']
+
+    def check_lab_roots(self, *roots):
+        """check_roots on settings whose Lab terminal may read ``roots``, everything else off."""
+        by_role = {**{role: native.OFF for role in native.ROLES},
+                   'lab': {'web_search': False, 'terminal': {'readable_roots': [str(r) for r in roots]}, 'subagents': None}}
+        native.check_roots(by_role, run_root=self.run_root, codex_home=self.codex_home)
+
     def test_readable_roots_are_stored_resolved(self):
         link = self.root / 'link-to-data'
         link.symlink_to(self.data, target_is_directory=True)
-        roots = native.capabilities({'native_capabilities': {'lab': {'terminal': {
-            'readable_roots': [str(link), os.path.join(self.data, '..', 'data')]}}}})['lab']['terminal']['readable_roots']
-        self.assertEqual(roots, [str(self.data.resolve()), str(self.data.resolve())])
+        for root in (link, os.path.join(self.data, '..', 'data')):
+            with self.subTest(root=root):
+                self.assertEqual(self.readable_roots(root), [str(self.data.resolve())])
+
+    def test_a_readable_root_listed_twice_is_kept_once_in_first_place(self):
+        other = self.root / 'other'
+        other.mkdir()
+        link = self.root / 'link-to-data'
+        link.symlink_to(self.data, target_is_directory=True)
+        data, other = str(self.data.resolve()), str(other.resolve())
+        self.assertEqual(self.readable_roots(self.data, other, self.data), [data, other])
+        self.assertEqual(self.readable_roots(other, link, self.data), [other, data])
+
+    def test_a_symlink_into_the_run_root_is_refused(self):
+        (self.run_root / 'objects').mkdir()
+        link = self.root / 'into-run'
+        link.symlink_to(self.run_root / 'objects', target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, '^native_capabilities.* the run root'):
+            self.check_lab_roots(link)
+
+    def test_a_differently_cased_codex_home_is_refused_on_a_case_insensitive_volume(self):
+        upper = self.codex_home.with_name(self.codex_home.name.upper())
+        if not upper.exists():
+            self.skipTest('the temporary directory is on a case-sensitive volume')
+        (self.codex_home / 'sessions').mkdir()
+        for root in (upper, upper / 'sessions'):
+            with self.subTest(root=root), self.assertRaisesRegex(ValueError, '^native_capabilities.* the Codex home'):
+                self.check_lab_roots(root)
+        self.check_lab_roots(self.root)          # Containing the Codex home stays allowed.
 
     def test_invalid_blocks_are_refused(self):
         for block in ([], {'planner': {}}, {'lab': []}, {'lab': {'shell': True}}, {'lab': {'web_search': 1}},
@@ -148,6 +186,22 @@ class NativeSettingsTests(unittest.TestCase):
         self.addCleanup(store.close)
         with self.assertRaises(KeyError):
             store.run('r')
+
+    def test_init_refuses_a_readable_root_in_its_run_or_the_codex_home_before_creating_the_run(self):
+        (self.codex_home / 'sessions').mkdir()
+        ledger_a, ledger_b = self.root / 'ledger-a', self.root / 'ledger-b'
+        for ledger, root, place in ((ledger_a, ledger_a, 'the run root'),
+                                    (ledger_b, self.codex_home / 'sessions', 'the Codex home')):
+            path = self.root / (ledger.name + '.json')
+            path.write_text(json.dumps({'budgets': BUDGETS,
+                                        'native_capabilities': {'lab': {'terminal': {'readable_roots': [str(root)]}}}}))
+            with self.subTest(place=place), mock.patch.dict(os.environ, {'CODEX_HOME': str(self.codex_home)}):
+                with self.assertRaisesRegex(ValueError, '^native_capabilities.* ' + place):
+                    main(['--root', str(ledger), '--run', 'r', 'init', '--config', str(path)])
+                store = Store(ledger)
+                self.addCleanup(store.close)
+                with self.assertRaises(KeyError):
+                    store.run('r')
 
 
 if __name__ == '__main__':

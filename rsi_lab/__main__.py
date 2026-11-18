@@ -84,8 +84,8 @@ def main(argv=None):
         elif args.command=='init':
             config=read(args.config)
             # The config is immutable once stored; refuse what Runtime would later reject.
-            for check in (unknown_usage_policy,model_failure_retries,model_timeout,orchestration_config,
-                          native.capabilities):check(config)
+            for check in (unknown_usage_policy,model_failure_retries,model_timeout,orchestration_config):check(config)
+            native.check_roots(native.capabilities(config),run_root=store.root,codex_home=native.default_codex_home())
             budgets=config.pop('budgets');capacity=config.pop('max_external',1)
             result=controller.initialize(args.run,budgets=budgets,max_external=capacity,config=config)
         else:

@@ -27,7 +27,7 @@ def capabilities(config):
 
     ``terminal`` and ``subagents`` may be ``false``, ``true`` or an object; a
     missing key is off. Readable roots must be absolute existing directories
-    and are stored resolved. Anything else raises ``ValueError``.
+    and are stored resolved, each once. Anything else raises ``ValueError``.
     """
     block = config.get('native_capabilities', {})
     if type(block) is not dict or set(block) - set(ROLES):
@@ -49,6 +49,11 @@ def any_on(settings):
     return validate(settings) != OFF
 
 
+def default_codex_home():
+    """The Codex home a call uses unless its session names another: ``CODEX_HOME``, else ``~/.codex``."""
+    return Path(os.environ.get('CODEX_HOME') or Path.home() / '.codex')
+
+
 def check_roots(by_role, *, run_root, codex_home):
     """Refuse a readable root equal to or inside the run root or the Codex home.
 
@@ -60,10 +65,24 @@ def check_roots(by_role, *, run_root, codex_home):
     for role, settings in by_role.items():
         for root in (settings['terminal'] or {}).get('readable_roots', ()):
             resolved = Path(root).resolve()
-            for name, path in denied:
-                if resolved.is_relative_to(path):
+            for name, folder in denied:
+                if _inside(resolved, folder):
                     raise ValueError('native_capabilities.' + role + '.terminal.readable_roots entries may not be '
                                      'or lie inside ' + name + ': ' + root)
+
+
+def _inside(path, folder):
+    """Whether ``path`` is ``folder`` or lies inside it, both resolved.
+
+    Decided by file identity: ``path`` or one of its ancestors is the same file
+    as ``folder``. That catches spellings the text of a resolved path does not,
+    such as another letter case on a case-insensitive volume. The text
+    comparison remains for paths that do not exist.
+    """
+    if path.is_relative_to(folder):
+        return True
+    return folder.exists() and any(place.exists() and os.path.samefile(place, folder)
+                                   for place in (path, *path.parents))
 
 
 def _role(role, entry):
@@ -80,7 +99,8 @@ def _role(role, entry):
         for root in roots:
             if not Path(root).is_dir():
                 raise ValueError(where + '.terminal.readable_roots entries must be existing directories: ' + root)
-        settings['terminal']['readable_roots'] = [str(Path(root).resolve()) for root in roots]
+        # Resolved spellings of one directory collapse to its first place in the list.
+        settings['terminal']['readable_roots'] = list(dict.fromkeys(str(Path(root).resolve()) for root in roots))
     return settings
 
 
