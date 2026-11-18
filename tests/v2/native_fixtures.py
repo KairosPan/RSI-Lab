@@ -60,16 +60,44 @@ def collab(call_id, name, output):
             + frame('response_item', {'type': 'function_call_output', 'call_id': call_id, 'output': output}))
 
 
-def sub_agent_started(child, path):
-    """The ``item_completed`` event a spawn writes to the parent's rollout."""
-    return sub_agent_activity(child, path, 'started')
+def sub_agent_started(child, path, *, model=None, effort=None):
+    """The ``item_completed`` event a spawn writes to the parent's rollout, naming the model and effort used."""
+    return sub_agent_activity(child, path, 'started', model=model, effort=effort)
 
 
-def sub_agent_activity(child, path, kind):
+def sub_agent_activity(child, path, kind, *, model=None, effort=None):
     """An ``item_completed`` event of a sub-agent's activity in the parent's rollout; the probe saw the kinds
-    ``started``, ``interacted``, ``interrupted`` and ``completed``."""
+    ``started``, ``interacted``, ``interrupted`` and ``completed``. ``model`` and ``reasoning_effort`` are
+    ``null`` unless given, as the probe saw them on every kind but ``started``."""
     return frame('event_msg', {'type': 'item_completed', 'item': {
-        'type': 'SubAgentActivity', 'kind': kind, 'agent_thread_id': child, 'agent_path': path}})
+        'type': 'SubAgentActivity', 'kind': kind, 'agent_thread_id': child, 'agent_path': path,
+        'model': model, 'reasoning_effort': effort}})
+
+
+def sub_agent_meta(child, parent, *, agent_path='/root/a', role=None, forked=False, cwd='/workspace'):
+    """A sub-agent's first ``session_meta``: the child, its parent, its path and nickname, at the top and under
+    ``source.subagent.thread_spawn``. ``agent_role`` is there, in both places, only when ``role`` is not ``None``;
+    any value is written as given. A sub-agent started with the parent's history (``forked``) also names the
+    parent as ``forked_from_id``, with ``subagent_history_start_ordinal``."""
+    named = {'agent_path': agent_path, 'agent_nickname': 'Fixture'}
+    if role is not None:
+        named['agent_role'] = role
+    payload = {'id': child, 'parent_thread_id': parent, 'cwd': str(cwd), **named,
+               'source': {'subagent': {'thread_spawn': {'parent_thread_id': parent, 'depth': 1, **named}}}}
+    if forked:
+        payload.update(forked_from_id=parent, subagent_history_start_ordinal=1)
+    return frame('session_meta', payload)
+
+
+def web_search(query, turn, *, shape='Extension'):
+    """A web search's ``item_completed`` event in the searching thread's rollout, under its own ``turn``: the
+    ``Extension`` item of kind ``web.search`` the probe saw, or the older ``WebSearch`` item."""
+    action = {'type': 'search', 'query': query}
+    if shape == 'Extension':
+        item = {'type': 'Extension', 'kind': 'web.search', 'query': query, 'action': action, 'results': []}
+    else:
+        item = {'type': 'WebSearch', 'id': 'search-' + turn, 'query': query, 'action': action}
+    return frame('event_msg', {'type': 'item_completed', 'turn_id': turn, 'item': item})
 
 
 def agent_message(author, recipient, text):
@@ -107,12 +135,11 @@ def turn_context(turn, profile=None, *, cwd='/workspace'):
     return frame('turn_context', payload)
 
 
-def child_rollout(child, parent, turn_rows, *, agent_path='/root/a', cwd='/workspace'):
-    """A sub-agent's own rollout: its ``session_meta``, spawned at ``agent_path`` in ``cwd``, then the parent's
-    (the history is forked), then one usage row per ``(turn_id, root_turn_id, input_tokens, output_tokens)`` in
-    ``turn_rows``."""
-    spawn = {'parent_thread_id': parent, 'depth': 1, 'agent_path': agent_path}
-    own = frame('session_meta', {'id': child, 'parent_thread_id': parent, 'cwd': str(cwd),
-                                 'source': {'subagent': {'thread_spawn': spawn}}})
-    return own + frame('session_meta', {'id': parent, 'cwd': str(cwd)}) + b''.join(
+def child_rollout(child, parent, turn_rows, *, agent_path='/root/a', cwd='/workspace', role=None, forked=True):
+    """A sub-agent's own rollout: its ``session_meta`` (``sub_agent_meta``), spawned at ``agent_path`` in ``cwd``
+    with ``role``, then, when the history is ``forked``, the parent's, then one usage row per ``(turn_id,
+    root_turn_id, input_tokens, output_tokens)`` in ``turn_rows``."""
+    own = sub_agent_meta(child, parent, agent_path=agent_path, role=role, forked=forked, cwd=cwd)
+    history = frame('session_meta', {'id': parent, 'cwd': str(cwd)}) if forked else b''
+    return own + history + b''.join(
         usage_row(child, turn, root, inp, out, session=parent) for turn, root, inp, out in turn_rows)

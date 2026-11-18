@@ -6,6 +6,7 @@ fixture that writes the call's stream and a synthetic rollout built from
 tests/v2/native_fixtures.py. No Codex, model, network request or credential is
 used.
 """
+import hashlib
 import json
 import os
 import shutil
@@ -500,6 +501,36 @@ class NativeExecutorTests(unittest.TestCase):
         self.assertEqual(set(self.calls[0]), {'session', 'journal_metadata', 'native', 'run_root'})
         self.assertEqual(self.calls[0]['native'], PLAIN)
         self.assertEqual(receipt['native_capabilities'], PLAIN)
+
+    def test_receipt_names_roles_by_digest(self):
+        receipt = self.execute(settings=WITH_ROLES, rollout=PARENT_WITH_CHILD, child=CHILD_ROWS)
+        self.assertEqual(receipt['status'], 'succeeded', receipt['error'])
+        local = receipt['native_capabilities']['subagents']['roles']['local']
+        self.assertEqual(local, {'description': R['description'],
+                                 'instructions_sha256': hashlib.sha256(R['instructions'].encode('utf-8')).hexdigest()})
+        self.assertNotIn('instructions', local)
+        self.assertEqual(receipt['native_capabilities'], native.receipt_form(WITH_ROLES))
+        self.assertEqual(self.effect['metadata']['native_capabilities'], WITH_ROLES)    # The Effect keeps the text.
+        receipt = self.execute(settings=PLAIN, rollout=PARENT_WITH_CHILD, child=CHILD_ROWS)
+        self.assertEqual(receipt['status'], 'succeeded', receipt['error'])
+        self.assertNotIn('roles', receipt['native_capabilities']['subagents'])
+        self.assertEqual(receipt['native_capabilities'], PLAIN)
+
+    def test_child_threads_record_each_sub_agent_with_or_without_roles(self):
+        for settings in (PLAIN, WITH_ROLES):
+            with self.subTest(roles='roles' in settings['subagents']):
+                receipt = self.execute(settings=settings, rollout=PARENT_WITH_CHILD, child=CHILD_ROWS)
+                self.assertEqual(receipt['token_source'], 'ledger')
+                [entry] = receipt['child_threads']
+                self.assertEqual(set(entry), {'thread_id', 'agent_path', 'started_in_call', 'model', 'effort',
+                                              'rollout_ref', 'rollout_sha256', 'requests', 'input_tokens',
+                                              'output_tokens', 'cached_input_tokens', 'role', 'forked_history',
+                                              'searches', 'searches_omitted'})
+                self.assertEqual({key: entry[key] for key in set(entry) - {'rollout_ref', 'rollout_sha256'}},
+                                 {'thread_id': CHILD, 'agent_path': '/root/a', 'started_in_call': True, 'model': None,
+                                  'effort': None, 'requests': 1, 'input_tokens': 22828, 'output_tokens': 37,
+                                  'cached_input_tokens': 0, 'role': None, 'forked_history': True, 'searches': [],
+                                  'searches_omitted': 0})
 
     def dispatch_refused_roles(self, *, arrange=None, alter=None):
         """Dispatch a Lab call whose Effect declares ``ROLES`` through the Controller, the executor and the real
