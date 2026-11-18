@@ -76,6 +76,25 @@ def stream_items(settings):
     return frozenset(items)
 
 
+def rollout_kinds(settings):
+    """The rollout record types one role's settings allow beyond today's reader.
+
+    ``response`` holds ``response_item`` types and ``outer`` record types. Both
+    are empty when everything is off, which keeps today's strict reading of the
+    rollout. Any setting that is on allows a ``compacted`` record.
+    """
+    settings = validate(settings)
+    response, outer = set(), set()
+    if settings != OFF:
+        outer.add('compacted')
+    if settings['web_search'] or settings['terminal'] is not None:
+        response |= {'custom_tool_call', 'custom_tool_call_output'}
+    if settings['subagents'] is not None:
+        response |= {'function_call', 'function_call_output', 'agent_message'}
+        outer.add('inter_agent_communication_metadata')
+    return {'response': frozenset(response), 'outer': frozenset(outer)}
+
+
 def command_parts(settings, *, workspace, run_root, codex_home, model, effort):
     """What one role's settings change in the Codex command.
 

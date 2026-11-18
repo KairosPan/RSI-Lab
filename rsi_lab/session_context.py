@@ -4,7 +4,8 @@ The Codex CLI persists rollout history, not a signed copy of every provider
 request.  This module verifies the *owned* rollout's exact durable prefix and
 bounds all observable history plus the new request.  It never turns an old ACK,
 a reasoning summary, or a rollout file into proof of current model delivery.
-Unsupported compaction or a changed prefix requires explicit reconstruction.
+A tool or compaction record the session's native settings do not allow, or a
+changed prefix, requires explicit reconstruction.
 
 No model calls or ledger writes occur here.  Provider framing, hidden reasoning,
 and automatic internal requests need a separately registered runtime adapter;
@@ -20,15 +21,18 @@ import re
 
 from .store import digest, encode
 from . import images
+from . import native as native_tools
 
 CONTRACT = 'codex-observable-rollout-v1'
 THREAD_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]{0,159}\Z')
 COMPACTION_KINDS = {'compacted', 'compaction', 'context_compaction', 'compaction_trigger',
                     'context_compacted', 'thread_rolled_back', 'thread_rollback'}
-# Only text and bounded inline PNG inputs are supported; native tools remain forbidden.
+# Only text and bounded inline PNG inputs are supported; native tools remain
+# forbidden unless the session's settings allow them (native.rollout_kinds).
 RESPONSE_KINDS = {'message', 'reasoning'}
 OUTER_KINDS = {'session_meta', 'turn_context', 'response_item', 'event_msg',
                'world_state', 'token_usage_record'}
+TOOL_OUTPUT_KINDS = {'custom_tool_call_output', 'function_call_output'}
 
 
 class ContextUnavailable(ValueError):
@@ -101,15 +105,39 @@ def _native_metadata(kind, payload, expected_thread_id):
             raise ContextUnavailable('context_unverifiable', 'invalid native usage counters')
 
 
-def snapshot_from_bytes(raw, *, expected_thread_id, expected_cwd, expected_prefix=None):
+def _text_output(output):
+    """Whether a tool output is a string, or a list of items that each hold string ``text`` and no ``image_url``."""
+    return isinstance(output, str) or (isinstance(output, list) and all(
+        isinstance(item, dict) and isinstance(item.get('text'), str) and 'image_url' not in item for item in output))
+
+
+def _switched_on(settings):
+    """Whether a snapshot's recorded native settings are well formed and switch anything on."""
+    try:
+        return native_tools.any_on(settings)
+    except ValueError:
+        return False
+
+
+def snapshot_from_bytes(raw, *, expected_thread_id, expected_cwd, expected_prefix=None, native=None):
     """Parse a complete local rollout, preserving every byte in its identity.
 
     ``expected_prefix`` may be a prior snapshot.  A resume is accepted only if
     its previous bytes still form exactly the same prefix.  The caller should
     take this snapshot while holding the session lease and after the native
     writer has quiesced; a truncated final line is not silently ignored.
+
+    ``native`` is the session's role settings (``native.validate``). Settings
+    that switch anything on also accept the records ``native.rollout_kinds``
+    names, counted in the byte totals and parsed no further except that a tool
+    output must be text, and a ``compacted`` record that holds its replacement
+    history. The snapshot then carries ``native``, ``compactions`` and
+    ``compaction_supported: True``, and its text history counts from the last
+    ``compacted`` record, inclusive. Everything off reads exactly as before.
     """
     _identity(expected_thread_id)
+    settings = native_tools.validate(native)
+    kinds = native_tools.rollout_kinds(settings)
     if not isinstance(raw, bytes) or not raw or not raw.endswith(b'\n'):
         raise ContextUnavailable('stream_incomplete', 'rollout has no complete final record')
     if expected_prefix is not None:
@@ -121,7 +149,10 @@ def snapshot_from_bytes(raw, *, expected_thread_id, expected_cwd, expected_prefi
             raise ContextUnavailable('session_owner_mismatch', 'prefix belongs to another thread')
     records, messages, contexts, metadata, unsupported, runtime_metadata = [], [], [], [], [], []
     image_inputs, image_bytes, image_encoding_bytes = [], 0, 0
-    for number, line in enumerate(raw.splitlines(), 1):
+    # Text history starts at the last compacted record; image encodings before it are not in its bytes.
+    offset, history_start, encoding_before_start, compactions = 0, 0, 0, 0
+    for number, (line, ended) in enumerate(zip(raw.splitlines(), raw.splitlines(keepends=True)), 1):
+        start, offset = offset, offset + len(ended)
         if not line.strip():
             raise ContextUnavailable('stream_incomplete', f'empty rollout record {number}')
         try:
@@ -132,7 +163,14 @@ def snapshot_from_bytes(raw, *, expected_thread_id, expected_cwd, expected_prefi
             raise ContextUnavailable('context_unverifiable', f'invalid rollout envelope {number}')
         kind, payload = record.get('type'), record['payload']
         records.append(record)
-        if kind in COMPACTION_KINDS or payload.get('type') in COMPACTION_KINDS:
+        if kind in kinds['outer'] and payload.get('type') not in COMPACTION_KINDS:
+            # Counting from a compaction is sound only when it holds the history that replaced what it compacted.
+            if kind == 'compacted' and not isinstance(payload.get('replacement_history'), list):
+                unsupported.append({'record': number, 'kind': 'compaction_without_replacement_history'})
+            elif kind == 'compacted':
+                compactions += 1
+                history_start, encoding_before_start = start, image_encoding_bytes
+        elif kind in COMPACTION_KINDS or payload.get('type') in COMPACTION_KINDS:
             unsupported.append({'record': number, 'kind': kind, 'payload_kind': payload.get('type')})
         elif kind not in OUTER_KINDS:
             unsupported.append({'record': number, 'kind': kind})
@@ -145,7 +183,10 @@ def snapshot_from_bytes(raw, *, expected_thread_id, expected_cwd, expected_prefi
             runtime_metadata.append({'kind': kind, 'payload': payload})
         elif kind == 'response_item':
             item_kind = payload.get('type')
-            if item_kind not in RESPONSE_KINDS:
+            if item_kind in kinds['response']:
+                if item_kind in TOOL_OUTPUT_KINDS and not _text_output(payload.get('output')):
+                    unsupported.append({'record': number, 'kind': 'unsupported_tool_output'})
+            elif item_kind not in RESPONSE_KINDS:
                 unsupported.append({'record': number, 'kind': item_kind})
             elif item_kind == 'message':
                 content = payload.get('content')
@@ -195,23 +236,29 @@ def snapshot_from_bytes(raw, *, expected_thread_id, expected_cwd, expected_prefi
     # Count the complete raw snapshot, not only user/assistant text. This is a
     # conservative application-byte accounting that includes context metadata,
     # instructions, schemas, reasoning payloads and audit-only events too.
-    return {'contract': CONTRACT, 'provider_thread_id': expected_thread_id, 'cwd': wanted_cwd,
-            'prefix_bytes': len(raw), 'prefix_sha256': digest(raw), 'record_count': len(records),
-            'messages': messages, 'messages_sha256': digest(messages),
-            'context_records_sha256': digest(contexts), 'context_record_count': len(contexts),
-            'runtime_metadata_sha256': digest(runtime_metadata), 'runtime_metadata_count': len(runtime_metadata),
-            'observable_history_bytes': len(raw), 'provider_context_verified': False,
-            'observable_text_history_bytes': len(raw) - image_encoding_bytes,
-            'observable_image_bytes': image_bytes, 'image_inputs': image_inputs,
-            'image_inputs_sha256': digest(image_inputs),
-            'read_authority': 'none; current-request delivery must be certified separately',
-            'compaction_supported': False,
-            'verified_parent_prefix': ({'prefix_bytes': expected_prefix['prefix_bytes'],
-                                        'prefix_sha256': expected_prefix['prefix_sha256']}
-                                       if expected_prefix is not None else None)}
+    snapshot = {'contract': CONTRACT, 'provider_thread_id': expected_thread_id, 'cwd': wanted_cwd,
+                'prefix_bytes': len(raw), 'prefix_sha256': digest(raw), 'record_count': len(records),
+                'messages': messages, 'messages_sha256': digest(messages),
+                'context_records_sha256': digest(contexts), 'context_record_count': len(contexts),
+                'runtime_metadata_sha256': digest(runtime_metadata), 'runtime_metadata_count': len(runtime_metadata),
+                'observable_history_bytes': len(raw), 'provider_context_verified': False,
+                'observable_text_history_bytes': len(raw) - image_encoding_bytes,
+                'observable_image_bytes': image_bytes, 'image_inputs': image_inputs,
+                'image_inputs_sha256': digest(image_inputs),
+                'read_authority': 'none; current-request delivery must be certified separately',
+                'compaction_supported': False,
+                'verified_parent_prefix': ({'prefix_bytes': expected_prefix['prefix_bytes'],
+                                            'prefix_sha256': expected_prefix['prefix_sha256']}
+                                           if expected_prefix is not None else None)}
+    if settings != native_tools.OFF:
+        # A compaction replaces the history before it, so the text from the last one onward is what remains.
+        snapshot.update(native=settings, compactions=compactions, compaction_supported=True,
+                        observable_text_history_bytes=(len(raw) - history_start
+                                                       - (image_encoding_bytes - encoding_before_start)))
+    return snapshot
 
 
-def read_native_snapshot(path, *, expected_thread_id, expected_cwd, expected_prefix=None):
+def read_native_snapshot(path, *, expected_thread_id, expected_cwd, expected_prefix=None, native=None):
     """Read only the exact owned rollout; reject symlinks and unstable reads."""
     path = Path(path)
     if path.is_symlink() or not path.is_file():
@@ -222,15 +269,16 @@ def read_native_snapshot(path, *, expected_thread_id, expected_cwd, expected_pre
     if (before.st_ino, before.st_size, before.st_mtime_ns) != (after.st_ino, after.st_size, after.st_mtime_ns):
         raise ContextUnavailable('session_prefix_mismatch', 'native rollout changed during snapshot')
     result = snapshot_from_bytes(raw, expected_thread_id=expected_thread_id, expected_cwd=expected_cwd,
-                                 expected_prefix=expected_prefix)
+                                 expected_prefix=expected_prefix, native=native)
     return {**result, 'native_session_path': str(path.resolve())}
 
 
-def find_owned_rollout(codex_home, provider_thread_id, expected_cwd):
+def find_owned_rollout(codex_home, provider_thread_id, expected_cwd, native=None):
     """Locate by exact filename suffix before reading any session contents.
 
     No history scan is performed. Other user's threads are never opened. Both
     common active and archived folders are considered; ambiguity is an error.
+    The rollout is then read under the session's ``native`` settings.
     """
     _identity(provider_thread_id)
     home = Path(codex_home).resolve()
@@ -245,7 +293,7 @@ def find_owned_rollout(codex_home, provider_thread_id, expected_cwd):
             matches.append(candidate)
     if len(matches) != 1:
         raise ContextUnavailable('context_unverifiable', f'expected one owned rollout, found {len(matches)}')
-    read_native_snapshot(matches[0], expected_thread_id=provider_thread_id, expected_cwd=expected_cwd)
+    read_native_snapshot(matches[0], expected_thread_id=provider_thread_id, expected_cwd=expected_cwd, native=native)
     return matches[0]
 
 
@@ -300,8 +348,10 @@ def build_effective_context(packet, *, session_id, owner, snapshot=None,
     new_image_bytes = sum(image['bytes'] for image in submitted_images)
     history_bytes, history_image_bytes = 0, 0
     if snapshot is not None:
-        if (snapshot.get('contract') != CONTRACT or snapshot.get('compaction_supported') is not False
-                or snapshot.get('provider_context_verified') is not False):
+        # Compaction is supported only in a snapshot read under native settings that are on.
+        compaction = snapshot.get('compaction_supported')
+        if (snapshot.get('contract') != CONTRACT or snapshot.get('provider_context_verified') is not False
+                or not (compaction is False or (compaction is True and _switched_on(snapshot.get('native'))))):
             raise ContextUnavailable('context_unverifiable', 'unsupported snapshot contract')
         history_bytes = snapshot.get('observable_text_history_bytes', snapshot.get('observable_history_bytes'))
         history_image_bytes = snapshot.get('observable_image_bytes', 0)

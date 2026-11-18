@@ -820,7 +820,8 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
         if binding and thread_id:
             try:
                 from .session_context import find_owned_rollout
-                native_path = find_owned_rollout(binding['codex_home'], thread_id, binding['workspace'])
+                native_path = find_owned_rollout(binding['codex_home'], thread_id, binding['workspace'],
+                                                 native=settings)
                 native_session_ref = str(native_path)
                 native_session_sha256 = hashlib.sha256(native_path.read_bytes()).hexdigest()
             except (OSError, ValueError) as exc:
