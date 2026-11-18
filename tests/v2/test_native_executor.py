@@ -80,11 +80,12 @@ def config_form(settings):
 class NativeExecutorTests(unittest.TestCase):
     def execute(self, *, settings, rollout=CONFINED_TURN, child=None, stream_usage=STREAM_USAGE, resumed=False,
                 packet_settings=SAME, transport_extra=None, stream_items=(), workspace_files=(), profile=None,
-                finished=True):
+                finished=True, answer=json.dumps(RESPONSE)):
         """Prepare a Lab turn under ``packet_settings`` (``settings`` unless given) and run it through the Controller
         with the executor, which sees ``settings`` in the Effect. Returns the executor's receipt; a ``ValueError``
         it raises is raised here. ``profile(run_root, codex_home, workspace)`` replaces the confined profile.
-        A call that is not ``finished`` was killed before its answer and terminal event (``UNFINISHED``)."""
+        ``answer`` is the text of the turn's last message. A call that is not ``finished`` was killed before its
+        answer and terminal event (``UNFINISHED``)."""
         packet_settings = settings if packet_settings is SAME else packet_settings
         config = {'native_capabilities': {'lab': config_form(packet_settings)}} if packet_settings else {}
         store, controller, runtime = open_run(self, config=config)
@@ -132,7 +133,7 @@ class NativeExecutorTests(unittest.TestCase):
                                                                else invocation))
             events = ([{'type': 'thread.started', 'thread_id': THREAD}, {'type': 'turn.started'}]
                       + [{'type': 'item.completed', 'item': item} for item in stream_items]
-                      + ([{'type': 'item.completed', 'item': {'type': 'agent_message', 'text': json.dumps(RESPONSE)}},
+                      + ([{'type': 'item.completed', 'item': {'type': 'agent_message', 'text': answer}},
                           {'type': 'turn.completed', 'usage': stream_usage}] if finished else []))
             (folder / 'events.jsonl').write_text(''.join(json.dumps(event) + '\n' for event in events))
             with path.open('ab') as stream:
@@ -318,6 +319,28 @@ class NativeExecutorTests(unittest.TestCase):
                 self.assertEqual(receipt['actual_costs']['tokens'], tokens)
                 self.assertEqual(receipt['ledger'], ledger)
                 self.assertFalse(self.effect['accounting_unknown'])
+
+    def test_a_native_turn_that_ends_on_a_progress_note_settles_with_a_parse_error(self):     # Review Focus 1
+        note = 'Running the listing first.'
+        with self.assertRaises(ValueError) as caught:
+            transport._json(note)
+        parse_error = f'{type(caught.exception).__name__}: {caught.exception}'     # as transport.invoke records it
+
+        def listed(profile, cwd):
+            return b'', turn_context('t1', profile, cwd=cwd) + tool_call('c1', EXEC) + usage_row(THREAD, 't1', 't1', 300, 20)
+        command = {'type': 'command_execution', 'command': 'ls', 'exit_code': 0, 'status': 'completed'}
+        receipt = self.execute(settings=TERMINAL, rollout=listed, answer=note, stream_items=[command],
+                               transport_extra={'response': None, 'parse_error': parse_error})
+        self.assertEqual(receipt['status'], 'succeeded')
+        self.assertIsNone(receipt['response'])
+        self.assertEqual(receipt['parse_error'], parse_error)
+        self.assertIsNone(receipt['error'])
+        self.assertTrue(receipt['protocol_valid'])
+        self.assertEqual((receipt['token_source'], receipt['actual_costs']['tokens']), ('ledger', 320))
+        self.assertEqual(self.effect['actual_costs']['tokens'], 320)
+        self.assertEqual(receipt['native_activity']['items'], {'command_execution': 1, 'agent_message': 1})
+        self.assertEqual((receipt['native_activity']['tool_calls'], receipt['native_activity']['provider_requests']),
+                         (1, 1))
 
     def test_a_resumed_native_session_with_tool_records_runs_and_is_read_with_its_settings(self):
         receipt = self.execute(settings=SEARCH, resumed=True, rollout=SEARCHED_TWICE)
