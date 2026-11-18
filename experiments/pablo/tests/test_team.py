@@ -73,6 +73,19 @@ class TeamTests(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 team.native_block(bad, protected=[])
 
+    def test_block_refuses_local_and_challenge_as_role_names_under_any_role(self):
+        role = {'description': 'Proposes a batch.', 'instructions': 'Propose one batch.'}
+        for where in ('lab', 'meta', 'literature'):
+            for name in ('local', 'challenge'):
+                block = {'lab': {'subagents': True}}
+                block.setdefault(where, {})['subagents'] = {'roles': {name: role}}
+                with self.subTest(where=where, name=name), \
+                        self.assertRaisesRegex(ValueError, 'remove them from ' + where + r'\.subagents\.roles'):
+                    team.native_block(block, protected=[])
+        other = team.native_block({'lab': {'subagents': True}, 'meta': {'subagents': {'roles': {'reviewer': role}}}},
+                                  protected=[])
+        self.assertEqual(other['meta']['subagents']['roles'], {'reviewer': role})
+
     def test_block_refuses_what_the_kernel_would_refuse(self):
         for bad in ([], {'lab': {'subagents': True, 'sandbox': 'off'}}, {'lab': {'subagents': 'yes'}},
                     {'lab': {'subagents': {'max_concurrent': 9}}},

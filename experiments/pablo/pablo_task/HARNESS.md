@@ -103,10 +103,10 @@ was scored therefore does not satisfy the backstop.
 **The backstop.** When the counter reaches `challenge_backstop_batches`, the
 next plan's `required_role` is `challenge`; otherwise, and always when the
 backstop is off, it is `null`. A required batch must be a challenge batch whose
-decision says Challenge was dispatched; anything else is refused with "The
-backstop requires a challenge batch proposed by the Challenge sub-agent". When
-nothing is required the Lab may run either role, including a challenge batch of
-its own design.
+decision says Challenge was dispatched and adopted; anything else is refused
+with "The backstop requires a challenge batch proposed by the Challenge
+sub-agent". When nothing is required the Lab may run either role, including a
+challenge batch of its own design.
 
 **The decision.** In a led run `validate_proposal(..., decision=...)` requires
 the Lab's statement about the batch, with exactly three fields:

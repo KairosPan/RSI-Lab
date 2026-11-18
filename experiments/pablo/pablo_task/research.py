@@ -295,6 +295,9 @@ def project_publication(store, run_id, effect, publication):
 
 
 def registered_adapters(*, executable_methods=False, led=False):
+    if led and not executable_methods:
+        raise ValueError('A Lab-led registration needs executable_methods=True: its selection adapter carries '
+                         'the decision and the dispatch check')
     from .lookup import make_adapter as make_lookup
     from pablo_task.literature import make_adapter as make_literature
     score, lookup, literature = adapter.make_adapter(), make_lookup(), make_literature()

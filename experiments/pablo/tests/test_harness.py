@@ -351,6 +351,29 @@ class LedHarnessTests(unittest.TestCase):
         self.assertEqual((bound['required_role'], bound['decision'], bound['turn']), ('challenge', YES, 4))
         self.assertEqual(harness.validate_binding(store, 'test', bound, ['CCc1ccncc1'], store.progress), bound)
 
+    def test_a_required_challenge_must_run_the_adopted_challenge_proposal(self):
+        ignored = {'challenge_dispatched': True, 'challenge_adopted': False,
+                   'reason': 'The Lab started Challenge but ran its own challenge batch.'}
+        batches = []
+        stale_local_batches(batches, 4)
+        store = FakeStore(initial(), batches, config=LED)
+        with self.assertRaisesRegex(ValueError, BACKSTOP):
+            harness.validate_proposal(store, 'test', 'challenge', PYRIDINE, store.progress, decision=ignored)
+        bound = harness.validate_proposal(store, 'test', 'challenge', PYRIDINE, store.progress, decision=YES)
+        with self.assertRaisesRegex(ValueError, BACKSTOP):
+            harness.validate_binding(store, 'test', {**bound, 'decision': ignored}, ['CCc1ccncc1'], store.progress)
+        self.assertEqual(append_led_batch(batches, 'challenge', ['CCc1ccncc1'], [.2], ignored)['required_role'],
+                         'challenge')
+        with self.assertRaisesRegex(ValueError, BACKSTOP):
+            harness.project(initial(), batches, 100, LED)
+        # With nothing required, a dispatched Challenge whose proposal is not run still allows a local batch.
+        store = FakeStore(initial(), [], config=LED)
+        local = harness.validate_proposal(store, 'test', 'local', LEADER, store.progress, decision=ignored)
+        self.assertEqual((local['required_role'], local['decision']), (None, ignored))
+        free = []
+        append_led_batch(free, 'local', ['C' * 14], [.2], ignored)
+        self.assertEqual(harness.project(initial(), free, 100, LED)['decisions'][0]['decision'], ignored)
+
     def test_lab_may_run_its_own_challenge_when_none_is_required(self):
         own = {'challenge_dispatched': False, 'challenge_adopted': False, 'reason': 'Trying the amide series.'}
         store = FakeStore(initial(), [], config=LED)

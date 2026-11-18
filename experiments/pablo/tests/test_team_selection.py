@@ -169,6 +169,17 @@ class TeamSelectionTests(unittest.TestCase):
             effect = lab_call(other, {'response': {}, 'child_threads': [{'thread_id': 't1', 'role': 'challenge'}]})
             self.assertIsNone(methods.admit_request(other, RUN, LOCAL, effect))
 
+    def test_only_the_lab_requests_a_led_selection(self):
+        store = FakeStore()
+        record = {'response': {}, 'child_threads': [{'thread_id': 't1', 'role': 'challenge'}]}
+        lab = lab_call(store, record)
+        meta = {**lab, 'id': 'meta-call', 'kind': 'meta'}
+        with self.assertRaisesRegex(ValueError, 'In a team run only the Lab requests a selection'):
+            methods.admit_request(store, RUN, {**INPUTS, 'decision': YES}, meta)
+        self.assertIsNone(methods.admit_request(store, RUN, {**INPUTS, 'decision': YES}, lab))
+        for other in (FakeStore(harness.DEFAULT_CONFIG), FakeStore(None)):
+            self.assertIsNone(methods.admit_request(other, RUN, LOCAL, {**lab_call(other, record), 'kind': 'meta'}))
+
     def test_only_a_led_registration_carries_the_request_hook(self):
         plain = research.registered_adapters(executable_methods=True)
         led = research.registered_adapters(executable_methods=True, led=True)
@@ -184,6 +195,12 @@ class TeamSelectionTests(unittest.TestCase):
         self.assertEqual([a.descriptor() for a in led_others], [a.descriptor() for a in others])
         self.assertEqual([a.descriptor() for a in research.registered_adapters()],
                          [a.descriptor() for a in others])
+
+    def test_a_led_registration_needs_the_executable_selection(self):
+        with self.assertRaisesRegex(ValueError, 'executable_methods'):
+            research.registered_adapters(led=True)
+        with self.assertRaisesRegex(ValueError, 'executable_methods'):
+            research.registered_adapters(executable_methods=False, led=True)
 
     def test_only_a_led_contract_shows_the_decision(self):
         fixed = sorted(['run_root', 'run_id', 'proposal_role', 'anchor_parent', 'candidates', 'select_count',

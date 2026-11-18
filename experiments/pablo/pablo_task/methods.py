@@ -217,13 +217,16 @@ def admit_work(store, run_id, inputs):
 
 
 def admit_request(store, run_id, inputs, effect):
-    """In a Lab-led run, challenge_dispatched must match the record of the call that made the request.
+    """In a Lab-led run, only a Lab call may request a selection, and its challenge_dispatched must match
+    the record of that call.
 
     Registered only for led runs. A stored result without child_threads records no
     sub-agent. The claim is checked once, here; the settled plan then carries it.
     """
     if not _led(store, run_id):
         return
+    if effect.get('kind') != 'lab':
+        raise ValueError('In a team run only the Lab requests a selection')
     from . import harness
     record = json.loads(store.read_blob(effect['result_ref']))
     harness.check_dispatch(inputs.get('decision'), record.get('child_threads'))

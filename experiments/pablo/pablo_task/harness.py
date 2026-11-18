@@ -201,10 +201,15 @@ def check_dispatch(decision, child_threads):
 
 
 def _led_choice(state, proposal_role, decision):
-    """The Lab's role and decision, held to the backstop of the state they are admitted under."""
+    """The Lab's role and decision, held to the backstop of the state they are admitted under.
+
+    A required challenge batch must be the Challenge sub-agent's proposal: a
+    challenge batch whose decision says Challenge was dispatched and adopted.
+    """
     decision = validate_decision(decision, proposal_role)
     if state['required_role'] == 'challenge' and not (proposal_role == 'challenge'
-                                                      and decision['challenge_dispatched']):
+                                                      and decision['challenge_dispatched']
+                                                      and decision['challenge_adopted']):
         raise ValueError(BACKSTOP_REFUSAL)
     return decision
 

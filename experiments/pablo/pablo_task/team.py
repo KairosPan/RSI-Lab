@@ -60,11 +60,12 @@ RUN_STORE = 'ledger.sqlite3'
 def native_block(block, *, protected):
     """The run config's native_capabilities block made from the operator's file.
 
-    Refuses a file in which ``lab.subagents`` is off or missing, one whose
-    ``lab.subagents.roles`` names ``local`` or ``challenge`` (the host declares
-    those with its own text), anything the kernel would refuse, and any role's
-    readable root for which ``exposes_objective`` gives a reason. The file's
-    other settings and roles are kept; the given block is not changed.
+    Refuses a file in which ``lab.subagents`` is off or missing, one in which
+    any role's ``subagents.roles`` names ``local`` or ``challenge`` (the host
+    declares those for the Lab with its own text, and the names are reserved
+    for every role), anything the kernel would refuse, and any role's readable
+    root for which ``exposes_objective`` gives a reason. The file's other
+    settings and roles are kept; the given block is not changed.
     """
     if type(block) is not dict:
         raise ValueError('The native capabilities file must hold a JSON object')
@@ -77,9 +78,12 @@ def native_block(block, *, protected):
     own = {} if subagents is True else subagents.get('roles', {})
     if type(own) is not dict:
         raise ValueError('native_capabilities.lab.subagents.roles must be an object')
-    if set(own) & set(ROLES):
-        raise ValueError('The host declares the local and challenge roles itself; '
-                         'remove them from lab.subagents.roles')
+    for role, entry in block.items():
+        switch = entry.get('subagents') if type(entry) is dict else None
+        declared = switch.get('roles') if type(switch) is dict else None
+        if type(declared) is dict and set(declared) & set(ROLES):
+            raise ValueError('The host declares the local and challenge roles itself; '
+                             'remove them from ' + str(role) + '.subagents.roles')
     result = copy.deepcopy(block)
     # The default is written out so that the frozen run does not follow a later change of the kernel's default.
     current = {'max_concurrent': native.DEFAULT_MAX_CONCURRENT} if subagents is True else copy.deepcopy(subagents)
