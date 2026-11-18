@@ -439,6 +439,21 @@ class NativeTransportTests(unittest.TestCase):
     def test_a_call_that_ends_on_its_own_reports_descendants_stopped(self):
         self.assertTrue(self.invoke(frames(), session=self.session())['descendants_stopped'])
 
+    def test_an_unreadable_process_table_still_kills_codex_and_reports_false(self):
+        real = transport._POPEN
+        failures = {'ps cannot start': OSError('ps unavailable'),
+                    'ps exits nonzero': lambda command, **kwargs: real([sys.executable, '-c', 'raise SystemExit(3)'],
+                                                                       **kwargs)}
+        for case, failure in failures.items():
+            with self.subTest(case=case):
+                codex = self.real_popen([sys.executable, '-c', 'import time;time.sleep(60)'], start_new_session=True)
+                self.addCleanup(codex.wait)
+                self.addCleanup(codex.kill)          # Runs first: no-op once the process has been reaped.
+                with patch.object(transport, '_POPEN', side_effect=failure) as ps:
+                    self.assertFalse(transport._terminate(codex))
+                ps.assert_called_once()
+                self.assertEqual(codex.wait(timeout=5), -signal.SIGKILL)
+
 
 if __name__ == '__main__':
     unittest.main()
