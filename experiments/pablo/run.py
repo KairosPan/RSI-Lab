@@ -106,6 +106,8 @@ def make_runtime(store, run_id):
     if config.get('research_architecture') == ARCHITECTURE and (
             not enhanced or config.get('batch_interpretation_capabilities') != [adapter.ADAPTER_ID]):
         raise ValueError('PABLO v3 requires the local/challenge Harness and batch interpretation barrier')
+    if config.get('research_architecture') == ARCHITECTURE and led:
+        raise ValueError('PABLO v3 requires the fixed-schedule Harness, not the Lab-led one')
     if config.get('research_architecture') == team.ARCHITECTURE:
         if (not led or config.get('batch_interpretation_capabilities') != [adapter.ADAPTER_ID]
                 or not set(team.ROLES) <= team.lab_roles(config)):
@@ -591,13 +593,15 @@ def mark_final_reviews(runtime):
 
 def research_report(runtime):
     store, run_id = runtime.store, runtime.run_id
-    return {'features': runtime.config['research_features'],
+    report = {'features': runtime.config['research_features'],
             'scientific_review': runtime.scientific_memory.review_report(include_historical=False),
             'pending_improvements': runtime.pending_improvements(),
             'registrations': [r for r in store.list(run_id, 'registration')
                               if any(word in r.get('kind', '') for word in ['scientific', 'improvement', 'recommendation'])],
             'literature_effects': [e['id'] for e in store.list(run_id, 'effect') if e['kind'] == 'literature_search'],
             'lookup_effects': [e['id'] for e in store.list(run_id, 'effect') if e['kind'] == 'pablo_identity_lookup']}
+    # A run whose config states whether it is blind says so here too, as result.json does.
+    return legacy_host.note_not_blind(runtime, report)
 
 
 def finalization_problem(runtime):
@@ -761,8 +765,8 @@ def main():
                         help='Team run: batches that neither beat the best score nor were challenge batches before a '
                              'challenge batch is required, 1..100 or off (default: 4)')
     parser.add_argument('--rebuild-history-bytes', type=int,
-                        help='Team run: native history size at which an idle session is rebuilt, at least 262144 '
-                             '(default: 4194304)')
+                        help='Team run: native history size at which an idle session is rebuilt, 262144..3145728 '
+                             '(default: 3145728)')
     parser.add_argument('--prepare-only', action='store_true')
     parser.add_argument('--resume', action='store_true')
     args = parser.parse_args()
@@ -777,8 +781,10 @@ def main():
                 parser.error(option + ' requires --team')
     elif args.native_capabilities is None:
         parser.error('--team requires --native-capabilities')
-    if args.rebuild_history_bytes is not None and args.rebuild_history_bytes < team.MIN_REBUILD_HISTORY_BYTES:
-        parser.error('--rebuild-history-bytes must be at least ' + str(team.MIN_REBUILD_HISTORY_BYTES))
+    if args.rebuild_history_bytes is not None and not (
+            team.MIN_REBUILD_HISTORY_BYTES <= args.rebuild_history_bytes <= team.REBUILD_HISTORY_BYTES):
+        parser.error('--rebuild-history-bytes must be between ' + str(team.MIN_REBUILD_HISTORY_BYTES) + ' and '
+                     + str(team.REBUILD_HISTORY_BYTES))
     if args.team:
         # Not given is the default; off is stored as None.
         if args.challenge_backstop_batches is None:

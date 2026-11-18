@@ -15,9 +15,9 @@
 | `--team` | 关 | 准备团队运行 |
 | `--native-capabilities FILE` | 无 | JSON 文件，内容是内核读取的 `native_capabilities` 块；`--team` 必须提供，没有 `--team` 时拒绝 |
 | `--challenge-backstop-batches N` | 4 | 后备规则的批次数，1 到 100，或 `off` 关闭；没有 `--team` 时拒绝 |
-| `--rebuild-history-bytes N` | 4,194,304 | 空闲会话的原生历史达到这个大小时重建，至少 262,144；没有 `--team` 时拒绝 |
+| `--rebuild-history-bytes N` | 3,145,728 | 空闲会话的原生历史达到这个大小时重建，262,144 到 3,145,728；没有 `--team` 时拒绝 |
 
-这四个选项只用于新的准备，`--resume` 时一律拒绝。团队运行的每次请求上下文上限 `max_effective_context_bytes` 固定为 4,194,304 字节。
+这四个选项只用于新的准备，`--resume` 时一律拒绝。团队运行的每次请求上下文上限 `max_effective_context_bytes` 固定为 4,194,304 字节。内核在历史加上本次请求超过这个上限时拒绝请求，所以重建大小的默认值和最大值都是这个上限减去宿主允许的最大请求（`--max-input-bytes` 的上限 1,048,576），即 3,145,728：会话在下一次请求可能因大小被拒绝之前先被重建。
 
 文件中 `lab.subagents` 必须打开（`true` 或对象），不能自己声明 `local` 或 `challenge`：这两个角色由宿主用自己的文字加入。文件里的其他设置和其他角色保留；`subagents` 写成 `true` 时，冻结配置写明内核当前的默认并发数 3。
 
@@ -68,13 +68,15 @@ python experiments/pablo/run.py \
 
 选点请求被接收时，`challenge_dispatched` 与发出这个请求的 Lab 调用的记录比对：为 true 时，该调用的 `child_threads` 中至少要有一个角色为 `challenge` 的子代理（本次启动或再次联系都算）；为 false 时一个都不能有；读不出角色的子代理不算。不一致时请求被拒绝，Lab 像看到其他被拒的工具请求一样看到拒绝原因。操作者直接运行工具（内核命令 `adapter-run`，即 `Runtime.execute_adapter`）不经过这项比对，只检查 `decision` 的格式和后备规则。
 
+这项比对看不到 rollout 读不到的子代理：这样的子代理不在调用记录的 `child_threads` 中（这次调用的用量随之成为未知），所以即使 Lab 确实派出了 Challenge，它在这次调用中如实写出的 `challenge_dispatched: true` 也会被拒绝。
+
 ## 每次调用记录的子代理信息
 
 团队运行的每次 Lab 调用记录中，`child_threads` 列出能读到的每个子代理：`thread_id`、`agent_path`、`role`、`started_in_call`（本次调用启动，还是联系了更早启动的子代理）、`forked_history`（是否带着 Lab 的历史启动）、`model`、`effort`、请求数和 token 计数，以及它在这次调用中的网络搜索查询（最多 20 条，每条截到 200 个字符，其余计入 `searches_omitted`）。读不到的子代理使这次调用的用量成为未知，并写明原因。
 
 没有用声明角色启动的帮手，记录为 Codex 给它的角色；Codex 没有给出时为 null。
 
-Lab 可以再次联系更早启动的子代理，而不是新开一个；那个子代理记得它之前的工作。这是允许并记录的，不阻止。会话重建会结束它的全部子代理：重建在原生历史达到 `prospective_rebuild_history_bytes` 时发生，所以这个值也是一个实验臂的组成部分。
+Lab 可以再次联系更早启动的子代理，而不是新开一个；那个子代理记得它之前的工作。这是允许并记录的，不阻止。会话重建会结束它的全部子代理：重建在步骤之间的边界进行，对象是 rollout 文件已达到 `prospective_rebuild_history_bytes` 的空闲会话，所以这个值也是一个实验臂的组成部分。
 
 目标文本请 Lab 用 `fork_turns` `none` 启动 Challenge，并把它需要的 anchor、约束和结果交给它；是否这样做由 `forked_history` 记录，不强制。
 
@@ -106,13 +108,15 @@ Lab 可以再次联系更早启动的子代理，而不是新开一个；那个�
 
 ## 宿主检查
 
-`make_runtime` 拒绝缺少 Lab-led Harness、批次解释屏障（`batch_interpretation_capabilities=["pablo.evaluate"]`）、`pablo_team_protected_roots`，或 Lab 角色中没有 `local` 和 `challenge` 的团队配置，并重新检查可读目录（见上一节）。Lab-led 运行注册带 `decision` 契约和派出检查的选点工具；其他运行的工具注册不变。
+`make_runtime` 拒绝缺少 Lab-led Harness、批次解释屏障（`batch_interpretation_capabilities=["pablo.evaluate"]`）、`pablo_team_protected_roots`，或 Lab 角色中没有 `local` 和 `challenge` 的团队配置，并重新检查可读目录（见上一节）。它也拒绝 Harness 为 Lab-led 版本的 v3 架构配置。Lab-led 运行注册带 `decision` 契约和派出检查的选点工具；其他运行的工具注册不变。
+
+这些检查只在宿主自己的 `make_runtime` 中进行。在它之外构造的 Runtime，例如内核命令行自己的步进命令或 `adapter-run`，既没有派出检查，也没有启动时对可读目录的重新检查。
 
 ## 验证
 
 全部是离线测试，使用临时目录和合成数据，没有调用模型、评分器或网络：
 
-- `tests/test_team.py`：角色文字、原生设置块的拒绝条件、可读目录检查的每个拒绝原因、按角色组合的非盲陈述、团队设置，以及一个端到端测试：在真实 Runtime 中注册 Lab-led 工具，用脚本化的 Lab 回答提出声称已派出 Challenge 的选点请求；调用记录中没有 `challenge` 子代理时被拒绝，有时被接收。
-- `tests/test_host_team_preflight.py`：`--team` 准备冻结的架构、Harness、设置块、上限和 `pablo_not_blind`；各选项的误用都是参数错误；不带 `--team` 的准备不变；父运行是团队运行时，不带 `--team` 的准备被拒绝，`--team` 准备成功；`make_runtime` 拒绝不完整的团队配置；`--prior-attempt-root` 受保护；每次启动重新检查可读目录，准备后变得暴露的目录使启动被拒绝；两个记录读取点传入的原生设置。
+- `tests/test_team.py`：角色文字、原生设置块的拒绝条件、可读目录检查的每个拒绝原因、按角色组合的非盲陈述、团队设置，以及一个端到端测试：在真实 Runtime 中注册 Lab-led 工具，用脚本化的 Lab 回答提出声称已派出 Challenge 的选点请求；调用记录中没有 `challenge` 子代理时被拒绝，有时被接收；另一个端到端测试在真实 Runtime 中走完一个 Lab-led 批次：Lab 的选点请求、选点执行、Lab 的评分请求、评分执行（分数是合成值），然后 `harness.context` 重放这个批次的角色、`decision` 和计数。
+- `tests/test_host_team_preflight.py`：`--team` 准备冻结的架构、Harness、设置块、上限和 `pablo_not_blind`；各选项的误用都是参数错误；不带 `--team` 的准备不变；父运行是团队运行时，不带 `--team` 的准备被拒绝，`--team` 准备成功；`make_runtime` 拒绝不完整的团队配置和 Harness 为 Lab-led 版本的 v3 配置；`research-report.json` 带有 `not_blind`；`--prior-attempt-root` 受保护；每次启动重新检查可读目录，准备后变得暴露的目录使启动被拒绝；两个记录读取点传入的原生设置。
 
 这些测试证明准备和检查的接线成立，不证明团队方式能提高分数；团队运行至今没有执行过。

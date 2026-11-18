@@ -211,6 +211,9 @@ class TeamTests(unittest.TestCase):
             at = found + len(word)
         self.assertNotIn('\n', team.GOAL)
         self.assertNotIn('increases challenge frequency', team.GOAL)
+        # The harness's anchors and batch allowance still bind the batch the Lab chooses.
+        self.assertIn(' Obey constraints.adapter_context["pablo.evaluate"].harness for the eligible observed anchors '
+                      'of the chosen role and for the batch allowance. ', team.GOAL)
 
     def test_preparation_holds_every_team_setting(self):
         block = {'lab': {'subagents': True, 'web_search': True}}
@@ -219,7 +222,7 @@ class TeamTests(unittest.TestCase):
             'research_architecture': 'pablo_research_pr4_team_v1',
             'pablo_harness': harness.LED_DEFAULT_CONFIG,
             'native_capabilities': team.native_block(block, protected=[]),
-            'max_effective_context_bytes': 4194304, 'prospective_rebuild_history_bytes': 4194304,
+            'max_effective_context_bytes': 4194304, 'prospective_rebuild_history_bytes': 3145728,
             'pablo_not_blind': team.not_blind(block), 'pablo_team_protected_roots': []})
         self.assertEqual(harness.configuration(settings)['version'], harness.LED_VERSION)
         listed = team.preparation(block, protected=[self.base / 'a' / '..' / 'b', self.base / 'b', 'relative'])
@@ -259,7 +262,8 @@ class TeamTests(unittest.TestCase):
 
 @unittest.skipUnless(importlib.util.find_spec('rdkit'), 'Optional PABLO RDKit dependency required')
 class LedRequestTests(unittest.TestCase):
-    """End to end: the led selection adapter in a real Runtime checks the Lab's claim against the call record."""
+    """End to end: the led selection adapter in a real Runtime checks the Lab's claim against the call record,
+    and one led batch goes through selection, scoring (a synthetic score) and replay."""
     def setUp(self):
         from pablo_task import oracle, research
         from pablo_task.literature import adapter as literature
@@ -327,6 +331,52 @@ class LedRequestTests(unittest.TestCase):
         [selection] = selections
         self.assertEqual(selection['status'], 'ready')
         self.assertEqual(json.loads(selection['inputs']['inputs_json'])['decision'], inputs['decision'])
+        self.store.verify_history(self.run)
+
+    def test_one_led_batch_is_selected_scored_and_replayed(self):
+        """The Lab's selection request, the selection, the Lab's scoring request and the scoring, then replay."""
+        from experiments.pablo.tests.test_harness_runtime import FakeModel
+        from pablo_task import adapter, methods, oracle
+        # The scorer's binding needs the scoring package, which this machine may lack; the score is synthetic.
+        with patch.object(oracle, 'fingerprint', return_value='fixture-fingerprint'):
+            outcome, [selection_work], inputs = self.request([{'thread_id': 'thread-challenge', 'role': 'challenge'}])
+            self.assertEqual(outcome['proposal']['status'], 'applied', outcome['proposal'])
+            selected = self.runtime.execute_adapter(methods.ADAPTER_ID, inputs, trigger_id=selection_work['id'],
+                                                    work_id=selection_work['id'])
+            self.assertEqual(selected['effect']['status'], 'succeeded', selected)
+            plan = selected['result']
+            self.assertEqual(plan['harness_binding']['decision'], inputs['decision'])
+            scoring = {'run_root': str(self.store.root), 'run_id': self.run, 'candidates': plan['selected_candidates'],
+                       'selection_effect_id': selected['effect']['id'], 'selection_plan_id': plan['plan_id'],
+                       'proposal_role': plan['proposal_role'], 'anchor_parent': plan['anchor_parent']}
+            lab = next(w for w in self.runtime.controller.ready(self.run) if w['kind'] == 'lab')
+            model = FakeModel('request_diagnostic', {'capability_id': adapter.ADAPTER_ID, 'capability_version': '1.0',
+                                                     'inputs_json': json.dumps(scoring)})
+            requested = self.runtime.run_lab(lab['id'], model, {'model_calls': 1, 'tokens': 10, 'wall_seconds': 1})
+            self.assertEqual(requested['proposal']['status'], 'applied', requested['proposal'])
+            score_work = next(w for w in self.runtime.controller.ready(self.run) if w['kind'] == 'diagnostic'
+                              and w['inputs']['capability_id'] == adapter.ADAPTER_ID)
+            with patch.object(oracle, 'score', return_value=.6) as synthetic:
+                scored = self.runtime.execute_adapter(adapter.ADAPTER_ID, scoring, trigger_id=score_work['id'],
+                                                      work_id=score_work['id'])
+            self.assertEqual(scored['effect']['status'], 'succeeded', scored)
+            self.assertEqual(synthetic.call_count, 2)
+            self.assertEqual(scored['result']['harness_binding'], plan['harness_binding'])
+            replayed = harness.context(self.store, self.run)
+        # Nothing was required; the challenge batch scored two candidates below the best 0.8, so it did not
+        # improve but disarms the backstop: the counter is 0 while the stale batch count is 1.
+        self.assertEqual(replayed['decisions'], [{'turn': 0, 'proposal_role': 'challenge', 'required': False,
+                                                  'decision': inputs['decision'], 'improved': False,
+                                                  'accepted_scores': 2}])
+        state = replayed['next_plan']
+        self.assertEqual((state['turn'], state['completed_evaluations'], state['completed_effect_ids']),
+                         (1, 2, [scored['effect']['id']]))
+        self.assertEqual((state['unchallenged_stale_batches'], state['stale_batches'], state['required_role']),
+                         (0, 1, None))
+        self.assertEqual(replayed['totals'], {'lab_chosen_challenge_batches': 1, 'backstop_challenge_batches': 0,
+                                              'dispatched_not_adopted_batches': 0})
+        self.assertEqual((state['role_credits']['challenge']['batches'],
+                          state['role_credits']['challenge']['accepted_scores']), (1, 2))
         self.store.verify_history(self.run)
 
 

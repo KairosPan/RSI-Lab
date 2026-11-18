@@ -37,6 +37,10 @@ is required with `--team` and must switch on `lab.subagents`. Readable roots
 that could expose the hidden objective are refused at preparation and checked
 again at every host start, and a run with web search on for any role says in
 its config and reports that it is not a blind run.
+A team run's per-request context limit is 4,194,304 bytes, and an idle session
+is rebuilt once its native history reaches `--rebuild-history-bytes` (262,144
+to 3,145,728, default 3,145,728: the limit less the largest request the host
+allows), before its next request could be refused for size.
 Sub-agent tokens are charged to the Lab's turn, so raise the token budget with
 `--additional-tokens`. None of these options is accepted with `--resume`.
 Without `--team`, preparation is unchanged, except that a parent which was itself

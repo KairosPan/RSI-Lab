@@ -16,9 +16,12 @@ from . import harness
 
 ARCHITECTURE = 'pablo_research_pr4_team_v1'
 # A native turn's history is much larger than a plain one, so a team run raises the per-request
-# context limit and rebuilds an idle session at the same size, before its next request could be refused.
+# context limit. The kernel refuses a request whose history plus request exceeds that limit, so an idle
+# session is rebuilt once its history reaches the limit less the largest request the host allows (1048576,
+# the top of --max-input-bytes), before its next request could be refused for size. This is the default
+# and the largest value --rebuild-history-bytes accepts.
 MAX_EFFECTIVE_CONTEXT_BYTES = 4194304
-REBUILD_HISTORY_BYTES = 4194304
+REBUILD_HISTORY_BYTES = MAX_EFFECTIVE_CONTEXT_BYTES - 1048576
 MIN_REBUILD_HISTORY_BYTES = 262144
 _CLOSING = (' You are a sub-agent of the Lab. You cannot score or select molecules. Return one anchor from the '
             'eligible anchors you were given, a pool of candidate SMILES, the hypothesis, and the result that '
@@ -37,6 +40,8 @@ GOAL = (
     'in the decision of its pablo.select_candidates request: challenge_dispatched (whether this Lab call started '
     "or addressed the Challenge sub-agent), challenge_adopted (whether the batch runs Challenge's proposal) and "
     'reason (one line of at most 300 characters). '
+    'Obey constraints.adapter_context["pablo.evaluate"].harness for the eligible observed anchors of the chosen '
+    'role and for the batch allowance. '
     'When constraints.adapter_context["pablo.evaluate"].harness.next_plan.required_role is challenge, the Lab '
     'must dispatch Challenge and run its proposal as a challenge batch. '
     'Start Challenge with fork_turns none and pass it the eligible anchors, candidate constraints and observed '

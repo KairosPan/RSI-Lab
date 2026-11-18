@@ -60,7 +60,7 @@ class HostTeamPreflightTests(unittest.TestCase):
         self.assertEqual(config['native_capabilities'], team.native_block(given, protected=[]))
         self.assertEqual(config['native_capabilities']['lab']['subagents']['roles'], team.ROLES)
         self.assertEqual(config['max_effective_context_bytes'], 4194304)
-        self.assertEqual(config['prospective_rebuild_history_bytes'], 4194304)
+        self.assertEqual(config['prospective_rebuild_history_bytes'], 3145728)
         self.assertEqual(config['pablo_not_blind'], team.NOT_BLIND)
         self.assertEqual(config['pablo_team_protected_roots'],
                          [str(host.REPO), str(self.base / 'source'), str(self.base / 'parent'), str(args.root)])
@@ -89,6 +89,9 @@ class HostTeamPreflightTests(unittest.TestCase):
         lab = next(w for w in runtime.controller.ready('child') if w['kind'] == 'lab')
         _, _, task, _ = runtime._context(lab, read_only=True)
         self.assertEqual(task['constraints']['native_capabilities'], native.capabilities(config)['lab'])
+        # Preparation writes no progress report. The host's snapshot, taken at every step of a started run, returns
+        # the statement and writes it to the progress.json it creates.
+        self.assertFalse((args.root / 'progress.json').exists())
         self.assertEqual(host.legacy_host.snapshot(runtime, 'prepared')['not_blind'], team.NOT_BLIND)
         self.assertEqual(json.loads((args.root / 'progress.json').read_text())['not_blind'], team.NOT_BLIND)
         self.assert_no_execution(store, 'child')
@@ -154,7 +157,7 @@ class HostTeamPreflightTests(unittest.TestCase):
         self.assertEqual(config['pablo_harness'], harness.LED_DEFAULT_CONFIG)
         self.assertEqual(config['native_capabilities'], team.native_block(given, protected=[]))
         self.assertIsNone(config['pablo_not_blind'])
-        self.assertEqual(config['prospective_rebuild_history_bytes'], 4194304)
+        self.assertEqual(config['prospective_rebuild_history_bytes'], 3145728)
         self.assertEqual(config['max_effective_context_bytes'], 4194304)
         self.assertEqual(config['research_policy'], research_policy(team=True))
         self.assertEqual(config['goal'].count(team.GOAL), 1)
@@ -202,7 +205,8 @@ class HostTeamPreflightTests(unittest.TestCase):
                    ('--challenge-backstop-batches', 'off'), ('--rebuild-history-bytes', '262144'),
                    team_run + ('--challenge-backstop-batches', '0'), team_run + ('--challenge-backstop-batches', '101'),
                    team_run + ('--challenge-backstop-batches', 'never'),
-                   team_run + ('--rebuild-history-bytes', '262143')]
+                   team_run + ('--rebuild-history-bytes', '262143'),
+                   team_run + ('--rebuild-history-bytes', '3145729')]
         for options in misuses:
             with self.subTest(options=options):
                 code, prepare, drive = self.main(*options)
@@ -210,7 +214,7 @@ class HostTeamPreflightTests(unittest.TestCase):
                 prepare.assert_not_called()
                 drive.assert_not_called()
         for options in (('--team',), ('--native-capabilities', path), ('--challenge-backstop-batches', 'off'),
-                        ('--rebuild-history-bytes', '4194304'), team_run):
+                        ('--rebuild-history-bytes', '3145728'), team_run):
             with self.subTest(resume=options):
                 code, prepare, drive = self.main(*options, resume=True)
                 self.assertEqual(code, 2)
@@ -222,7 +226,8 @@ class HostTeamPreflightTests(unittest.TestCase):
         for options, backstop, rebuild in ((('--challenge-backstop-batches', 'off'), None, None),
                                            ((), 4, None),
                                            (('--challenge-backstop-batches', '7', '--rebuild-history-bytes',
-                                             '262144'), 7, 262144)):
+                                             '262144'), 7, 262144),
+                                           (('--rebuild-history-bytes', '3145728'), 4, 3145728)):
             with self.subTest(options=options):
                 code, prepare, _ = self.main('--team', '--native-capabilities', path, *options)
                 self.assertEqual(code, 0)
@@ -252,6 +257,24 @@ class HostTeamPreflightTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'team run requires|team run needs pablo_team_protected_roots'):
                     host.make_runtime(store, 'run')
                 self.assert_no_execution(store)
+
+    def test_make_runtime_refuses_a_v3_config_with_the_led_harness(self):
+        v3 = {'research_architecture': host.ARCHITECTURE, 'batch_interpretation_capabilities': [adapter.ADAPTER_ID]}
+        host.make_runtime(self.open_run({**v3, 'pablo_harness': copy.deepcopy(harness.DEFAULT_CONFIG)}), 'run')
+        store = self.open_run({**v3, 'pablo_harness': copy.deepcopy(harness.LED_DEFAULT_CONFIG)})
+        with self.assertRaisesRegex(ValueError, 'PABLO v3 requires the fixed-schedule Harness, not the Lab-led one'):
+            host.make_runtime(store, 'run')
+        self.assert_no_execution(store)
+
+    def test_the_research_report_carries_the_not_blind_statement_of_a_run_that_has_one(self):
+        keys = {'features', 'scientific_review', 'pending_improvements', 'registrations', 'literature_effects',
+                'lookup_effects'}
+        for value in (team.NOT_BLIND, None):
+            with self.subTest(not_blind=value):
+                report = host.research_report(host.make_runtime(self.team_store({'pablo_not_blind': value}), 'run'))
+                self.assertEqual(set(report), keys | {'not_blind'})
+                self.assertEqual(report['not_blind'], value)
+        self.assertEqual(set(host.research_report(host.make_runtime(self.open_run(), 'run'))), keys)
 
     def test_every_start_checks_the_readable_roots_again(self):
         readable = self.base / 'readable'
