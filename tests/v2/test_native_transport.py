@@ -67,13 +67,14 @@ class NativeTransportTests(unittest.TestCase):
         return {'session_id': 's', 'workspace': str(self.workspace), 'provider_thread_id': None,
                 'codex_home': str(self.root / 'codex-home')}
 
-    def wire(self, events):
-        return ''.join(json.dumps(event) + '\n' for event in events)
+    def wire(self, events, end='\n'):
+        """Event lines as Codex writes them: non-ASCII text is not escaped."""
+        return ''.join(json.dumps(event, ensure_ascii=False) + end for event in events)
 
-    def invoke(self, events=None, *, native=None, run_root=None, folder=None):
+    def invoke(self, events=None, *, native=None, run_root=None, folder=None, end='\n'):
         """Run ``transport.invoke`` against a local process that writes ``events`` (default ``frames()``)."""
-        wire = self.wire(frames() if events is None else events)
-        code = 'import sys; sys.stdin.read(); sys.stdout.write(' + repr(wire) + '); sys.stdout.flush()'
+        wire = self.wire(frames() if events is None else events, end).encode()
+        code = 'import sys; sys.stdin.read(); sys.stdout.buffer.write(' + repr(wire) + '); sys.stdout.buffer.flush()'
 
         def fake(command, **kwargs):
             self.commands.append(command)
@@ -270,7 +271,7 @@ class NativeTransportTests(unittest.TestCase):
         """A call folder written before journals: ``events.jsonl`` and, unless ``None``, ``invocation.json`` text."""
         folder = self.root / name
         folder.mkdir()
-        (folder / 'events.jsonl').write_text(self.wire(events))
+        (folder / 'events.jsonl').write_bytes(self.wire(events).encode())
         if invocation is not None:
             (folder / 'invocation.json').write_text(invocation)
         return folder
@@ -378,6 +379,35 @@ class NativeTransportTests(unittest.TestCase):
         self.assertEqual(activity['omitted'], 9 + 1 + 3)
         malformed = transport.stream_activity(self.archive(stream[-1:], name='malformed'))
         self.assertEqual(malformed['commands'], [{'command': None, 'exit_code': None, 'status': None}])
+
+    def test_line_separators_in_command_output_do_not_split_an_event(self):
+        output = 'a b c\x85d\n'
+        stream = [*NATIVE_STREAM[:4], {'type': 'item.completed', 'item': {**NATIVE_STREAM[4]['item'], 'aggregated_output': output}},
+                  *NATIVE_STREAM[5:]]
+        self.assertTrue(all(character in self.wire(stream) for character in '  \x85'))
+        raw, usage, complete, errors = transport._events(self.wire(stream), native.stream_items(TERMINAL_AND_SEARCH))
+        self.assertEqual((raw, complete, errors), ('{"ok":true}', True, []))
+        result = self.invoke(stream, native=TERMINAL_AND_SEARCH)
+        self.assertEqual((result['response'], result['error'], result['protocol_valid']), ({'ok': True}, None, True))
+        self.assertEqual(transport.stream_activity(self.folder), NATIVE_ACTIVITY)
+
+    def test_a_line_separator_in_the_only_message_is_kept_when_everything_is_off(self):
+        text = '{"note": "a b"}'
+        self.assertEqual(transport._events(self.wire(frames(text))),
+                         (text, {'input_tokens': 20, 'output_tokens': 5}, True, []))
+        result = self.invoke(frames(text))
+        self.assertEqual((result['response'], result['error']), ({'note': 'a b'}, None))
+        self.assertEqual((self.folder / 'raw_response.txt').read_bytes().decode(), text)
+
+    def test_crlf_line_ends_still_parse_in_both_modes(self):
+        for name, events, settings in (('off', frames(), None), ('on', NATIVE_STREAM, TERMINAL_AND_SEARCH)):
+            with self.subTest(mode=name):
+                raw, usage, complete, errors = transport._events(self.wire(events, '\r\n'), native.stream_items(settings))
+                self.assertEqual((raw, complete, errors), ('{"ok":true}', True, []))
+                folder = self.root / 'calls' / ('crlf-' + name)
+                result = self.invoke(events, native=settings, folder=folder, end='\r\n')
+                self.assertEqual((result['response'], result['error'], result['protocol_valid']), ({'ok': True}, None, True))
+        self.assertEqual(transport.stream_activity(self.root / 'calls' / 'crlf-on'), NATIVE_ACTIVITY)
 
 
 if __name__ == '__main__':

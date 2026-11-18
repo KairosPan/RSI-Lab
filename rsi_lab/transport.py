@@ -82,6 +82,10 @@ def _events(stdout, allowed_items=frozenset()):
     ``agent_message`` and ``reasoning`` (``native.stream_items``). Empty, the
     turn must hold exactly one assistant message. Otherwise earlier messages
     are progress notes and the last completed one is the output.
+
+    Lines end at ``\\n`` only, as the journal frames them: Codex leaves U+2028,
+    U+2029 and U+0085 unescaped inside strings. A trailing ``\\r`` is JSON
+    whitespace.
     """
     outputs, errors, usages = [], [], []
     completions = 0
@@ -89,7 +93,7 @@ def _events(stdout, allowed_items=frozenset()):
     supported = {"thread.started", "turn.started", "turn.completed", "turn.failed", "error",
                  "item.started", "item.updated", "item.completed"}
     allowed = {"agent_message", "reasoning"} | allowed_items
-    for number, line in enumerate(stdout.splitlines(), 1):
+    for number, line in enumerate(stdout.split("\n"), 1):
         if not line.strip():
             continue
         try:
@@ -218,7 +222,8 @@ ACTIVITY_CHARACTERS = 200
 def stream_activity(folder):
     """What a call's event stream shows its tools did, from its completed items.
 
-    Reads the unique frames ``audited_events`` reads. ``items`` counts the
+    Reads the unique frames ``audited_events`` reads, split as ``_events``
+    splits them. ``items`` counts the
     completed items of each type; ``commands``, ``searches`` and
     ``files_changed`` keep the first ``ACTIVITY_ENTRIES`` entries in stream
     order, and ``omitted`` counts the entries left out of the three. Every
@@ -230,7 +235,7 @@ def stream_activity(folder):
         return value[:ACTIVITY_CHARACTERS] if isinstance(value, str) else None
 
     items, commands, searches, files_changed = {}, [], [], []
-    for line in _provider_stdout(Path(folder))[0].splitlines():
+    for line in _provider_stdout(Path(folder))[0].split('\n'):
         try:
             event = _json(line)
         except (ValueError, TypeError):
