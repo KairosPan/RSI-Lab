@@ -344,6 +344,8 @@ def prepare(args):
     architecture = team.ARCHITECTURE if team_settings else ARCHITECTURE
     harness_config = team_settings['pablo_harness'] if team_settings else harness.DEFAULT_CONFIG
     parent = load_parent(args.parent_root, args.parent_run_id, args.parent_source_root)
+    if team_settings is None and parent['config'].get('research_architecture') == team.ARCHITECTURE:
+        raise ValueError('The parent is a team run; continue it with --team')
     new_campaign = getattr(args, 'new_campaign', False)
     campaign = continuation_checkpoint(parent, args.new_evaluations, new_campaign=new_campaign)
     additions = resource_additions(getattr(args, 'additional_model_calls', 0),
@@ -497,10 +499,6 @@ def prepare(args):
             authorized_source_contracts=source_contracts(sources), frozen_sources=sources)
         if team_settings:
             config.update(copy.deepcopy(team_settings), research_policy=research_policy(team=True))
-        elif parent['config'].get('research_architecture') == team.ARCHITECTURE:
-            # A plain run does not inherit a team parent's tools, statement or limits.
-            for key in team.RUN_SETTINGS:
-                config.pop(key, None)
         Controller(store).initialize(args.run_id, budgets=budgets, max_external=1, config=config)
         plan = legacy_host.task_plan(root, args.run_id, initial_ref, args.new_evaluations, goal)
         plan['protocol']['parameters'].update(initial_count=count, global_observation_ordinal_offset=count,

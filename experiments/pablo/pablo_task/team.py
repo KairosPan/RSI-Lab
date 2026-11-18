@@ -20,9 +20,6 @@ ARCHITECTURE = 'pablo_research_pr4_team_v1'
 MAX_EFFECTIVE_CONTEXT_BYTES = 4194304
 REBUILD_HISTORY_BYTES = 4194304
 MIN_REBUILD_HISTORY_BYTES = 262144
-# What the host sets in a team run's config; a plain run prepared from a team parent drops them.
-RUN_SETTINGS = ('native_capabilities', 'pablo_not_blind', 'max_effective_context_bytes',
-                'prospective_rebuild_history_bytes')
 _CLOSING = (' You are a sub-agent of the Lab. You cannot score or select molecules. Return one anchor from the '
             'eligible anchors you were given, a pool of candidate SMILES, the hypothesis, and the result that '
             'would falsify it. Do not predict scores or guess the hidden objective.')

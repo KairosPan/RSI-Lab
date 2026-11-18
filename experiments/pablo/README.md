@@ -38,7 +38,8 @@ that could expose the hidden objective are refused, and a run with web search
 on for the Lab says in its config and reports that it is not a blind run.
 Sub-agent tokens are charged to the Lab's turn, so raise the token budget with
 `--additional-tokens`. None of these options is accepted with `--resume`.
-Without `--team`, preparation is unchanged. No team run has been executed; see
+Without `--team`, preparation is unchanged, except that a parent which was itself
+a team run is refused: continue it with `--team`. No team run has been executed; see
 [TEAM_V1.md](TEAM_V1.md) for the options, roles, records and checks.
 
 ## Run a continuation

@@ -127,22 +127,35 @@ class HostTeamPreflightTests(unittest.TestCase):
                 load.assert_not_called()
                 self.assertFalse((self.base / 'runs' / 'child').exists())
 
-    def test_a_team_parent_does_not_carry_team_settings_into_a_plain_run(self):
+    @staticmethod
+    def team_parent(parent):
+        """The parent was itself a team run, with web search on and its own limits."""
         block = team.native_block({'lab': {'subagents': True, 'web_search': True}}, protected=[])
+        parent['config'].update(research_architecture=team.ARCHITECTURE, native_capabilities=block,
+            pablo_harness=copy.deepcopy(harness.LED_DEFAULT_CONFIG), pablo_not_blind=team.NOT_BLIND,
+            max_effective_context_bytes=4194304, prospective_rebuild_history_bytes=1048576,
+            research_policy=research_policy(team=True))
 
-        def team_parent(parent):
-            parent['config'].update(research_architecture=team.ARCHITECTURE, native_capabilities=block,
-                pablo_harness=copy.deepcopy(harness.LED_DEFAULT_CONFIG), pablo_not_blind=team.NOT_BLIND,
-                max_effective_context_bytes=4194304, prospective_rebuild_history_bytes=4194304,
-                research_policy=research_policy(team=True))
-        args = self.prepared_child(parent_transform=team_parent)
+    def test_a_plain_preparation_from_a_team_parent_is_refused_before_anything_is_written(self):
+        with self.assertRaisesRegex(ValueError, 'The parent is a team run; continue it with --team'):
+            self.prepared_child(parent_transform=self.team_parent)
+        self.assertFalse((self.base / 'child').exists())
+
+    def test_a_team_preparation_from_a_team_parent_takes_its_block_from_the_file_given_now(self):
+        given = {'lab': {'subagents': {'max_concurrent': 2}}}
+        args = self.prepared_child(parent_transform=self.team_parent, team=True,
+                                   native_capabilities=self.native_file(given))
         store, config = self.opened(args)
-        for key in team.RUN_SETTINGS:
-            self.assertNotIn(key, config)
-        self.assertEqual(config['research_architecture'], host.ARCHITECTURE)
-        self.assertEqual(config['pablo_harness'], harness.DEFAULT_CONFIG)
-        self.assertEqual(config['research_policy'], research_policy())
-        self.assertNotIn('not_blind', host.legacy_host.snapshot(host.make_runtime(store, 'child'), 'prepared'))
+        self.assertEqual(config['research_architecture'], team.ARCHITECTURE)
+        self.assertEqual(config['pablo_harness'], harness.LED_DEFAULT_CONFIG)
+        self.assertEqual(config['native_capabilities'], team.native_block(given, protected=[]))
+        self.assertIsNone(config['pablo_not_blind'])
+        self.assertEqual(config['prospective_rebuild_history_bytes'], 4194304)
+        self.assertEqual(config['max_effective_context_bytes'], 4194304)
+        self.assertEqual(config['research_policy'], research_policy(team=True))
+        self.assertEqual(config['goal'].count(team.GOAL), 1)
+        self.assertIs(host.make_runtime(store, 'child').adapters.by_id[methods.ADAPTER_ID].admit_request,
+                      methods.admit_request)
         self.assert_no_execution(store, 'child')
 
     def test_a_preparation_without_team_is_unchanged(self):

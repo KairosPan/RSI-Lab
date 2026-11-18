@@ -6,7 +6,7 @@
 
 `run.py --team` 准备一个新运行，架构为 `pablo_research_pr4_team_v1`，Harness 版本为 `pablo_lab_led_v1`。Lab 领导一个小组：它可以用 `agent_type` 启动 `local`、`challenge` 两个具名子代理，以及 Codex 的 `default` 帮手。子代理只提议，不能评分也不能选点；子代理返回的内容是线索，不是证据。只有 Lab 请求 `pablo.select_candidates` 和 `pablo.evaluate`。
 
-不带 `--team` 的准备与之前完全相同：同样的配置、目标文本、工具和进度报告。旧架构的运行也不变。从团队运行的父运行准备普通运行时，复制来的配置会去掉 `native_capabilities`、`pablo_not_blind`、`max_effective_context_bytes` 和 `prospective_rebuild_history_bytes`，团队设置不会带进普通运行。
+不带 `--team` 的准备与之前完全相同：同样的配置、目标文本、工具和进度报告。旧架构的运行也不变。父运行是团队运行时，不带 `--team` 的准备在写入任何内容之前被拒绝，这样的父运行只能用 `--team` 继续；`--team` 准备照常进行，原生设置块取自这次给出的文件。
 
 ## 选项
 
@@ -107,6 +107,6 @@ Lab 可以再次联系更早启动的子代理，而不是新开一个；那个�
 全部是离线测试，使用临时目录和合成数据，没有调用模型、评分器或网络：
 
 - `tests/test_team.py`：角色文字、原生设置块的拒绝条件、可读目录检查、非盲陈述、团队设置，以及一个端到端测试：在真实 Runtime 中注册 Lab-led 工具，用脚本化的 Lab 回答提出声称已派出 Challenge 的选点请求；调用记录中没有 `challenge` 子代理时被拒绝，有时被接收。
-- `tests/test_host_team_preflight.py`：`--team` 准备冻结的架构、Harness、设置块、上限和 `pablo_not_blind`；各选项的误用都是参数错误；不带 `--team` 的准备不变；`make_runtime` 拒绝不完整的团队配置；两个记录读取点传入的原生设置。
+- `tests/test_host_team_preflight.py`：`--team` 准备冻结的架构、Harness、设置块、上限和 `pablo_not_blind`；各选项的误用都是参数错误；不带 `--team` 的准备不变；父运行是团队运行时，不带 `--team` 的准备被拒绝，`--team` 准备成功；`make_runtime` 拒绝不完整的团队配置；两个记录读取点传入的原生设置。
 
 这些测试证明准备和检查的接线成立，不证明团队方式能提高分数；团队运行至今没有执行过。
