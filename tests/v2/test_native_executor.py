@@ -1,14 +1,21 @@
 """The executor of a role's model call: its native settings, its cost from Codex's ledger and the turn's activity.
 
 The Lab Effect is prepared and dispatched by the real Runtime and Controller.
-``transport.invoke`` is replaced, as tests/v2/test_roles.py replaces it, by a
+Most tests replace ``transport.invoke``, as tests/v2/test_roles.py does, by a
 fixture that writes the call's stream and a synthetic rollout built from
-tests/v2/native_fixtures.py. No Codex, model, network request or credential is
-used.
+tests/v2/native_fixtures.py. The tests of role files and of refused role calls
+run the real transport instead, with ``subprocess.Popen`` replaced by a local
+process standing in for Codex or by one that fails if Codex is started. No
+Codex, model, network request or credential is used.
 """
+import hashlib
 import json
+import os
 import shutil
+import subprocess
+import sys
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -17,8 +24,8 @@ from rsi_lab import native, roles, transport
 from rsi_lab.session_context import read_native_snapshot
 from rsi_lab.store import digest
 from tests.v2.liveness_support import Scripted, none, open_run
-from tests.v2.native_fixtures import (PROFILE, SEARCH, TERMINAL, TERMINAL_AND_SUBAGENTS, account, child_rollout,
-                                      sub_agent_started, tool_call, turn_context, usage_row)
+from tests.v2.native_fixtures import (PLAIN, PROFILE, R, ROLES, SEARCH, TERMINAL, TERMINAL_AND_SUBAGENTS, WITH_ROLES,
+                                      account, child_rollout, sub_agent_started, tool_call, turn_context, usage_row)
 from tests.v2.test_session_context import THREAD, fixture
 
 CHILD = '33333333-3333-3333-3333-333333333333'
@@ -438,6 +445,182 @@ class NativeExecutorTests(unittest.TestCase):
         receipt = self.execute(settings=SEARCH, workspace_files=[lambda w: (w / 'AGENTS.md').write_text('Notes')])
         self.assertEqual(receipt['status'], 'succeeded', receipt['error'])
         self.assertEqual(len(self.calls), 1)
+
+    def test_executor_writes_role_files_and_names_them(self):
+        # The real transport runs; a local process stands in for Codex, as in tests/v2/test_native_recovery.py.
+        store, controller, runtime = open_run(self, config={'native_capabilities': {'lab': config_form(WITH_ROLES)}})
+        codex_home = Path(tempfile.mkdtemp(prefix='rsi-native-home-'))
+        self.addCleanup(shutil.rmtree, codex_home, ignore_errors=True)
+        effect = runtime.prepare_meta(runtime.enqueue_lab('lab-1')['id'], RESERVATION)
+        self.assertEqual(effect['status'], 'prepared', effect)
+        self.assertEqual(effect['metadata']['native_capabilities'], WITH_ROLES)
+        roles_dir = (store.root / 'agents' / effect['metadata']['agent_session_id'] / 'roles').resolve()
+        events = [{'type': 'thread.started', 'thread_id': THREAD}, {'type': 'turn.started'},
+                  {'type': 'item.completed', 'item': {'type': 'agent_message', 'text': json.dumps(RESPONSE)}},
+                  {'type': 'turn.completed', 'usage': STREAM_USAGE}]
+        wire = ''.join(json.dumps(event) + '\n' for event in events).encode()
+        real_popen = subprocess.Popen
+        found = []
+
+        def spawn(command, **options):
+            found.append(sorted(path.name for path in roles_dir.iterdir()))     # What Codex finds as it starts.
+            workspace = Path(options['cwd'])
+            path = codex_home / 'sessions' / 'fixture' / ('rollout-fixture-' + THREAD + '.jsonl')
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(fixture(workspace) + usage_row(THREAD, 't1', 't1', 10, 1))
+            code = 'import sys; sys.stdin.read(); sys.stdout.buffer.write(%r); sys.stdout.buffer.flush()' % wire
+            return real_popen([sys.executable, '-u', '-c', code], **options)
+        receipts, raised = [], []
+
+        def executor(dispatching, raw):
+            try:
+                receipts.append(roles.CodexExecutor(store.root / 'calls')(dispatching, raw))
+            except ValueError as exc:
+                raised.append(exc)
+                raise
+            return receipts[-1]
+        with patch.dict(os.environ, {'CODEX_HOME': str(codex_home)}), \
+                patch.object(transport.subprocess, 'Popen', side_effect=spawn):
+            controller.dispatch_effect('r', effect['id'], executor)
+        self.assertEqual(raised, [])
+        self.assertEqual(receipts[0]['status'], 'succeeded', receipts[0]['error'])
+        self.assertTrue(receipts[0]['protocol_valid'], receipts[0]['error'])
+        self.assertEqual(found, [['challenge.toml', 'local.toml']])
+        for name, role in ROLES.items():
+            self.assertEqual(tomllib.loads((roles_dir / (name + '.toml')).read_text(encoding='utf-8')),
+                             {'name': name, 'description': role['description'],
+                              'developer_instructions': role['instructions']})
+        command = json.loads((store.root / 'calls' / effect['id'] / 'invocation.json').read_text(encoding='utf-8'))[
+            'command']
+        named = [command[i + 1] for i, part in enumerate(command[:-1])
+                 if part == '-c' and command[i + 1].startswith('agents.') and '.config_file=' in command[i + 1]]
+        self.assertEqual(named, ['agents.' + name + '.config_file=' + native.toml_string(str(roles_dir / (name + '.toml')))
+                                 for name in ('challenge', 'local')])
+
+    def test_a_call_without_roles_gets_no_role_folder(self):
+        receipt = self.execute(settings=PLAIN)
+        self.assertEqual(receipt['status'], 'succeeded', receipt['error'])
+        self.assertEqual(set(self.calls[0]), {'session', 'journal_metadata', 'native', 'run_root'})
+        self.assertEqual(self.calls[0]['native'], PLAIN)
+        self.assertEqual(receipt['native_capabilities'], PLAIN)
+        roles_dir = self.store.root / 'agents' / self.effect['metadata']['agent_session_id'] / 'roles'
+        self.assertFalse(os.path.lexists(roles_dir))
+        # The same place holds the role files of a call that declares roles.
+        receipt = self.execute(settings=WITH_ROLES, rollout=PARENT_WITH_CHILD, child=CHILD_ROWS)
+        self.assertEqual(receipt['status'], 'succeeded', receipt['error'])
+        roles_dir = self.store.root / 'agents' / self.effect['metadata']['agent_session_id'] / 'roles'
+        self.assertEqual(sorted(path.name for path in roles_dir.iterdir()), ['challenge.toml', 'local.toml'])
+
+    def test_receipt_names_roles_by_digest(self):
+        receipt = self.execute(settings=WITH_ROLES, rollout=PARENT_WITH_CHILD, child=CHILD_ROWS)
+        self.assertEqual(receipt['status'], 'succeeded', receipt['error'])
+        local = receipt['native_capabilities']['subagents']['roles']['local']
+        self.assertEqual(local, {'description': R['description'],
+                                 'instructions_sha256': hashlib.sha256(R['instructions'].encode('utf-8')).hexdigest()})
+        self.assertNotIn('instructions', local)
+        self.assertEqual(receipt['native_capabilities'], native.receipt_form(WITH_ROLES))
+        self.assertEqual(self.effect['metadata']['native_capabilities'], WITH_ROLES)    # The Effect keeps the text.
+        receipt = self.execute(settings=PLAIN, rollout=PARENT_WITH_CHILD, child=CHILD_ROWS)
+        self.assertEqual(receipt['status'], 'succeeded', receipt['error'])
+        self.assertNotIn('roles', receipt['native_capabilities']['subagents'])
+        self.assertEqual(receipt['native_capabilities'], PLAIN)
+
+    def test_child_threads_record_each_sub_agent_with_or_without_roles(self):
+        for settings in (PLAIN, WITH_ROLES):
+            with self.subTest(roles='roles' in settings['subagents']):
+                receipt = self.execute(settings=settings, rollout=PARENT_WITH_CHILD, child=CHILD_ROWS)
+                self.assertEqual(receipt['token_source'], 'ledger')
+                [entry] = receipt['child_threads']
+                self.assertEqual(set(entry), {'thread_id', 'agent_path', 'started_in_call', 'model', 'effort',
+                                              'rollout_ref', 'rollout_sha256', 'requests', 'input_tokens',
+                                              'output_tokens', 'cached_input_tokens', 'role', 'forked_history',
+                                              'searches', 'searches_omitted'})
+                self.assertEqual({key: entry[key] for key in set(entry) - {'rollout_ref', 'rollout_sha256'}},
+                                 {'thread_id': CHILD, 'agent_path': '/root/a', 'started_in_call': True, 'model': None,
+                                  'effort': None, 'requests': 1, 'input_tokens': 22828, 'output_tokens': 37,
+                                  'cached_input_tokens': 0, 'role': None, 'forked_history': True, 'searches': [],
+                                  'searches_omitted': 0})
+
+    def dispatch_refused_roles(self, *, arrange=None, alter=None):
+        """Dispatch a Lab call whose Effect declares ``ROLES`` through the Controller, the executor and the real
+        transport, with a ``Popen`` that fails if Codex is started, and check that the call settles as a definite
+        failure that was never dispatched, its reservations released. ``arrange(session_folder)`` prepares the
+        session's folder first; ``alter(dispatching, raw)`` returns the Effect and packet the executor is handed.
+        Returns the executor's receipt."""
+        store, controller, runtime = open_run(self, config={'native_capabilities': {'lab': config_form(WITH_ROLES)}})
+        self.store = store
+        effect = runtime.prepare_meta(runtime.enqueue_lab('lab-2')['id'], RESERVATION)
+        self.assertEqual(effect['status'], 'prepared', effect)
+        if arrange is not None:
+            arrange(store.root / 'agents' / effect['metadata']['agent_session_id'])
+        receipts = []
+
+        def executor(dispatching, raw):
+            if alter is not None:
+                dispatching, raw = alter(dispatching, raw)
+            receipts.append(roles.CodexExecutor(store.root / 'calls')(dispatching, raw))
+            return receipts[-1]
+        with patch.object(transport.subprocess, 'Popen', side_effect=AssertionError('Codex started')) as popen:
+            settled = controller.dispatch_effect('r', effect['id'], executor)
+        popen.assert_not_called()
+        # The executor returned a receipt; it raised nothing. Else the Controller's receipt says what it raised.
+        self.assertEqual(len(receipts), 1, store.read_blob(settled['receipt_ref']))
+        receipt = receipts[0]
+        self.assertEqual((receipt['status'], receipt['never_dispatched']), ('failed_definite', True))
+        self.assertEqual(receipt['actual_costs'], {name: 0 for name in RESERVATION})
+        self.assertEqual(settled['status'], 'failed_definite')
+        for name in RESERVATION:
+            budget = store.get('r', 'budget', name)
+            self.assertEqual((budget['reserved'], budget['spent']), (0, 0), name)
+        self.assertFalse((store.root / 'calls' / effect['id']).exists())
+        return receipt
+
+    def test_executor_refuses_roles_without_a_persistent_session(self):
+        def without_session(dispatching, raw):
+            # The same Effect, but for the persistent session its call would run in.
+            metadata = {key: value for key, value in dispatching['metadata'].items() if key != 'agent_session'}
+            return {**dispatching, 'metadata': metadata}, raw
+        with patch.object(roles.transport, 'invoke', side_effect=AssertionError('The call was dispatched')) as invoke:
+            receipt = self.dispatch_refused_roles(alter=without_session)
+        invoke.assert_not_called()
+        self.assertEqual(receipt['error'], 'Sub-agent roles need a persistent session')
+        self.assertEqual(list((self.store.root / 'agents').glob('*/roles')), [])
+
+    def test_a_role_file_that_cannot_be_written_refuses_the_call(self):
+        elsewhere = Path(tempfile.mkdtemp(prefix='rsi-native-elsewhere-'))
+        self.addCleanup(shutil.rmtree, elsewhere, ignore_errors=True)
+
+        def linked_folder(session):
+            session.mkdir(parents=True, exist_ok=True)
+            (session / 'roles').symlink_to(elsewhere, target_is_directory=True)
+
+        def linked_file(session):
+            (session / 'roles').mkdir(parents=True)
+            (session / 'roles' / 'local.toml').symlink_to(elsewhere / 'outside.toml')
+        for case, arrange in (('a symlinked role folder', linked_folder), ('a symlinked role file', linked_file)):
+            with self.subTest(case=case):
+                receipt = self.dispatch_refused_roles(arrange=arrange)
+                self.assertTrue(receipt['error'].startswith('Persistent session preflight failed: '), receipt['error'])
+                self.assertIn('symlink', receipt['error'])
+                self.assertEqual(list(elsewhere.iterdir()), [])
+
+    def test_role_text_that_cannot_be_utf8_refuses_the_call(self):
+        # A run config cannot carry a lone surrogate into an Effect; here the packet and the Effect are made to.
+        settings = {**WITH_ROLES, 'subagents': {'max_concurrent': 3, 'roles': {
+            **ROLES, 'local': {**R, 'instructions': 'Refine \ud800.'}}}}
+
+        def lone_surrogate(dispatching, raw):
+            request = json.loads(raw)
+            self.assertEqual(request['prompt'].count('"instructions":"Refine."'), 1)
+            request['prompt'] = request['prompt'].replace('"instructions":"Refine."',
+                                                          '"instructions":"Refine \\ud800."')
+            raw = json.dumps(request, ensure_ascii=False).encode()
+            return {**dispatching, 'packet_sha256': digest(raw),
+                    'metadata': {**dispatching['metadata'], 'native_capabilities': settings}}, raw
+        receipt = self.dispatch_refused_roles(alter=lone_surrogate)
+        self.assertTrue(receipt['error'].startswith('Persistent session preflight failed: '), receipt['error'])
+        self.assertIn('cannot be encoded as UTF-8', receipt['error'])
+        self.assertEqual(list((self.store.root / 'agents').glob('*/roles/*')), [])
 
 
 if __name__ == '__main__':

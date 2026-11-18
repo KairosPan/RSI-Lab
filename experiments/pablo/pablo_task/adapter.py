@@ -40,7 +40,9 @@ def selection_binding(store, run_id, inputs):
     selected = methods.validate_evaluation_plan(store, run_id,
         selection_effect_id=inputs['selection_effect_id'], plan_id=inputs['selection_plan_id'],
         candidates=inputs['candidates'], proposal_role=inputs['proposal_role'], anchor_parent=inputs['anchor_parent'])
-    binding = harness.validate_proposal(store, run_id, inputs['proposal_role'], inputs['anchor_parent'])
+    # A Lab-led plan carries the Lab's decision, so the scoring binding equals the plan's.
+    binding = harness.validate_proposal(store, run_id, inputs['proposal_role'], inputs['anchor_parent'],
+                                        decision=selected.get('decision'))
     harness.validate_binding(store, run_id, binding, inputs['candidates'])
     return selected, binding
 

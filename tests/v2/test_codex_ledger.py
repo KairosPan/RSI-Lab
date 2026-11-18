@@ -12,10 +12,11 @@ import unittest
 from rsi_lab import codex_ledger
 from rsi_lab.store import digest
 from tests.v2.native_fixtures import (PROFILE, account, child_rollout, collab, compacted, frame, sub_agent_activity,
-    sub_agent_started, tool_call, turn_context, usage_row)
+    sub_agent_started, tool_call, turn_context, usage_row, web_search)
 from tests.v2.test_session_context import OTHER, THREAD, fixture
 
 CHILD = '33333333-3333-3333-3333-333333333333'
+EARLIER_CHILD = '44444444-4444-4444-4444-444444444444'
 # A child whose one row belongs to the parent's turn t1: counted whenever its rollout can be read.
 CHILD_ROLLOUT = child_rollout(CHILD, THREAD, [('c1', 't1', 5, 1)])
 
@@ -217,7 +218,9 @@ class CodexLedgerTests(unittest.TestCase):
         path = self.write_child(raw)
         got = codex_ledger.read_child(self.home, CHILD, parent_thread_id=THREAD, root_turn_ids=['t1', 't2'])
         self.assertEqual(got, {'thread_id': CHILD, 'rollout_ref': str(path.resolve()), 'rollout_sha256': digest(raw),
-                               'requests': 1, 'input_tokens': 5, 'output_tokens': 1, 'cached_input_tokens': 0})
+                               'requests': 1, 'input_tokens': 5, 'output_tokens': 1, 'cached_input_tokens': 0,
+                               'role': None, 'forked_history': True, 'model': None, 'effort': None, 'searches': [],
+                               'searches_omitted': 0})
 
     def test_children_are_taken_from_every_sub_agent_activity_of_the_turn(self):
         # A sub-agent started in an earlier turn and addressed again in this one writes rows under this turn.
@@ -228,14 +231,120 @@ class CodexLedgerTests(unittest.TestCase):
         got = codex_ledger.settle(codex_home=self.home, path=self.write(raw), thread_id=THREAD,
                                   prefix_bytes=len(first), resumed=True, stream_usage=None)
         self.assertEqual((got['source'], got['tokens'], got['requests']), ('ledger', 20 + 2 + 7 + 3, 2))
-        self.assertEqual(got['turn']['children'], [{'thread_id': CHILD, 'agent_path': '/root/a'}])
+        self.assertEqual(got['turn']['children'], [{'thread_id': CHILD, 'agent_path': '/root/a',
+                                                    'started_in_call': False, 'model': None, 'effort': None}])
 
     def test_a_child_started_twice_is_counted_once(self):
         parent = fixture(self.cwd) + sub_agent_started(CHILD, '/root/a') * 2 + usage_row(THREAD, 't1', 't1', 10, 1)
         self.write_child()
         got = self.settle(path=self.write(parent), resumed=False, stream_usage=None)
         self.assertEqual((got['source'], got['tokens'], got['requests']), ('ledger', 10 + 1 + 5 + 1, 2))
-        self.assertEqual(got['turn']['children'], [{'thread_id': CHILD, 'agent_path': '/root/a'}])
+        self.assertEqual(got['turn']['children'], [{'thread_id': CHILD, 'agent_path': '/root/a',
+                                                    'started_in_call': True, 'model': None, 'effort': None}])
+
+    def test_children_say_whether_this_call_started_them(self):
+        raw = (fixture(self.cwd) + sub_agent_started(CHILD, '/root/a', model='m', effort='low')
+               + sub_agent_activity(CHILD, '/root/a', 'completed')            # null model and effort
+               + sub_agent_activity(EARLIER_CHILD, '/root/old', 'interacted') + usage_row(THREAD, 't1', 't1', 10, 1))
+        turn = codex_ledger.read_turn(self.write(raw), thread_id=THREAD, prefix_bytes=0)
+        self.assertEqual(turn['children'], [
+            {'thread_id': CHILD, 'agent_path': '/root/a', 'started_in_call': True, 'model': 'm', 'effort': 'low'},
+            {'thread_id': EARLIER_CHILD, 'agent_path': '/root/old', 'started_in_call': False, 'model': None,
+             'effort': None}])
+        # A model or effort that is not text is not recorded.
+        raw = fixture(self.cwd) + sub_agent_started(CHILD, '/root/a', model=7, effort=['low'])
+        turn = codex_ledger.read_turn(self.write(raw), thread_id=THREAD, prefix_bytes=0)
+        self.assertEqual(turn['children'], [{'thread_id': CHILD, 'agent_path': '/root/a', 'started_in_call': True,
+                                             'model': None, 'effort': None}])
+
+    def test_child_names_its_role_and_whether_it_inherited_history(self):
+        for role, forked in (('challenge', False), ('local', True), (None, False)):
+            with self.subTest(role=role, forked=forked):
+                self.reset_home()
+                self.write_child(child_rollout(CHILD, THREAD, [('c1', 't1', 5, 1)], role=role, forked=forked))
+                child = codex_ledger.read_child(self.home, CHILD, parent_thread_id=THREAD, root_turn_ids=['t1'])
+                self.assertEqual((child['role'], child['forked_history']), (role, forked))
+
+    def test_a_role_that_is_not_text_is_none_and_the_child_still_counts(self):
+        parent = fixture(self.cwd) + sub_agent_started(CHILD, '/root/a') + usage_row(THREAD, 't1', 't1', 10, 1)
+        for written in ('', 7, ['challenge']):
+            with self.subTest(written=written):
+                self.reset_home()
+                self.write_child(child_rollout(CHILD, THREAD, [('c1', 't1', 5, 1)], role=written))
+                got = self.settle(path=self.write(parent), resumed=False, stream_usage=None)
+                self.assertEqual((got['source'], got['tokens']), ('ledger', 10 + 1 + 5 + 1))
+                self.assertIsNone(got['children'][0]['role'])
+
+    def test_child_searches_are_this_calls_only(self):
+        raw = (child_rollout(CHILD, THREAD, [('c0', 't0', 3, 1), ('c1', 't1', 5, 1)])
+               + web_search('earlier query', 'c0')                             # the sub-agent's earlier turn
+               + web_search('first query', 'c1') + web_search('second query', 'c1', shape='WebSearch')
+               + frame('event_msg', {'type': 'item_completed', 'turn_id': 'c1', 'item': {
+                   'type': 'Extension', 'kind': 'other.tool', 'query': 'not a search'}})
+               + frame('event_msg', {'type': 'item_completed', 'turn_id': 'c1', 'item': {
+                   'type': 'WebSearch', 'query': None}}))
+        self.write_child(raw)
+        child = codex_ledger.read_child(self.home, CHILD, parent_thread_id=THREAD, root_turn_ids=['t1'])
+        self.assertEqual((child['searches'], child['searches_omitted']), (['first query', 'second query'], 0))
+
+    def test_more_searches_than_the_limit_are_counted_not_kept(self):
+        queries = ['query %02d ' % number + 'x' * 300 for number in range(23)]
+        self.write_child(child_rollout(CHILD, THREAD, [('c1', 't1', 5, 1)])
+                         + b''.join(web_search(query, 'c1') for query in queries))
+        child = codex_ledger.read_child(self.home, CHILD, parent_thread_id=THREAD, root_turn_ids=['t1'])
+        self.assertEqual(codex_ledger.MAX_SEARCHES, 20)
+        self.assertEqual((len(child['searches']), child['searches_omitted']), (20, 3))
+        self.assertEqual(child['searches'], [query[:200] for query in queries[:20]])
+
+    def test_a_child_addressed_again_keeps_its_role(self):                    # Review Focus 3
+        first = (fixture(self.cwd) + sub_agent_started(CHILD, '/root/a', model='m', effort='low')
+                 + usage_row(THREAD, 't1', 't1', 10, 1))
+        raw = first + sub_agent_activity(CHILD, '/root/a', 'interacted') + usage_row(THREAD, 't2', 't2', 20, 2)
+        self.write_child(child_rollout(CHILD, THREAD, [('c1', 't1', 5, 1), ('c2', 't2', 7, 3)], role='challenge',
+                                       forked=False)
+                         + web_search('earlier query', 'c1') + web_search('this query', 'c2'))
+        got = codex_ledger.settle(codex_home=self.home, path=self.write(raw), thread_id=THREAD,
+                                  prefix_bytes=len(first), resumed=True, stream_usage=None)
+        self.assertEqual((got['source'], got['tokens']), ('ledger', 20 + 2 + 7 + 3))
+        [entry] = got['children']
+        self.assertEqual((entry['role'], entry['started_in_call']), ('challenge', False))
+        self.assertEqual(entry['requests'], 1)
+        self.assertEqual((entry['input_tokens'], entry['output_tokens']), (7, 3))
+        self.assertEqual((entry['agent_path'], entry['model'], entry['effort'], entry['forked_history']),
+                         ('/root/a', None, None, False))
+        self.assertEqual(entry['searches'], ['this query'])
+
+    def test_a_child_addressed_again_records_the_model_and_effort_of_its_own_turn(self):
+        first = (fixture(self.cwd) + sub_agent_started(CHILD, '/root/a', model='m', effort='low')
+                 + usage_row(THREAD, 't1', 't1', 10, 1))
+        raw = first + sub_agent_activity(CHILD, '/root/a', 'interacted') + usage_row(THREAD, 't2', 't2', 20, 2)
+        self.write_child(child_rollout(CHILD, THREAD, [('c1', 't1', 5, 1), ('c2', 't2', 7, 3), ('c3', 't9', 1, 1)])
+                         + turn_context('c1', model='earlier-model', effort='low')      # an earlier call's turn
+                         + turn_context('c2', model='first-model', effort='medium')
+                         + turn_context('c2', model='child-model', effort='high')       # the last of this call's
+                         + turn_context('c3', model='other-model', effort='xhigh'))     # a turn not counted here
+        got = codex_ledger.settle(codex_home=self.home, path=self.write(raw), thread_id=THREAD,
+                                  prefix_bytes=len(first), resumed=True, stream_usage=None)
+        [entry] = got['children']
+        self.assertEqual((entry['started_in_call'], entry['model'], entry['effort']), (False, 'child-model', 'high'))
+        self.assertEqual(got['turn']['children'][0]['model'], None)          # The lead's records name none.
+        child = codex_ledger.read_child(self.home, CHILD, parent_thread_id=THREAD, root_turn_ids=['t2'])
+        self.assertEqual((child['model'], child['effort']), ('child-model', 'high'))
+
+    def test_a_child_without_its_own_turn_context_keeps_the_started_items_model_and_effort(self):
+        parent = (fixture(self.cwd) + sub_agent_started(CHILD, '/root/a', model='m', effort='low')
+                  + usage_row(THREAD, 't1', 't1', 10, 1))
+        cases = {'none at all': (b'', ('m', 'low')),
+                 'only an earlier turn': (turn_context('c0', model='earlier-model', effort='high'), ('m', 'low')),
+                 'a model that is not text': (turn_context('c1', model=7, effort='high'), ('m', 'high')),
+                 'no effort': (turn_context('c1', model='child-model', effort=None), ('child-model', 'low'))}
+        for case, (written, expected) in cases.items():
+            with self.subTest(case=case):
+                self.reset_home()
+                self.write_child(child_rollout(CHILD, THREAD, [('c0', 't0', 3, 1), ('c1', 't1', 5, 1)]) + written)
+                got = self.settle(path=self.write(parent), resumed=False, stream_usage=None)
+                [entry] = got['children']
+                self.assertEqual((entry['started_in_call'], entry['model'], entry['effort']), (True, *expected))
 
     def test_an_unsafe_child_id_is_never_looked_up(self):
         unsafe = '?' + CHILD[1:]                        # as a file pattern it would find the child's rollout

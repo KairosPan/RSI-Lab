@@ -51,6 +51,17 @@ def _write_json(path, value):
     path = Path(path)
     raw = (json.dumps(value, ensure_ascii=False, allow_nan=False, indent=2) + "\n").encode()
     # Atomic metadata publication; event data uses JournalWriter append+fsync.
+    _replace_bytes(path, raw)
+
+
+def _replace_bytes(path, raw):
+    """Publish ``raw`` at ``path`` atomically, with mode ``0o600``.
+
+    ``raw`` goes to a temporary file beside ``path``, named ``.<name>-XXXX``,
+    which is fsynced and moved into place; then the folder is fsynced. The
+    temporary file is removed when the write fails.
+    """
+    path = Path(path)
     fd, temporary = tempfile.mkstemp(prefix='.' + path.name + '-', dir=path.parent)
     try:
         with os.fdopen(fd, 'wb') as stream:
@@ -434,14 +445,59 @@ def _session_options(session):
             'explicit_codex_home': session.get('codex_home') is not None}
 
 
-def _command(folder, model, effort, cwd, session, image_paths=(), native=None, run_root=None):
+def write_role_files(roles_dir, roles):
+    """Write the file of each declared sub-agent role afresh, ``<roles_dir>/<name>.toml``.
+
+    ``roles`` are normal-form roles by name; each file holds
+    ``native.role_file_text``. The folder is made with mode ``0o700`` when
+    missing. Every other entry whose name ends in ``.toml`` is deleted, except
+    a directory; other entries are left alone. Then each file is written with
+    mode ``0o600`` by ``_replace_bytes``.
+
+    Refused with ``ValueError`` before anything is written or deleted: a role
+    name ``native.ROLE_NAME`` does not match, role text that cannot be encoded
+    as UTF-8 (such as a lone surrogate), a folder that is a symlink or not a
+    directory, and a role's file that is a symlink or not a regular file.
+    """
+    roles_dir = Path(roles_dir)
+    texts = {}
+    for name, role in roles.items():
+        if not isinstance(name, str) or not native_tools.ROLE_NAME.fullmatch(name):
+            raise ValueError('Invalid sub-agent role name: ' + repr(name))
+        try:
+            texts[name + '.toml'] = native_tools.role_file_text(name, role).encode('utf-8')
+        except UnicodeEncodeError as exc:
+            raise ValueError('The text of sub-agent role ' + name + ' cannot be encoded as UTF-8') from exc
+    if roles_dir.is_symlink():
+        raise ValueError('The sub-agent role folder cannot be a symlink: ' + str(roles_dir))
+    if os.path.lexists(roles_dir) and not roles_dir.is_dir():
+        raise ValueError('The sub-agent role folder is not a directory: ' + str(roles_dir))
+    for file_name in texts:
+        target = roles_dir / file_name
+        if target.is_symlink():
+            raise ValueError('A sub-agent role file cannot be a symlink: ' + str(target))
+        if os.path.lexists(target) and not target.is_file():
+            raise ValueError('A sub-agent role file is not a regular file: ' + str(target))
+    roles_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    for entry in roles_dir.iterdir():
+        if entry.name.endswith('.toml') and entry.name not in texts and (entry.is_symlink() or not entry.is_dir()):
+            entry.unlink()
+    # Each write fsyncs the folder, which also makes the deletions above durable. A temporary file's name does
+    # not end in .toml.
+    for file_name, raw in texts.items():
+        _replace_bytes(roles_dir / file_name, raw)
+
+
+def _command(folder, model, effort, cwd, session, image_paths=(), native=None, run_root=None, roles_dir=None):
     # Everything off is today's command; native settings that are on need the
-    # session's Codex home and the run root for the permission profile.
+    # session's Codex home and the run root for the permission profile, and
+    # declared sub-agent roles the folder of their files.
     settings = native_tools.validate(native)
     parts = {'sandbox': ['--sandbox', 'read-only'], 'flags': [], 'config': [], 'enabled': set()}
     if native_tools.any_on(settings):
         parts = native_tools.command_parts(settings, workspace=cwd, run_root=run_root,
-                                           codex_home=session['codex_home'], model=model, effort=effort)
+                                           codex_home=session['codex_home'], model=model, effort=effort,
+                                           roles_dir=roles_dir)
     command = ['codex', '--no-daemon', '--ask-for-approval', 'never', 'exec',
                *parts['sandbox'], '-C', cwd]
     if session and session['provider_thread_id']:
@@ -587,7 +643,7 @@ def _stream_process(process, prompt, journal, folder, timeout, stop, tracked=Non
 
 
 def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, timeout=300,
-           *, session=None, journal_metadata=None, images=None, native=None, run_root=None) -> dict:
+           *, session=None, journal_metadata=None, images=None, native=None, run_root=None, roles_dir=None) -> dict:
     """Run one admitted request and durably capture text and optional PNG inputs.
 
     A session binding opts into persistent create/resume. Calls without a binding
@@ -596,6 +652,11 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
     Native settings that switch anything on need a session and the run root;
     they are recorded as ``native`` in the invocation and the result, which
     carry no such key when everything is off.
+
+    Declared sub-agent roles also need ``roles_dir``. Their files are written
+    there afresh (``write_role_files``) before the call folder is prepared,
+    and the command names them by their resolved paths. Whatever about them
+    cannot work raises ``ValueError`` before Codex is started.
 
     The result's ``descendants_stopped`` says whether every process seen under
     the call was stopped by its end. With the terminal on, the process table
@@ -626,12 +687,18 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
     image_digest = image_manifest_sha256(images) if images else None
     settings = native_tools.validate(native)
     native_on = native_tools.any_on(settings)
+    declared_roles = native_tools.declared_roles(settings)
     if native_on:
         if session is None or run_root is None:
             raise ValueError('Native capabilities require a persistent session and a run root')
         # Denied by its resolved path, as the session's workspace and Codex home are named.
         run_root = str(Path(run_root).resolve())
+    if declared_roles and roles_dir is None:
+        raise ValueError('Declared sub-agent roles need roles_dir, the folder of their role files')
     binding = _session_options(session)
+    if declared_roles:
+        write_role_files(roles_dir, declared_roles)
+        roles_dir = str(Path(roles_dir).resolve())
     folder = Path(folder)
     if folder.is_symlink():
         raise ValueError('Call folder cannot be a symlink')
@@ -688,7 +755,8 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
             # TMPDIR of the terminal's commands; the workspace is their only writable place.
             Path(cwd, '.tmp').mkdir(exist_ok=True)
         image_paths = _archive_images(folder, images, image_manifest) if images else []
-        command = _command(folder, model, effort, cwd, binding, image_paths, native=settings, run_root=run_root)
+        command = _command(folder, model, effort, cwd, binding, image_paths, native=settings, run_root=run_root,
+                           roles_dir=roles_dir)
         invocation.update(command=command, cwd=cwd)
         _write_json(folder / 'invocation.json', invocation)
         journal = JournalWriter(folder / 'journal.jsonl', {

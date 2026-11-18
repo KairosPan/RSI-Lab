@@ -60,6 +60,9 @@ class Adapter:
     # Optional trusted, read-only domain hooks. Admission runs in the same
     # transaction that creates diagnostic Work; context is bounded public state.
     admit_work: Callable | None = None
+    # Called as admit_request(store, run_id, inputs, effect) after admit_work
+    # for a model's tool request; effect is the model Effect that made it.
+    admit_request: Callable | None = None
     context: Callable | None = None
     claim_identities: Callable | None = None
     completed_identities: Callable | None = None
@@ -96,7 +99,7 @@ class Adapter:
                 raise ValueError('A registered adapter requires executable callbacks')
         if self.measure is not None and not callable(self.measure):
             raise ValueError('An adapter measurement provider must be callable')
-        for name in ('admit_work', 'context', 'claim_identities', 'completed_identities', 'progress',
+        for name in ('admit_work', 'admit_request', 'context', 'claim_identities', 'completed_identities', 'progress',
                      'recommendation_normalize', 'recommendation_completion', 'decision_dependencies', 'required_evidence'):
             if getattr(self, name) is not None and not callable(getattr(self, name)):
                 raise ValueError('An adapter ' + name + ' provider must be callable')
@@ -106,7 +109,7 @@ class Adapter:
         names = ('prepare','reservations','execute','publication')
         if self.measure is not None:
             names += ('measure',)
-        names += tuple(name for name in ('admit_work', 'context', 'claim_identities', 'completed_identities', 'progress',
+        names += tuple(name for name in ('admit_work', 'admit_request', 'context', 'claim_identities', 'completed_identities', 'progress',
                                         'recommendation_normalize', 'recommendation_completion', 'decision_dependencies', 'required_evidence')
                        if getattr(self, name) is not None)
         for name in names:

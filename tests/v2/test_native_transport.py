@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -19,7 +20,8 @@ from unittest.mock import patch
 
 from rsi_lab import native, transport
 from rsi_lab.journal import read_journal
-from tests.v2.native_fixtures import SEARCH, SUBAGENTS, TERMINAL, TERMINAL_AND_SEARCH, TERMINAL_AND_SUBAGENTS
+from tests.v2.native_fixtures import (PLAIN, R, ROLES, SEARCH, SUBAGENTS, TERMINAL, TERMINAL_AND_SEARCH,
+                                      TERMINAL_AND_SUBAGENTS, WITH_ROLES)
 from tests.v2.test_journal_transport import THREAD, frames
 
 TODAY = ['codex', '--no-daemon', '--ask-for-approval', 'never', 'exec', '--sandbox', 'read-only', '-C', '/w',
@@ -304,6 +306,117 @@ class NativeTransportTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'run root'):
             transport.invoke('p', {'type': 'object'}, self.folder, 'm', 'low', session=self.session(), native=SEARCH)
         self.assertFalse(self.folder.exists())
+
+    def test_role_files_are_written_fresh(self):                              # Review Focus 2
+        folder = self.root / 'agents' / 's1' / 'roles'
+        folder.mkdir(parents=True)
+        (folder / 'local.toml').write_text('developer_instructions = "stale"\n', encoding='utf-8')
+        (folder / 'gone.toml').write_text('x = 1\n', encoding='utf-8')
+        transport.write_role_files(folder, ROLES)
+        self.assertEqual(sorted(path.name for path in folder.iterdir()), ['challenge.toml', 'local.toml'])
+        self.assertEqual(tomllib.loads((folder / 'challenge.toml').read_text(encoding='utf-8'))
+                         ['developer_instructions'], ROLES['challenge']['instructions'])
+        # Each file holds exactly the role's name, description and instructions, readable by its owner only.
+        for name, role in ROLES.items():
+            path = folder / (name + '.toml')
+            self.assertEqual(tomllib.loads(path.read_text(encoding='utf-8')),
+                             {'name': name, 'description': role['description'],
+                              'developer_instructions': role['instructions']})
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+        # Written again: the file of a role no longer declared goes, and so does a stale link (not what it points
+        # to); an entry that is no role file, or a folder, stays.
+        (folder / 'notes.txt').write_text('Not a role file.\n', encoding='utf-8')
+        (folder / 'kept.toml').mkdir()
+        outside = self.root / 'outside.toml'
+        outside.write_text('kept = true\n', encoding='utf-8')
+        (folder / 'old.toml').symlink_to(outside)
+        transport.write_role_files(folder, {'local': R})
+        self.assertEqual(sorted(path.name for path in folder.iterdir()), ['kept.toml', 'local.toml', 'notes.txt'])
+        self.assertEqual((folder / 'notes.txt').read_text(encoding='utf-8'), 'Not a role file.\n')
+        self.assertEqual(outside.read_text(encoding='utf-8'), 'kept = true\n')
+        # A folder that does not exist yet is made, open to its owner only.
+        fresh = self.root / 'agents' / 's2' / 'roles'
+        transport.write_role_files(fresh, ROLES)
+        self.assertEqual(stat.S_IMODE(fresh.stat().st_mode), 0o700)
+        self.assertEqual(sorted(path.name for path in fresh.iterdir()), ['challenge.toml', 'local.toml'])
+
+    def test_role_folder_or_file_may_not_be_a_symlink(self):
+        elsewhere = self.root / 'elsewhere'
+        elsewhere.mkdir()
+        folder = self.root / 'agents' / 's1' / 'roles'
+        folder.parent.mkdir(parents=True)
+        folder.symlink_to(elsewhere, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, 'symlink'):
+            transport.write_role_files(folder, ROLES)
+        self.assertEqual(list(elsewhere.iterdir()), [])
+        # A real folder whose local.toml is a link: nothing is written, replaced or deleted.
+        folder.unlink()
+        folder.mkdir()
+        outside = self.root / 'outside.toml'
+        outside.write_text('kept = true\n', encoding='utf-8')
+        (folder / 'local.toml').symlink_to(outside)
+        (folder / 'gone.toml').write_text('x = 1\n', encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, 'symlink'):
+            transport.write_role_files(folder, ROLES)
+        self.assertEqual(sorted(path.name for path in folder.iterdir()), ['gone.toml', 'local.toml'])
+        self.assertTrue((folder / 'local.toml').is_symlink())
+        self.assertEqual(outside.read_text(encoding='utf-8'), 'kept = true\n')
+
+    def test_role_text_or_name_that_cannot_be_written_is_refused_before_anything_is_written(self):
+        folder = self.root / 'agents' / 's1' / 'roles'
+        folder.mkdir(parents=True)
+        (folder / 'gone.toml').write_text('x = 1\n', encoding='utf-8')
+        lone_surrogate = {'challenge': ROLES['challenge'], 'local': {**R, 'instructions': 'Refine \ud800.'}}
+        for roles, message in ((lone_surrogate, 'UTF-8'), ({'challenge': ROLES['challenge'], '../escape': R}, 'name')):
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                transport.write_role_files(folder, roles)
+            self.assertEqual([path.name for path in folder.iterdir()], ['gone.toml'])
+        self.assertEqual([path.name for path in folder.parent.iterdir()], ['roles'])
+
+    def test_command_carries_roles_only_when_declared(self):
+        session = {'provider_thread_id': None, 'codex_home': '/home/.codex'}
+        limits = ['-c', 'agents.max_depth=1', '-c', 'agents.max_concurrent_threads_per_session=3',
+                  '-c', 'agents.default_subagent_model="m"', '-c', 'agents.default_subagent_reasoning_effort="low"']
+        tail = [part for f in transport.DISABLED_FEATURES if f != 'multi_agent' for part in ('--disable', f)] + [
+            '--enable', 'skip_host_skill_discovery', '-']
+        # Without roles a folder for them changes nothing: the command is the one built at the base.
+        for roles_dir in (None, '/r/agents/s/roles'):
+            self.assertEqual(transport._command(Path('/f'), 'm', 'low', '/w', session, native=PLAIN, run_root='/r',
+                                                roles_dir=roles_dir), TODAY + limits + tail)
+        command = transport._command(Path('/f'), 'm', 'low', '/w', session, native=WITH_ROLES, run_root='/r',
+                                     roles_dir='/r/agents/s/roles')
+        roles = ['-c', 'agents.challenge.description="Argues against the \\"leading\\" series."',
+                 '-c', 'agents.challenge.config_file="/r/agents/s/roles/challenge.toml"',
+                 '-c', 'agents.local.description="Advances the leading series."',
+                 '-c', 'agents.local.config_file="/r/agents/s/roles/local.toml"']
+        self.assertEqual(command, TODAY + limits + roles + tail)
+        self.assertEqual(tomllib.loads('t = ' + self.config_value(command, 'agents.challenge.description='))['t'],
+                         ROLES['challenge']['description'])
+        with self.assertRaisesRegex(ValueError, 'roles_dir'):
+            transport._command(Path('/f'), 'm', 'low', '/w', session, native=WITH_ROLES, run_root='/r')
+
+    def test_invoke_refuses_roles_it_cannot_hand_to_codex_before_codex_starts(self):
+        elsewhere = self.root / 'elsewhere'
+        elsewhere.mkdir()
+        linked = self.root / 'agents' / 's' / 'linked-roles'
+        linked.parent.mkdir(parents=True)
+        linked.symlink_to(elsewhere, target_is_directory=True)
+        roles_dir = self.root / 'agents' / 's' / 'roles'
+        lone_surrogate = {**WITH_ROLES, 'subagents': {'max_concurrent': 3, 'roles': {
+            'local': {**R, 'instructions': 'Refine \ud800.'}}}}
+        cases = {'no role folder': (WITH_ROLES, None, 'roles_dir'),
+                 'a symlinked role folder': (WITH_ROLES, linked, 'symlink'),
+                 'role text that cannot be UTF-8': (lone_surrogate, roles_dir, 'UTF-8')}
+        for case, (settings, folder, message) in cases.items():
+            with self.subTest(case=case), \
+                    patch.object(transport.subprocess, 'Popen', side_effect=AssertionError('Codex started')) as popen:
+                with self.assertRaisesRegex(ValueError, message):
+                    transport.invoke('p', {'type': 'object'}, self.folder, 'm', 'low', session=self.session(),
+                                     native=settings, run_root=str(self.root), roles_dir=folder)
+                popen.assert_not_called()
+                self.assertFalse(self.folder.exists())
+        self.assertEqual(list(elsewhere.iterdir()), [])
+        self.assertFalse(roles_dir.exists())
 
     def archive(self, events, invocation=None, name='archive'):
         """A call folder written before journals: ``events.jsonl`` and, unless ``None``, ``invocation.json`` text."""

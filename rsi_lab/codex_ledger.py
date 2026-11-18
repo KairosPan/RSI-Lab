@@ -9,10 +9,12 @@ to a rollout of its own, found by its exact thread id as an owned rollout is
 parent's turn as ``root_turn_id``.
 
 The same bytes say what the call did: its tool calls, its compactions, the last
-account snapshot and the permission profile of its last turn context.
-``settle_call`` turns all this into what the receipt of a call that has ended
-says, for the executor and for recovery alike; a turn cut off before its
-terminal event is never charged. Nothing here runs Codex or writes anything.
+account snapshot and the permission profile of its last turn context. A
+sub-agent's own rollout says what it was and did: its role, whether it started
+with the parent's history, the model and effort of its turn, and its web
+searches. ``settle_call`` turns all this into what the receipt of a call that
+has ended says, for the executor and for recovery alike; a turn cut off before
+its terminal event is never charged. Nothing here runs Codex or writes anything.
 """
 from __future__ import annotations
 
@@ -28,6 +30,7 @@ COUNTERS = ('input_tokens', 'output_tokens', 'cached_input_tokens')
 # The record field that holds each tool call's input text.
 TOOL_CALLS = {'custom_tool_call': 'input', 'function_call': 'arguments'}
 MAX_TOOL_INPUTS = 32
+MAX_SEARCHES = 20
 EXCERPT_CHARS = 200
 
 
@@ -89,6 +92,19 @@ def _tool_input(payload):
             'excerpt': text[:EXCERPT_CHARS]}
 
 
+def _text(value):
+    return value if isinstance(value, str) else None
+
+
+def _search_query(item):
+    """The query of a web search item, in either shape Codex writes, else ``None``: an ``Extension`` item of kind
+    ``web.search``, or a ``WebSearch`` item, whose ``query`` is text."""
+    if not isinstance(item, dict) or not isinstance(item.get('query'), str):
+        return None
+    searched = item.get('type') == 'WebSearch' or (item.get('type') == 'Extension' and item.get('kind') == 'web.search')
+    return item['query'] if searched else None
+
+
 def _account(limits):
     primary = limits.get('primary') if isinstance(limits.get('primary'), dict) else {}
     credits = limits.get('credits') if isinstance(limits.get('credits'), dict) else {}
@@ -104,7 +120,10 @@ def read_turn(path, *, thread_id, prefix_bytes):
     ``rows`` are the call's usage rows, each one provider request, and ``requests`` and the counters add them up;
     ``turn_ids`` are their distinct turns. ``children`` are the distinct sub-agents named by the turn's
     ``SubAgentActivity`` items of any kind, as recorded: their ids are checked only when ``read_child`` looks for
-    them, which counts a child's rows only under the turns in ``turn_ids``.
+    them, which counts a child's rows only under the turns in ``turn_ids``. Each holds its ``thread_id``, the
+    ``agent_path`` of the first item that names it, and ``started_in_call``: whether an item of kind ``started``
+    names it, so that this call started it rather than addressing one started earlier. ``model`` and ``effort``
+    are that item's ``model`` and ``reasoning_effort`` when they are text, else ``None``.
     ``tool_calls`` counts ``custom_tool_call`` and ``function_call`` records; ``tool_inputs`` hashes the input of
     the first ``MAX_TOOL_INPUTS`` and keeps its first ``EXCERPT_CHARS`` characters. ``account`` is the last
     ``rate_limits`` snapshot and ``profile`` the ``permission_profile`` of the last ``turn_context``, each
@@ -144,8 +163,14 @@ def read_turn(path, *, thread_id, prefix_bytes):
             # Any kind: a sub-agent started in an earlier turn may be addressed again in this one.
             if isinstance(item, dict) and item.get('type') == 'SubAgentActivity':
                 child = item.get('agent_thread_id')
-                if all(known['thread_id'] != child for known in children):
-                    children.append({'thread_id': child, 'agent_path': item.get('agent_path')})
+                entry = next((known for known in children if known['thread_id'] == child), None)
+                if entry is None:
+                    entry = {'thread_id': child, 'agent_path': item.get('agent_path'), 'started_in_call': False,
+                             'model': None, 'effort': None}
+                    children.append(entry)
+                if item.get('kind') == 'started' and not entry['started_in_call']:
+                    entry.update(started_in_call=True, model=_text(item.get('model')),
+                                 effort=_text(item.get('reasoning_effort')))
     return {'rows': rows, 'turn_ids': list(dict.fromkeys(row['turn_id'] for row in rows)), 'requests': len(rows),
             **{name: sum(row[name] for row in rows) for name in COUNTERS}, 'children': children,
             'tool_calls': tool_calls, 'tool_inputs': tool_inputs, 'tool_inputs_omitted': tool_calls - len(tool_inputs),
@@ -177,12 +202,23 @@ def _rollout_of(codex_home, thread_id):
 
 
 def read_child(codex_home, child_thread_id, *, parent_thread_id, root_turn_ids):
-    """A sub-agent's usage in the parent's turns ``root_turn_ids``, from its own rollout.
+    """A sub-agent's usage, model, effort and searches in the parent's turns ``root_turn_ids``, and its role.
 
-    The rollout is located by its exact file name under ``sessions`` or ``archived_sessions``, as an owned
-    rollout is: exactly one non-symlink file must match, and its first ``session_meta`` must name the child and
-    this parent. A row counts only when its ``thread_id`` is the child, its ``session_id`` the parent and its
-    ``root_turn_id`` one of ``root_turn_ids``; the forked parent history and earlier turns do not.
+    All are read from the sub-agent's own rollout, located by its exact file name under ``sessions`` or
+    ``archived_sessions``, as an owned rollout is: exactly one non-symlink file must match, and its first
+    ``session_meta`` must name the child and this parent. A row counts only when its ``thread_id`` is the child,
+    its ``session_id`` the parent and its ``root_turn_id`` one of ``root_turn_ids``; the forked parent history
+    and earlier turns do not.
+
+    ``role`` is the ``agent_role`` of that first ``session_meta`` when it is non-empty text, else ``None`` (a
+    sub-agent started without a role has none); ``forked_history`` is whether that record names, as non-empty
+    ``forked_from_id``, the thread whose history the sub-agent started with. ``model`` and ``effort`` are those
+    of the child's last ``turn_context`` record whose ``turn_id`` is the child's own turn of a counted row, each
+    when it is text, else ``None``. ``searches`` are the queries of the child's web searches in this call:
+    ``item_completed`` events whose item is an ``Extension`` of kind ``web.search`` or a ``WebSearch``, with a
+    text ``query``, and whose ``turn_id`` is the child's own turn of a counted row. The first ``MAX_SEARCHES``
+    are kept, each cut to ``EXCERPT_CHARS`` characters, and the rest are counted in ``searches_omitted``. None
+    of these makes the rollout unreadable.
     """
     _identity(child_thread_id, 'the sub-agent thread')
     _identity(parent_thread_id, 'the parent thread')
@@ -192,11 +228,27 @@ def read_child(codex_home, child_thread_id, *, parent_thread_id, root_turn_ids):
     meta = next((payload for kind, payload in records if kind == 'session_meta'), None)
     if meta is None or meta.get('id') != child_thread_id or meta.get('parent_thread_id') != parent_thread_id:
         raise LedgerUnavailable('its rollout does not record it as a sub-agent of this thread')
-    rows = [_counters(payload.get('usage')) for kind, payload in records
-            if kind == 'token_usage_record' and payload.get('thread_id') == child_thread_id
-            and payload.get('session_id') == parent_thread_id and payload.get('root_turn_id') in root_turn_ids]
+    counted = [payload for kind, payload in records
+               if kind == 'token_usage_record' and payload.get('thread_id') == child_thread_id
+               and payload.get('session_id') == parent_thread_id and payload.get('root_turn_id') in root_turn_ids]
+    rows = [_counters(payload.get('usage')) for payload in counted]
+    turns = {turn for turn in (payload.get('turn_id') for payload in counted) if isinstance(turn, str) and turn}
+    searches, context = [], {}
+    for kind, payload in records:
+        turn = payload.get('turn_id')
+        if kind == 'event_msg' and payload.get('type') == 'item_completed' and isinstance(turn, str) and turn in turns:
+            query = _search_query(payload.get('item'))
+            if query is not None:
+                searches.append(query[:EXCERPT_CHARS])
+        elif kind == 'turn_context' and isinstance(turn, str) and turn in turns:
+            context = payload
+    role, forked = meta.get('agent_role'), meta.get('forked_from_id')
     return {'thread_id': child_thread_id, 'rollout_ref': str(rollout.resolve()), 'rollout_sha256': digest(raw),
-            'requests': len(rows), **{name: sum(row[name] for row in rows) for name in COUNTERS}}
+            'requests': len(rows), **{name: sum(row[name] for row in rows) for name in COUNTERS},
+            'role': role if isinstance(role, str) and role else None,
+            'forked_history': isinstance(forked, str) and forked != '',
+            'model': _text(context.get('model')), 'effort': _text(context.get('effort')),
+            'searches': searches[:MAX_SEARCHES], 'searches_omitted': max(0, len(searches) - MAX_SEARCHES)}
 
 
 def _settled(source, tokens, reason, turn=None, children=()):
@@ -223,12 +275,14 @@ def settle(*, codex_home, path, thread_id, prefix_bytes, resumed, stream_usage, 
     """The tokens one call is charged and where the number comes from.
 
     When the call added usage rows, ``ledger``: their input plus output tokens and those of every sub-agent it
-    started, read through ``read_child``. The stream's input plus output tokens are the turn's own only on a fresh
-    thread; on a resumed one they are the thread's running total and are never charged. So without a rollout
-    (``path`` is ``None``) or without rows, a fresh thread is charged the stream's number and a resumed one's
-    usage is ``unknown``. A rollout or a sub-agent rollout that cannot be read makes the usage ``unknown`` on any
-    thread, never zero and never the stream's, with the reason; ``turn`` is then ``None`` when the call's own
-    rollout is the one that cannot be read.
+    started or addressed, read through ``read_child``. Each readable sub-agent is listed in ``children`` as the
+    turn's entry for it (``read_turn``) joined with what ``read_child`` read; its ``model`` and ``effort`` are
+    ``read_child``'s where they are not ``None``, else the turn entry's. The stream's input plus output tokens
+    are the turn's own only on a fresh thread; on a resumed one they are the thread's running total and are
+    never charged. So without a rollout (``path`` is ``None``) or without rows, a fresh thread is charged the
+    stream's number and a resumed one's usage is ``unknown``. A rollout or a sub-agent rollout that cannot be
+    read makes the usage ``unknown`` on any thread, never zero and never the stream's, with the reason; ``turn``
+    is then ``None`` when the call's own rollout is the one that cannot be read.
 
     Without a ``path``, the thread's own rollout is first looked for in ``codex_home`` by its exact thread id, as
     ``read_child`` locates a child, when both are given and the id is safe: a rollout the strict context reader
@@ -273,10 +327,13 @@ def _settle(*, codex_home, path, thread_id, prefix_bytes, resumed, stream_usage,
     children, unreadable = [], []
     for child in turn['children']:
         try:
-            children.append(read_child(codex_home, child['thread_id'], parent_thread_id=thread_id,
-                                       root_turn_ids=turn['turn_ids']))
+            own = read_child(codex_home, child['thread_id'], parent_thread_id=thread_id, root_turn_ids=turn['turn_ids'])
         except LedgerUnavailable as exc:
             unreadable.append(f'sub-agent {child["thread_id"]!r}: {exc}')
+            continue
+        # The sub-agent's own turn says what it ran on; the started item of this call, if any, is the fallback.
+        children.append({**child, **own, **{name: child[name] if own[name] is None else own[name]
+                                             for name in ('model', 'effort')}})
     if unreadable:
         return _settled('unknown', None, '; '.join(unreadable), turn, children)
     spent = _settled('ledger', None, None, turn, children)
@@ -325,9 +382,11 @@ def settle_call(folder, settings, *, session, codex_home, path, thread_id, strea
     counters, a lower bound when the usage is unknown), and names the turns whose rows those are (``turn_ids``, the
     turn's own; empty when its rollout was not read). ``account_snapshot``, the turn's last account snapshot or
     ``None``, is there for a ``dispatched`` call whose turn was read from the rollout, whatever its settings; and
-    when anything is on, ``native_capabilities``, ``native_activity`` (``transport.stream_activity`` of ``folder``
-    with the turn's tool calls, tool inputs, compactions and ``provider_requests``) and ``child_threads``. That
-    activity is recorded only: Codex's own tool calls charge no ``tool_calls``.
+    when anything is on, ``native_capabilities`` (``native.receipt_form`` of the settings: each declared sub-agent
+    role by its description and the SHA-256 of its instructions), ``native_activity``
+    (``transport.stream_activity`` of ``folder`` with the turn's tool calls, tool inputs, compactions and
+    ``provider_requests``) and ``child_threads``, the readable sub-agents as ``settle`` lists them. That activity
+    is recorded only: Codex's own tool calls charge no ``tool_calls``.
     """
     resumed = session is not None and bool(session.get('provider_thread_id'))
     prefix = ((session or {}).get('context_manifest') or {}).get('native_prefix') or {}
@@ -342,7 +401,7 @@ def settle_call(folder, settings, *, session, codex_home, path, thread_id, strea
     if dispatched and spent['turn'] is not None:
         receipt['account_snapshot'] = turn['account']
     if native_tools.any_on(settings):
-        receipt.update(native_capabilities=settings,
+        receipt.update(native_capabilities=native_tools.receipt_form(settings),
                        native_activity={**transport.stream_activity(folder),
                            **{name: turn.get(name) for name in ('tool_calls', 'tool_inputs', 'tool_inputs_omitted',
                                                                 'compactions')},

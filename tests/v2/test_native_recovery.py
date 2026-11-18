@@ -24,7 +24,8 @@ from rsi_lab.interruption import ATTESTATION_SCHEMA, certify_interruption
 from rsi_lab.journal import JournalWriter
 from rsi_lab.store import digest, encode
 from tests.v2.liveness_support import open_run
-from tests.v2.native_fixtures import PROFILE, SEARCH, TERMINAL, TERMINAL_AND_SEARCH, tool_call, turn_context, usage_row
+from tests.v2.native_fixtures import (PLAIN, PROFILE, R, ROLES, SEARCH, TERMINAL, TERMINAL_AND_SEARCH, WITH_ROLES,
+                                      tool_call, turn_context, usage_row)
 from tests.v2.test_native_executor import RESERVATION, RESPONSE, config_form
 from tests.v2.test_native_transport import NATIVE_ACTIVITY, NATIVE_STREAM, THREAD
 from tests.v2.test_session_context import fixture
@@ -188,6 +189,29 @@ class NativeRecoveryTests(unittest.TestCase):
                                 turn=self.this_turn() if ran else rows('t2'))
                 with self.assertRaisesRegex(RecoveryBlocked, 'recovery_binding_mismatch'):
                     self.recover(frozen)
+
+    def test_recovery_sees_changed_roles(self):                               # Review Focus 1
+        # A sub-agent call writes no tool item to its stream and no tool record to its rollout here.
+        self.write_call(WITH_ROLES, stream=TOOL_FREE_STREAM, turn=rows('t2'))
+        receipt = self.recover(WITH_ROLES)
+        self.assertEqual((receipt['status'], receipt['error']), ('succeeded', None))
+        self.assertEqual(receipt['actual_costs']['tokens'], 107171)
+        # The run's roles differ from those the call ran with only in one role's instructions.
+        changed = {**WITH_ROLES, 'subagents': {'max_concurrent': 3, 'roles': {**ROLES, 'local': {**R,
+                                                                                        'instructions': 'Refine more.'}}}}
+        with self.assertRaisesRegex(RecoveryBlocked,
+                                    '^recovery_binding_mismatch: invocation native settings differ from the Effect$'):
+            self.recover(changed)
+        # A call recorded before roles existed, against a run that declares none (here an empty roles object).
+        frozen = native.capabilities({'native_capabilities': {'lab': {'subagents': {'max_concurrent': 3,
+                                                                                    'roles': {}}}}})['lab']
+        self.assertEqual(frozen, PLAIN)
+        self.write_call({'web_search': False, 'terminal': None, 'subagents': {'max_concurrent': 3}},
+                        stream=TOOL_FREE_STREAM, turn=rows('t2'))
+        receipt = self.recover(frozen)
+        self.assertEqual((receipt['status'], receipt['error']), ('succeeded', None))
+        self.assertEqual(receipt['native_capabilities'], PLAIN)
+        self.assertEqual(receipt['actual_costs']['tokens'], 107171)
 
     def test_a_native_call_cannot_be_isolated(self):
         self.write_call(TERMINAL, interrupted=True)

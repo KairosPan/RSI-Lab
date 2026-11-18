@@ -26,6 +26,27 @@ artifact `reports/pr4-research-verification/from1700-v3-run-plan.md`.
 Neither its hidden objective nor its formula belongs in model prompts or
 literature queries. Literature searches use bounded public method topics.
 
+## Team runs
+
+`--team` prepares a fresh run with architecture `pablo_research_pr4_team_v1` and
+harness version `pablo_lab_led_v1`. The Lab leads `local` and `challenge`
+sub-agents declared by the host, decides each batch's role, and states that
+decision in its selection request; a backstop (`--challenge-backstop-batches`,
+default 4, or `off`) can require a challenge batch. `--native-capabilities FILE`
+is required with `--team` and must switch on `lab.subagents`. Readable roots
+that could expose the hidden objective are refused at preparation and checked
+again at every host start, and a run with web search on for any role says in
+its config and reports that it is not a blind run.
+A team run's per-request context limit is 4,194,304 bytes, and an idle session
+is rebuilt once its native history reaches `--rebuild-history-bytes` (262,144
+to 3,145,728, default 3,145,728: the limit less the largest request the host
+allows), before its next request could be refused for size.
+Sub-agent tokens are charged to the Lab's turn, so raise the token budget with
+`--additional-tokens`. None of these options is accepted with `--resume`.
+Without `--team`, preparation is unchanged, except that a parent which was itself
+a team run is refused: continue it with `--team`. No team run has been executed; see
+[TEAM_V1.md](TEAM_V1.md) for the options, roles, records and checks.
+
 ## Run a continuation
 
 Run from the repository root with the existing PABLO Python environment

@@ -793,6 +793,26 @@ class CodexExecutor:
         except ValueError as exc:
             raise ValueError('Unsupported exact model request envelope') from exc
         native_on = native_tools.any_on(settings)
+
+        def refused(error):
+            # A call refused before dispatch never reaches the provider. Settle
+            # its reservations as known zero without certifying a native
+            # turn or accepting any private memory update.
+            return {'status': 'failed_definite',
+                'actual_costs': {name: 0 for name in effect.get('reservations', {})},
+                'response': None, 'usage': None, 'usage_complete': False,
+                'terminal_received': False, 'native_writer_quiesced': True,
+                'never_dispatched': True, 'protocol_valid': False,
+                'provider_thread_id': (session or {}).get('provider_thread_id'),
+                'context_manifest': None, 'journal': None, 'parse_error': None,
+                'receipt_ref': None, 'receipt_sha256': None,
+                'sent_packet_sha256': expected_hash, 'sent_prompt_sha256': digest(request['prompt']),
+                'error': error,
+                'unknown_usage_is_zero': False}
+        # Declared sub-agent roles reach Codex as files in the session's folder, so they need a session.
+        declared_roles = native_tools.declared_roles(settings)
+        if declared_roles and session is None:
+            return refused('Sub-agent roles need a persistent session')
         preamble = native_tools.PREAMBLE if native_on else transport.PREAMBLE
         expected_keys = {'schema_version', 'mode', 'model', 'effort', 'prompt', 'response_schema', 'input_view_mode'}
         if (('native_capabilities' in metadata) != native_on
@@ -846,6 +866,8 @@ class CodexExecutor:
                         or not metadata.get('agent_turn_id') or type(metadata.get('session_fence')) is not int):
                     raise ValueError('Persistent model request lacks a fenced session/turn')
                 workspace = self.calls_root.parent / 'agents' / sid / 'workspace'
+                # Beside the workspace, inside the run root the terminal's commands are denied; Codex reads it.
+                roles_dir = self.calls_root.parent / 'agents' / sid / 'roles'
                 if settings['terminal'] is not None:
                     # The terminal cannot write these names: anything there would reach Codex as instructions
                     # or configuration nobody admitted.
@@ -858,6 +880,10 @@ class CodexExecutor:
                     if os.path.lexists(workspace / '.tmp') and not (workspace / '.tmp').is_dir():
                         raise ValueError("The workspace's .tmp, where the terminal's temporary files go, "
                                          'is not a directory')
+                if declared_roles:
+                    # Written here so that what cannot be written refuses the call; the transport writes them
+                    # again, from the same settings, just before Codex starts.
+                    transport.write_role_files(roles_dir, declared_roles)
                 prior = session.get('context_manifest') or {}
                 if session.get('committed_turn', 0) and not session.get('provider_thread_id'):
                     raise ValueError('Committed persistent session has no native thread; reconstruct explicitly')
@@ -880,21 +906,10 @@ class CodexExecutor:
                          'journal_metadata': {'run_id': effect['run_id'], 'effect_id': effect_id,
                              'agent_id': session['agent_instance_id'], 'session_id': sid,
                              'turn_id': metadata['agent_turn_id'], 'fence': metadata['session_fence']}}
+                if declared_roles:
+                    extra['roles_dir'] = roles_dir
             except (ValueError, OSError, KeyError, TypeError) as exc:
-                # A rejected local preflight never reaches the provider. Settle
-                # its reservations as known zero without certifying a native
-                # turn or accepting any private memory update.
-                return {'status': 'failed_definite',
-                    'actual_costs': {name: 0 for name in effect.get('reservations', {})},
-                    'response': None, 'usage': None, 'usage_complete': False,
-                    'terminal_received': False, 'native_writer_quiesced': True,
-                    'never_dispatched': True, 'protocol_valid': False,
-                    'provider_thread_id': session.get('provider_thread_id'),
-                    'context_manifest': None, 'journal': None, 'parse_error': None,
-                    'receipt_ref': None, 'receipt_sha256': None,
-                    'sent_packet_sha256': expected_hash, 'sent_prompt_sha256': digest(request['prompt']),
-                    'error': 'Persistent session preflight failed: ' + str(exc),
-                    'unknown_usage_is_zero': False}
+                return refused('Persistent session preflight failed: ' + str(exc))
         if loaded_images:
             extra['images'] = loaded_images
         if native_on:

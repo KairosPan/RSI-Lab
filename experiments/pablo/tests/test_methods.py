@@ -240,5 +240,56 @@ class ExecutableMethodsTests(unittest.TestCase):
         self.assertEqual(methods.progress(result['effect'], {'data': alias}), original)
 
 
+@unittest.skipUnless(importlib.util.find_spec('rdkit'), 'Optional PABLO RDKit dependency required')
+class LedSelectionTests(unittest.TestCase):
+    """A Lab-led run: the selection plan stores the Lab's decision and scoring admission takes it from there."""
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.store = Store(Path(self.tmp.name).resolve() / 'run')
+        self.addCleanup(self.store.close)
+        self.run = 'led-methods'
+        self.controller = Controller(self.store)
+        initial = self.store.put_blob({'candidates': ['CC', 'CCC', 'CCO', 'c1ccccc1'],
+                                      'scores': [0.1, 0.2, 0.9, 0.3]})
+        self.controller.initialize(self.run, max_external=1,
+            budgets={k: {'limit': 10000, 'hard': k.endswith('calls')}
+                     for k in ('model_calls', 'tool_calls', 'tokens', 'wall_seconds', 'cpu_seconds')},
+            config={'execution_mode': 'test', 'max_open_reviews': 0,
+                    'pablo_run_root': str(self.store.root), 'pablo_initial_ref': initial,
+                    'pablo_max_new_evaluations': 20, 'pablo_harness': harness.LED_DEFAULT_CONFIG})
+        self.runtime = Runtime(self.store, self.run, adapters=[methods.make_adapter()])
+        content = {'provider': literature.PROVIDER, 'topic': 'sample_efficient_search',
+                   'query': literature.TOPICS['sample_efficient_search'], 'http_status': 200,
+                   'response_complete': True, 'response_sha256': 'a' * 64,
+                   'records': [{'provider_source': 'SYNTHETIC', 'publication_id': 'method-fixture',
+                                'abstract_text': 'Synthetic method evidence for offline software testing.'}]}
+        self.controller.add_fact(self.run, 'paper', 'source_statement', content,
+                                 {'adapter_id': literature.ADAPTER_ID, 'fixture': True}, 'paper')
+
+    def test_led_selection_then_scoring_admission_takes_the_plans_decision(self):
+        decision = {'challenge_dispatched': True, 'challenge_adopted': True,
+                    'reason': 'The fixture leading series has stalled.'}
+        inputs = {'run_root': str(self.store.root), 'run_id': self.run, 'proposal_role': 'challenge',
+                  'anchor_parent': 'c1ccccc1', 'candidates': ['Cc1ccccc1', 'CCc1ccccc1', 'Oc1ccccc1'],
+                  'select_count': 2, 'method': 'knn_ucb_diversity',
+                  'parameters': {'neighbors': 2, 'exploration_weight': 0.2, 'diversity_weight': 0.1},
+                  'literature_evidence_ids': ['paper'], 'decision': decision}
+        with patch.object(oracle, 'score', side_effect=AssertionError('Method must not call hidden scorer')):
+            run = self.runtime.execute_adapter(methods.ADAPTER_ID, inputs, trigger_id='led-select')
+        self.assertEqual(run['effect']['status'], 'succeeded', run)
+        plan = run['result']
+        self.assertEqual(plan['harness_binding']['decision'], decision)
+        self.assertNotIn('decision', plan['input_contract'])
+        scoring = {'run_root': str(self.store.root), 'run_id': self.run, 'candidates': plan['selected_candidates'],
+                   'selection_effect_id': plan['effect_id'], 'selection_plan_id': plan['plan_id'],
+                   'proposal_role': 'challenge', 'anchor_parent': 'c1ccccc1'}
+        adapter.admit_work(self.store, self.run, scoring)
+        selected, binding = adapter.selection_binding(self.store, self.run, scoring)
+        self.assertEqual(binding, plan['harness_binding'])
+        self.assertEqual(binding['decision'], plan['harness_binding']['decision'])
+        self.assertEqual(selected['plan_id'], plan['plan_id'])
+
+
 if __name__ == '__main__':
     unittest.main()

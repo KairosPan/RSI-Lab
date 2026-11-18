@@ -21,6 +21,7 @@ RSI-Lab 的内核负责可追踪执行、Lab/Meta 协作和可恢复的研究状
 - `publication`：把核验结果映射为原始事实、来源陈述、验证结论与应用结果。
 - 可选 `measure`：产生有界任务指标，内核保留原始执行凭据，不解释分数方向。
 - 可选 `required_evidence(store, run_id, inputs)`：声明此请求必须读取并引用的原始事实。Runtime 核对这些事实已完整交付到实际模型请求，并出现在命令引用中；只提交来源 ID 或摘要卡片不够。回调与其他 Adapter 代码一起绑定源码身份。
+- 可选 `admit_request(store, run_id, inputs, effect)`：让宿主对照提出请求的那次模型调用检查工具请求。Lab 或 Meta 的工具请求创建诊断 Work 时，它在同一写事务中、紧接 `admit_work(store, run_id, inputs)` 之后运行；`admit_work` 已拒绝时不再调用。`inputs` 是解析后的 `inputs_json`；`effect` 是提出该请求的模型 Effect 的已保存记录（`proposal['effect_id']`），`json.loads(store.read_blob(effect['result_ref']))` 即该次调用的回执，含 `child_threads` 等字段。它抛出 `ValueError` 与 `admit_work` 拒绝的处理相同：proposal 记为 `blocked_action` 并保存错误文本，不创建诊断依赖或诊断 Work（修复路径仍可能排入后续 Work）。接纳阶段对 `prepare` 的试运行不调用它，重放已排队或已完成的 Work 不调用它，宿主直接调用 `execute_adapter` 时也不调用它。回调与其他 Adapter 代码一起绑定源码身份。
 
 `Runtime(..., adapters=[...])` 接收宿主选择的能力；`execute_adapter(adapter_id, inputs, trigger_id=...)` 负责调用前预约、保存回执与发布。适配器身份、版本、回调与实现 hash 绑定到执行，恢复时不会按任务名称猜测实现。每个回调的代码 hash 覆盖其字节码、名称与常量，不随这段代码所在的文件名或行号变化，也不随进程内存中的其他内容变化；列出的源文件仍按绝对路径和整个文件内容绑定，因此移动模块或编辑这些文件中的任何内容都会改变描述符，变更前已准备的 Effect 会被报告为 `blocked_adapter`。
 
@@ -202,7 +203,7 @@ Adapter 的可选 `progress(effect, publication)` 返回 `query`、`state`、`re
 | 推荐类别与复核指引 | 运行配置 `research_policy`，至少一个字段 | `task.constraints.research_policy` |
 | Meta 调整 Lab 编排 | 运行配置里有 `orchestration` 块 | `task.constraints.orchestration`；`max_changes` 大于 0 时处置模式多出动作 `propose_lab_settings` |
 | 工具 | `Runtime(..., adapters=[...])`，命令行用 `--adapter-factory`。`requires_acceptance=True` 的适配器还要有验收记录 | `task.capability_catalog` |
-| Codex 原生工具 | 运行配置 `native_capabilities`，按角色开启网页搜索、受限终端和子 agent，见[持久 Agent 说明](persistent-agents.md#codex-原生工具) | 开启了任一工具的角色：`task.constraints.native_capabilities`，提示词中说明可用工具及其限制的一段 |
+| Codex 原生工具 | 运行配置 `native_capabilities`，按角色开启网页搜索、受限终端和子 agent，子 agent 可以声明具名角色（`subagents.roles`），见[持久 Agent 说明](persistent-agents.md#codex-原生工具) | 开启了任一工具的角色：`task.constraints.native_capabilities`（声明的角色连同完整指令），提示词中说明可用工具及其限制的一段（声明了角色时列出各角色及其说明） |
 
 两个 `research_features` 开关只认 JSON 布尔值 `true`，写成 `"true"` 或 `1` 不生效。运行配置在 `init` 时冻结，续跑沿用同一份配置，所以缺的键只能靠新建运行补上；`Runtime(...)` 的参数则每次构造都要传。
 
@@ -224,7 +225,7 @@ for work in runtime.controller.ready(run_id):      # 第一次模型调用之前
 
 | 接口 | 作用 |
 | --- | --- |
-| `runtime.feature_report()` | 报告三项功能各自是否在配置里声明（`declared`）、服务是否已创建（`service`），是否传入了可调用的身份提供者，配置里是否有 `research_policy`，已加载的适配器及其是否进入能力目录，Lab、discovery、disposition 三种模式下模型可用的动作和 `command` 之外的响应字段，以及 `native_capabilities`：`lab`、`meta`、`literature` 各自的原生工具设置，形如 `{"web_search": false, "terminal": null, "subagents": null}`，开启的终端给出解析后的 `readable_roots`，开启的子 agent 给出 `max_concurrent`；以及 `native_warnings`，一个字符串列表：有角色开启了原生工具、而实际的容量上限（`max_effective_context_bytes`，没有时取 `max_input_bytes`，再没有时为 131,072）低于 1,048,576 字节时含一条提醒，因为使用工具的一轮写下的记录会超过这个上限，之后的轮次会因容量阻塞；否则为空列表 |
+| `runtime.feature_report()` | 报告三项功能各自是否在配置里声明（`declared`）、服务是否已创建（`service`），是否传入了可调用的身份提供者，配置里是否有 `research_policy`，已加载的适配器及其是否进入能力目录，Lab、discovery、disposition 三种模式下模型可用的动作和 `command` 之外的响应字段，以及 `native_capabilities`：`lab`、`meta`、`literature` 各自的原生工具设置，形如 `{"web_search": false, "terminal": null, "subagents": null}`，开启的终端给出解析后的 `readable_roots`，开启的子 agent 给出 `max_concurrent`，声明了角色时还有 `roles`，按名称顺序列出每个角色的 `description` 和 `instructions`；以及 `native_warnings`，一个字符串列表：有角色开启了原生工具、而实际的容量上限（`max_effective_context_bytes`，没有时取 `max_input_bytes`，再没有时为 131,072）低于 1,048,576 字节时含一条提醒，因为使用工具的一轮写下的记录会超过这个上限，之后的轮次会因容量阻塞；否则为空列表 |
 | `runtime.preflight(expect, work_id=None)` | 逐项核对期望。全部满足时返回 `feature_report()` 的结果，给了 `work_id` 时结果里多一项 `request`；否则抛 `ValueError`，每条一行，写明缺什么、该改运行配置的哪个键或 `Runtime(...)` 的哪个参数 |
 | `runtime.request_report(work_id)` | 对一个就绪的 Lab 或 Meta Work 按真实路径构建请求包但不准备 Effect，报告请求包里实际有什么 |
 

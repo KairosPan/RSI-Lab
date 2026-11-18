@@ -5,15 +5,22 @@ is read into one settings object in normal form::
 
     {'web_search': bool,
      'terminal': None | {'readable_roots': [absolute directory, ...]},
-     'subagents': None | {'max_concurrent': 1..8}}
+     'subagents': None | {'max_concurrent': 1..8,
+                          'roles': {name: {'description': str, 'instructions': str}, ...}}}
+
+``roles`` holds the named sub-agent roles declared to Codex for this role's
+sessions, in name order. It is present only when at least one is declared, so
+settings without them keep the form they had before sub-agent roles existed.
 
 A run without the block, and a role absent from it, has everything off.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
+import re
 
 
 ROLES = ('lab', 'meta', 'literature')
@@ -21,6 +28,15 @@ PROFILE = 'rsi_agent'
 OFF = {'web_search': False, 'terminal': None, 'subagents': None}
 DEFAULT_MAX_CONCURRENT = 3
 MAX_CONCURRENT = 8
+# Named sub-agent roles: at most MAX_ROLES, none named like one of Codex's built-in sub-agent roles
+# or like a fixed key of Codex's [agents] table, beside which each role's own agents.<name> values go.
+MAX_ROLES = 8
+BUILT_IN_ROLES = ('default', 'explorer', 'worker')
+AGENTS_TABLE_KEYS = ('max_depth', 'default_subagent_model', 'default_subagent_reasoning_effort',
+                     'max_concurrent_threads_per_session', 'enabled', 'interrupt_message')
+ROLE_NAME = re.compile('[a-z][a-z0-9_-]{0,31}')
+MAX_DESCRIPTION = 300
+MAX_INSTRUCTIONS = 8000
 # Shared temporary folders the terminal's commands may neither read nor write;
 # each is denied when it exists as a directory on this machine.
 SHARED_TEMP_FOLDERS = ('/tmp', '/private/tmp', '/var/tmp', '/private/var/tmp')
@@ -60,10 +76,17 @@ def any_on(settings):
     return validate(settings) != OFF
 
 
+def declared_roles(settings):
+    """The declared sub-agent roles of normal-form settings by name; empty when none or sub-agents are off."""
+    return (settings['subagents'] or {}).get('roles', {})
+
+
 def instruction(settings):
     """The paragraph that tells a role which native tools it has and what they may be used for.
 
-    Empty when everything is off. The terminal's sentence names its readable roots.
+    Empty when everything is off. The terminal's sentence names its readable roots. When sub-agent
+    roles are declared, one sentence names each with its description and a last one says that any other
+    helper is started with agent_type default.
     """
     settings = validate(settings)
     if settings == OFF:
@@ -85,6 +108,11 @@ def instruction(settings):
         text += ('The terminal has no network access and can read only your working directory'
                  + (' and these directories: ' + ', '.join(roots) if roots else '')
                  + '. Files there are scratch and may not survive; record what matters in working_memory_delta. ')
+    roles = declared_roles(settings)
+    if roles:
+        text += ('Sub-agent roles declared for this session, started with agent_type: '
+                 + '; '.join(name + ' (' + role['description'] + ')' for name, role in roles.items())
+                 + '. Start any other helper with agent_type default. ')
     return text
 
 
@@ -126,7 +154,7 @@ def rollout_kinds(settings):
     return {'response': frozenset(response), 'outer': frozenset(outer)}
 
 
-def command_parts(settings, *, workspace, run_root, codex_home, model, effort):
+def command_parts(settings, *, workspace, run_root, codex_home, model, effort, roles_dir=None):
     """What one role's settings change in the Codex command.
 
     ``sandbox`` replaces ``--sandbox read-only``: with the terminal on, the
@@ -134,6 +162,10 @@ def command_parts(settings, *, workspace, run_root, codex_home, model, effort):
     ``--ignore-user-config``. ``config`` holds the values each passed after its
     own ``-c``. ``enabled`` names the features that are no longer disabled.
     The web search value is set by the caller.
+
+    Each declared sub-agent role adds its description and the path of its role
+    file, ``<roles_dir>/<name>.toml``, after the agent limits, in name order.
+    Declared roles without ``roles_dir`` are refused; without roles it is unused.
 
     With the terminal on, the network is closed, commands get only the core
     environment, the shared temporary folders are denied (temporary files go
@@ -168,8 +200,42 @@ def command_parts(settings, *, workspace, run_root, codex_home, model, effort):
                    'agents.max_concurrent_threads_per_session=' + str(settings['subagents']['max_concurrent']),
                    'agents.default_subagent_model=' + toml_string(model),
                    'agents.default_subagent_reasoning_effort=' + toml_string(effort)]
+        roles = declared_roles(settings)
+        if roles and roles_dir is None:
+            raise ValueError('Declared sub-agent roles need roles_dir, the folder of their role files')
+        for name, role in roles.items():
+            config += ['agents.' + name + '.description=' + toml_string(role['description']),
+                       'agents.' + name + '.config_file=' + toml_string(os.path.join(roles_dir, name + '.toml'))]
         enabled |= {'multi_agent'}
     return {'sandbox': sandbox, 'flags': flags, 'config': config, 'enabled': enabled}
+
+
+def role_file_text(name, role):
+    """The text of one sub-agent role's file for Codex.
+
+    Three TOML lines, ``name``, ``description`` and ``developer_instructions``
+    (the role's ``instructions``), each ending in a newline.
+    """
+    return ''.join(key + ' = ' + toml_string(value) + '\n' for key, value in (
+        ('name', name), ('description', role['description']), ('developer_instructions', role['instructions'])))
+
+
+def receipt_form(settings):
+    """One role's settings as a call's receipt records them.
+
+    A checked copy in which each declared sub-agent role holds its
+    ``description`` and ``instructions_sha256``, the SHA-256 of its UTF-8
+    instructions, instead of the instructions. Settings without roles come back
+    equal to their normal form.
+    """
+    settings = validate(settings)
+    roles = declared_roles(settings)
+    if roles:
+        settings['subagents']['roles'] = {
+            name: {'description': role['description'],
+                   'instructions_sha256': hashlib.sha256(role['instructions'].encode('utf-8')).hexdigest()}
+            for name, role in roles.items()}
+    return settings
 
 
 def toml_string(text):
@@ -280,10 +346,41 @@ def _shape(settings, where):
             raise ValueError(where + '.terminal may only hold readable_roots, a list of absolute paths')
         terminal = {'readable_roots': list(terminal['readable_roots'])}
     if subagents is not None:
-        if (type(subagents) is not dict or set(subagents) != {'max_concurrent'}
+        if (type(subagents) is not dict or 'max_concurrent' not in subagents
+                or set(subagents) - {'max_concurrent', 'roles'}
                 or type(subagents['max_concurrent']) is not int
                 or not 1 <= subagents['max_concurrent'] <= MAX_CONCURRENT):
             raise ValueError(where + '.subagents may only hold max_concurrent, an integer from 1 to '
-                             + str(MAX_CONCURRENT))
-        subagents = {'max_concurrent': subagents['max_concurrent']}
+                             + str(MAX_CONCURRENT) + ', and roles')
+        roles = _roles(subagents.get('roles', {}), where + '.subagents.roles')
+        subagents = {'max_concurrent': subagents['max_concurrent'], **({'roles': roles} if roles else {})}
     return {'web_search': web_search, 'terminal': terminal, 'subagents': subagents}
+
+
+def _roles(roles, where):
+    """Declared sub-agent roles in normal form: a new object in name order, each role a new object.
+
+    Refuses more than ``MAX_ROLES`` roles, a name that ``ROLE_NAME`` does not
+    match in full or that is one of ``BUILT_IN_ROLES`` or ``AGENTS_TABLE_KEYS``, and a role that does not
+    hold exactly a one-line, non-blank ``description`` of at most
+    ``MAX_DESCRIPTION`` characters and non-blank ``instructions`` of at most
+    ``MAX_INSTRUCTIONS``.
+    """
+    if type(roles) is not dict or len(roles) > MAX_ROLES:
+        raise ValueError(where + ' must be an object of at most ' + str(MAX_ROLES) + ' roles')
+    for name, role in roles.items():
+        if type(name) is not str or not ROLE_NAME.fullmatch(name) or name in BUILT_IN_ROLES + AGENTS_TABLE_KEYS:
+            raise ValueError(where + ' names must match ' + ROLE_NAME.pattern + ' and may not be '
+                             + ', '.join(BUILT_IN_ROLES + AGENTS_TABLE_KEYS) + ': ' + repr(name))
+        if type(role) is not dict or set(role) != {'description', 'instructions'}:
+            raise ValueError(where + '.' + name + ' must hold exactly description and instructions')
+        description, instructions = role['description'], role['instructions']
+        if (type(description) is not str or len(description) > MAX_DESCRIPTION or not description.strip()
+                or '\n' in description or '\r' in description):
+            raise ValueError(where + '.' + name + '.description must be one line of 1 to '
+                             + str(MAX_DESCRIPTION) + ' characters, not blank')
+        if type(instructions) is not str or len(instructions) > MAX_INSTRUCTIONS or not instructions.strip():
+            raise ValueError(where + '.' + name + '.instructions must be 1 to ' + str(MAX_INSTRUCTIONS)
+                             + ' characters, not blank')
+    return {name: {'description': roles[name]['description'], 'instructions': roles[name]['instructions']}
+            for name in sorted(roles)}
