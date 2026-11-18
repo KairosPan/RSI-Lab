@@ -53,7 +53,7 @@ def _canonical(value):
 
 
 def _inputs(inputs):
-    if not isinstance(inputs, dict) or set(inputs) != FIELDS:
+    if not isinstance(inputs, dict) or set(inputs) not in (FIELDS, FIELDS | {'decision'}):
         raise ValueError('Selection requires the complete fixed input contract')
     if (not isinstance(inputs['run_root'], str) or not Path(inputs['run_root']).is_absolute()
             or str(Path(inputs['run_root']).resolve()) != inputs['run_root']
@@ -80,8 +80,19 @@ def _inputs(inputs):
             or any(not isinstance(fid, str) or not fid or len(fid) > 200 for fid in ids)
             or len(set(ids)) != len(ids)):
         raise ValueError('Selection requires 1..4 distinct actual literature fact IDs')
-    return {**inputs, 'candidates': canonical, 'anchor_parent': _canonical(inputs['anchor_parent']),
-            'parameters': dict(p), 'literature_evidence_ids': sorted(ids)}
+    normalized = {**inputs, 'candidates': canonical, 'anchor_parent': _canonical(inputs['anchor_parent']),
+                  'parameters': dict(p), 'literature_evidence_ids': sorted(ids)}
+    if 'decision' in inputs:
+        # The Lab's own statement about a led batch; here only its shape is checked.
+        from . import harness
+        normalized['decision'] = harness.validate_decision(inputs['decision'], inputs['proposal_role'])
+    return normalized
+
+
+def _led(store, run_id):
+    from . import harness
+    policy = harness.configuration(store.run(run_id)['config'])
+    return policy is not None and policy['version'] == harness.LED_VERSION
 
 
 def _literature_sources(store, run_id, inputs):
@@ -113,13 +124,20 @@ def _literature_sources(store, run_id, inputs):
     return sources
 
 
-def normalize_recommendation(store, run_id, inputs):
+def _request(store, run_id, inputs):
+    """The normalized request without the Lab's decision, and that decision (None when absent)."""
     normalized = _inputs(inputs)
+    decision = normalized.pop('decision', None)
     if (normalized['run_id'] != run_id or normalized['run_root'] != str(store.root)
             or store.run(run_id)['config'].get('pablo_run_root') != str(store.root)):
         raise ValueError('Selection contract targets a different run')
     return {**normalized, 'literature_sources': _literature_sources(store, run_id, normalized),
-            'implementation': VERSION, 'fingerprint': dict(FINGERPRINT)}
+            'implementation': VERSION, 'fingerprint': dict(FINGERPRINT)}, decision
+
+
+def normalize_recommendation(store, run_id, inputs):
+    """A recommendation names role, anchor and pool; the Lab's decision is never part of it."""
+    return _request(store, run_id, inputs)[0]
 
 
 def required_evidence(store, run_id, inputs):
@@ -128,7 +146,7 @@ def required_evidence(store, run_id, inputs):
 
 
 def _packet(store, run_id, inputs):
-    normalized = normalize_recommendation(store, run_id, inputs)
+    normalized, decision = _request(store, run_id, inputs)
     progress = adapter.read_progress(store, run_id)
     if len(progress['candidates']) > MAX_TRAINING:
         raise ValueError('Observed training history exceeds the explicit 10000-observation capacity')
@@ -139,10 +157,14 @@ def _packet(store, run_id, inputs):
     harness_binding = None
     if store.run(run_id)['config'].get('pablo_harness'):
         from . import harness
+        # A Lab-led run requires the Lab's decision and binds it; a fixed-schedule run refuses one.
         harness_binding = harness.validate_proposal(store, run_id, normalized['proposal_role'],
-                                                    normalized['anchor_parent'], progress=progress)
+                                                    normalized['anchor_parent'], progress=progress,
+                                                    decision=decision)
         if normalized['select_count'] > harness_binding['max_candidates']:
             raise ValueError('Method selection exceeds the current Harness batch allowance')
+    elif decision is not None:
+        raise ValueError('Only a Lab-led run takes a batch decision')
     known = set(progress['candidates'])
     pending = {value for work in adapter.queued_intents(store, run_id) for value in work['canonical_candidates']}
     for effect in adapter._effects(store, run_id):
@@ -186,6 +208,19 @@ def prepare(inputs):
 
 def admit_work(store, run_id, inputs):
     _packet(store, run_id, inputs)
+
+
+def admit_request(store, run_id, inputs, effect):
+    """In a Lab-led run, challenge_dispatched must match the record of the call that made the request.
+
+    Registered only for led runs. A stored result without child_threads records no
+    sub-agent. The claim is checked once, here; the settled plan then carries it.
+    """
+    if not _led(store, run_id):
+        return
+    from . import harness
+    record = json.loads(store.read_blob(effect['result_ref']))
+    harness.check_dispatch(inputs.get('decision'), record.get('child_threads'))
 
 
 def select(packet):
@@ -271,6 +306,8 @@ def execute(effect, raw):
                         or store.read_blob(effect['packet_ref']) != raw):
                     raise ValueError('Method execution requires its exact persisted dispatching effect')
                 original = {key: inputs[key] for key in FIELDS}
+                if 'decision' in (packet['harness_binding'] or {}):
+                    original['decision'] = packet['harness_binding']['decision']
                 if _packet(store, effect['run_id'], original) != packet:
                     raise ValueError('Method observations, candidates, literature or implementation changed before execution')
         finally:
@@ -341,10 +378,14 @@ def validate_evaluation_plan(store, run_id, *, selection_effect_id, plan_id, can
         from . import harness
         harness.validate_binding(store, run_id, result.get('harness_binding'),
                                  result['selected_candidates'], progress=progress)
-    return {'selection_effect_id': effect['id'], 'plan_id': result['plan_id'],
-            'selection_receipt_ref': effect['result_ref'], 'selected_candidates': result['selected_candidates'],
-            'proposal_role': result['proposal_role'], 'anchor_parent': result['anchor_parent'],
-            'method': result['method'], 'trajectory_sha256': result['trajectory_sha256']}
+    selected = {'selection_effect_id': effect['id'], 'plan_id': result['plan_id'],
+                'selection_receipt_ref': effect['result_ref'], 'selected_candidates': result['selected_candidates'],
+                'proposal_role': result['proposal_role'], 'anchor_parent': result['anchor_parent'],
+                'method': result['method'], 'trajectory_sha256': result['trajectory_sha256']}
+    if _led(store, run_id):
+        # The Lab's decision stored with the plan, checked again just above; scoring binds it from here.
+        selected['decision'] = result['harness_binding']['decision']
+    return selected
 
 
 def recommendation_completion(contract, effect, publication):

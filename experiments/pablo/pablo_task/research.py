@@ -172,9 +172,9 @@ def literature_recommendation_completion(contract, effect, publication):
             'scientific_status': 'unverified', 'causal_benefit': 'not_established'}
 
 
-def research_policy():
+def research_policy(team=False):
     """Task policy consumed by the generic recommendation/schema machinery."""
-    return {
+    policy = {
         'recommendation_kinds': ['candidate_selection', 'search_strategy', 'novelty_screening', 'evidence_gathering'],
         'recommendation_guidance': (
             'PABLO recommendations are bounded candidate-selection, molecular-search, exact novelty-screening '
@@ -206,6 +206,11 @@ def research_policy():
             'dispose of pending recommendations; no more scoring or other tool execution is authorized. '
             'When final_review_only is false, this policy text makes no completion claim. '
             'Scoring completion is not biological efficacy.')}
+    if team:
+        policy['recommendation_guidance'] += (
+            " In a team run the Lab decides each batch's local or challenge role; a recommendation for "
+            "pablo.select_candidates never contains decision.")
+    return policy
 
 
 def project_measurement(effect, publication):
@@ -289,7 +294,7 @@ def project_publication(store, run_id, effect, publication):
                            'interpretation_limit': 'Observed batch outcome only; no claim that this method is generally ineffective or that Meta caused improvement.'}}
 
 
-def registered_adapters(*, executable_methods=False):
+def registered_adapters(*, executable_methods=False, led=False):
     from .lookup import make_adapter as make_lookup
     from pablo_task.literature import make_adapter as make_literature
     score, lookup, literature = adapter.make_adapter(), make_lookup(), make_literature()
@@ -309,8 +314,10 @@ def registered_adapters(*, executable_methods=False):
                     recommendation_completion=literature_recommendation_completion,
                     decision_dependencies=literature_decision_dependencies)]
     if executable_methods:
-        from .methods import make_adapter as make_method
-        registered.append(make_method())
+        from .methods import admit_request, make_adapter as make_method
+        method = make_method()
+        # A set hook is part of the adapter's identity, so only a Lab-led run registers it.
+        registered.append(replace(method, admit_request=admit_request) if led else method)
     return registered
 
 
