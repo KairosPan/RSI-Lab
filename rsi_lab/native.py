@@ -24,6 +24,9 @@ MAX_CONCURRENT = 8
 # Shared temporary folders the terminal's commands may neither read nor write;
 # each is denied when it exists as a directory on this machine.
 SHARED_TEMP_FOLDERS = ('/tmp', '/private/tmp', '/var/tmp', '/private/var/tmp')
+# Names in a session's workspace that Codex reads as instructions or configuration.
+# The terminal may not write them, and a terminal call is not sent while any exists.
+WORKSPACE_INSTRUCTIONS = ('.codex', '.agents', 'AGENTS.md', 'AGENTS.override.md')
 PREAMBLE = (
     "Return one JSON object matching the supplied response schema as your final message. "
     "You may use the tools available in this session before answering.\n\n"
@@ -149,8 +152,7 @@ def command_parts(settings, *, workspace, run_root, codex_home, model, effort):
         entries += [(folder, 'deny') for folder in SHARED_TEMP_FOLDERS
                     if os.path.isdir(folder) and folder not in (run_root, codex_home)]
         entries += [(workspace, 'write')]
-        entries += [(os.path.join(workspace, name), 'read')
-                    for name in ('.codex', '.agents', 'AGENTS.md', 'AGENTS.override.md')]
+        entries += [(os.path.join(workspace, name), 'read') for name in WORKSPACE_INSTRUCTIONS]
         entries += [(root, 'read') for root in settings['terminal']['readable_roots']]
         # zsh writes here-documents under TMPPREFIX, which defaults to /tmp/zsh.
         environment = [('TMPDIR', temporary), ('TMPPREFIX', os.path.join(temporary, 'zsh'))]
