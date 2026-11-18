@@ -810,7 +810,7 @@ class CodexExecutor:
                 'error': error,
                 'unknown_usage_is_zero': False}
         # Declared sub-agent roles reach Codex as files in the session's folder, so they need a session.
-        declared_roles = (settings['subagents'] or {}).get('roles', {})
+        declared_roles = native_tools.declared_roles(settings)
         if declared_roles and session is None:
             return refused('Sub-agent roles need a persistent session')
         preamble = native_tools.PREAMBLE if native_on else transport.PREAMBLE

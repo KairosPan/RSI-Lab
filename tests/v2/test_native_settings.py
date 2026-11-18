@@ -271,6 +271,12 @@ class RoleSettingsTests(unittest.TestCase):
         old = {'web_search': False, 'terminal': None, 'subagents': {'max_concurrent': 2}}
         self.assertEqual(native.validate(old), old)
 
+    def test_declared_roles_are_read_from_normal_form_settings(self):
+        self.assertEqual(native.declared_roles(WITH_ROLES), ROLES)
+        for settings in (PLAIN, native.OFF, {**native.OFF, 'web_search': True}):
+            with self.subTest(settings=settings):
+                self.assertEqual(native.declared_roles(settings), {})
+
     def test_validate_keeps_roles_in_name_order(self):
         given = {**PLAIN, 'subagents': {'max_concurrent': 3, 'roles': {'local': R, 'challenge': ROLES['challenge']}}}
         self.assertEqual(native.validate(given), WITH_ROLES)

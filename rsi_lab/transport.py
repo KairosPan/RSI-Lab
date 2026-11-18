@@ -687,7 +687,7 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
     image_digest = image_manifest_sha256(images) if images else None
     settings = native_tools.validate(native)
     native_on = native_tools.any_on(settings)
-    declared_roles = (settings['subagents'] or {}).get('roles', {})
+    declared_roles = native_tools.declared_roles(settings)
     if native_on:
         if session is None or run_root is None:
             raise ValueError('Native capabilities require a persistent session and a run root')

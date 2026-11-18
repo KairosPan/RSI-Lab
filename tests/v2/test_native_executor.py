@@ -1,10 +1,12 @@
 """The executor of a role's model call: its native settings, its cost from Codex's ledger and the turn's activity.
 
 The Lab Effect is prepared and dispatched by the real Runtime and Controller.
-``transport.invoke`` is replaced, as tests/v2/test_roles.py replaces it, by a
+Most tests replace ``transport.invoke``, as tests/v2/test_roles.py does, by a
 fixture that writes the call's stream and a synthetic rollout built from
-tests/v2/native_fixtures.py. No Codex, model, network request or credential is
-used.
+tests/v2/native_fixtures.py. The tests of role files and of refused role calls
+run the real transport instead, with ``subprocess.Popen`` replaced by a local
+process standing in for Codex or by one that fails if Codex is started. No
+Codex, model, network request or credential is used.
 """
 import hashlib
 import json
@@ -501,6 +503,13 @@ class NativeExecutorTests(unittest.TestCase):
         self.assertEqual(set(self.calls[0]), {'session', 'journal_metadata', 'native', 'run_root'})
         self.assertEqual(self.calls[0]['native'], PLAIN)
         self.assertEqual(receipt['native_capabilities'], PLAIN)
+        roles_dir = self.store.root / 'agents' / self.effect['metadata']['agent_session_id'] / 'roles'
+        self.assertFalse(os.path.lexists(roles_dir))
+        # The same place holds the role files of a call that declares roles.
+        receipt = self.execute(settings=WITH_ROLES, rollout=PARENT_WITH_CHILD, child=CHILD_ROWS)
+        self.assertEqual(receipt['status'], 'succeeded', receipt['error'])
+        roles_dir = self.store.root / 'agents' / self.effect['metadata']['agent_session_id'] / 'roles'
+        self.assertEqual(sorted(path.name for path in roles_dir.iterdir()), ['challenge.toml', 'local.toml'])
 
     def test_receipt_names_roles_by_digest(self):
         receipt = self.execute(settings=WITH_ROLES, rollout=PARENT_WITH_CHILD, child=CHILD_ROWS)

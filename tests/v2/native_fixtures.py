@@ -125,10 +125,10 @@ SANDBOX_POLICY = {'type': 'workspace-write', 'network_access': False, 'exclude_t
                   'exclude_slash_tmp': True}
 
 
-def turn_context(turn, profile=None, *, cwd='/workspace'):
-    """A ``turn_context`` record of ``turn`` run in ``cwd`` under the probe's ``sandbox_policy``; it carries
-    ``permission_profile`` only when ``profile`` is given."""
-    payload = {'turn_id': turn, 'root_turn_id': turn, 'cwd': str(cwd), 'model': 'test-model', 'effort': 'low',
+def turn_context(turn, profile=None, *, cwd='/workspace', model='test-model', effort='low'):
+    """A ``turn_context`` record of ``turn`` run in ``cwd`` on ``model`` and ``effort`` under the probe's
+    ``sandbox_policy``; it carries ``permission_profile`` only when ``profile`` is given."""
+    payload = {'turn_id': turn, 'root_turn_id': turn, 'cwd': str(cwd), 'model': model, 'effort': effort,
                'approval_policy': 'never', 'sandbox_policy': dict(SANDBOX_POLICY)}
     if profile is not None:
         payload['permission_profile'] = profile

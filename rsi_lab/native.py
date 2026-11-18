@@ -76,11 +76,17 @@ def any_on(settings):
     return validate(settings) != OFF
 
 
+def declared_roles(settings):
+    """The declared sub-agent roles of normal-form settings by name; empty when none or sub-agents are off."""
+    return (settings['subagents'] or {}).get('roles', {})
+
+
 def instruction(settings):
     """The paragraph that tells a role which native tools it has and what they may be used for.
 
     Empty when everything is off. The terminal's sentence names its readable roots. When sub-agent
-    roles are declared, the last sentence names each with its description.
+    roles are declared, one sentence names each with its description and a last one says that any other
+    helper is started with agent_type default.
     """
     settings = validate(settings)
     if settings == OFF:
@@ -102,7 +108,7 @@ def instruction(settings):
         text += ('The terminal has no network access and can read only your working directory'
                  + (' and these directories: ' + ', '.join(roots) if roots else '')
                  + '. Files there are scratch and may not survive; record what matters in working_memory_delta. ')
-    roles = _declared_roles(settings)
+    roles = declared_roles(settings)
     if roles:
         text += ('Sub-agent roles declared for this session, started with agent_type: '
                  + '; '.join(name + ' (' + role['description'] + ')' for name, role in roles.items())
@@ -194,7 +200,7 @@ def command_parts(settings, *, workspace, run_root, codex_home, model, effort, r
                    'agents.max_concurrent_threads_per_session=' + str(settings['subagents']['max_concurrent']),
                    'agents.default_subagent_model=' + toml_string(model),
                    'agents.default_subagent_reasoning_effort=' + toml_string(effort)]
-        roles = _declared_roles(settings)
+        roles = declared_roles(settings)
         if roles and roles_dir is None:
             raise ValueError('Declared sub-agent roles need roles_dir, the folder of their role files')
         for name, role in roles.items():
@@ -223,7 +229,7 @@ def receipt_form(settings):
     equal to their normal form.
     """
     settings = validate(settings)
-    roles = _declared_roles(settings)
+    roles = declared_roles(settings)
     if roles:
         settings['subagents']['roles'] = {
             name: {'description': role['description'],
@@ -378,8 +384,3 @@ def _roles(roles, where):
                              + ' characters, not blank')
     return {name: {'description': roles[name]['description'], 'instructions': roles[name]['instructions']}
             for name in sorted(roles)}
-
-
-def _declared_roles(settings):
-    """The declared sub-agent roles of normal-form settings by name; empty when none or sub-agents are off."""
-    return (settings['subagents'] or {}).get('roles', {})

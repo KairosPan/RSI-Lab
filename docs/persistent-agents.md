@@ -214,11 +214,11 @@ Scientific Memory 的领域身份及经验解释继续通过 `scientific_identit
 - `thread_id`：子 agent 的 thread 身份。
 - `agent_path`：它在 Codex 里的路径，例如 `/root/<name>`，取自本轮第一条提到它的活动记录。
 - `started_in_call`：是否由本轮派出。为 `false` 时，它是早先的轮次派出、本轮再次联系的。
-- `model`、`effort`：本轮派出它的那条记录写下的模型和 effort；本轮没有派出它，或记录里不是文本时为 `null`。
+- `model`、`effort`：它自己的 rollout 中本轮最后一条 `turn_context` 记录写下的模型和 effort；某一项没有这样的文本值时，取本轮派出它的那条记录写下的值；本轮也没有派出它，或记录里不是文本时为 `null`。
 - `rollout_ref`、`rollout_sha256`：它自己的 rollout 的路径和 hash。
 - `requests`、`input_tokens`、`output_tokens`、`cached_input_tokens`：它在本轮的用量行汇总，早先轮次的不计入。
 - `role`：它自己的 rollout 第一条 `session_meta` 记下的角色（`agent_role`）。声明的角色和 Codex 的内置角色（例如 `explorer`）都这样记下；不带角色派出的子 agent 没有这一项，记为 `null`，不是非空文本时也记为 `null`。`null` 不会使调用无效，也不影响计费。
-- `forked_history`：它是否带着父调用的对话历史开始，即那条 `session_meta` 是否有 `forked_from_id`。
+- `forked_history`：它是否带着父调用的对话历史开始，即那条 `session_meta` 是否有非空的 `forked_from_id`。
 - `searches`：它在本轮做的网页搜索的搜索词，保留前 20 条，每条截到 200 字符，超出的条数记在 `searches_omitted`。它在早先轮次的搜索不计入。
 
 子 agent 的 rollout 读不出来时，它不在 `child_threads` 里，调用的用量记为未知（见下文）。
