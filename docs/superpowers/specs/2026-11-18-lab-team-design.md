@@ -168,8 +168,8 @@ are the reason for a backstop that can be switched off, not proof of what works.
   `explorer` or `worker`. **(my call)**
 - At most 8 roles; `description` is one line of 1 to 300 characters;
   `instructions` is 1 to 8,000 characters. **(my call)**
-- In the stored settings `subagents` becomes `{max_concurrent, roles}`, with
-  `roles` an empty object when none are declared.
+- In the stored settings `subagents` holds a `roles` key only when at least
+  one role is declared, so settings without roles are stored exactly as today.
 - Roles are frozen with the run config like the other native settings, and
   compared on recovery like them.
 - A role with no `roles`, or with `subagents` off, produces the same Codex
@@ -349,7 +349,7 @@ objective.
 
 **Challenge's starting point.** The Lab is told to start Challenge without its
 own conversation history and to pass it the anchors, constraints and results it
-needs. Whether it did is recorded (`forked_history`) and shown in the replay,
+needs. Whether it did is recorded in the call's record (`forked_history`),
 not enforced. **(my call)** The reason for asking: the Lab's history is full of
 its reasoning for the leading series. The reason for not enforcing: a Challenge
 that starts empty depends on the Lab's briefing for its data, and nobody has
@@ -414,6 +414,21 @@ folder with marker strings, not in a run. It establishes:
 
 Items 1 and 2 decide between approach A and the fallback. The findings are
 written into the plan before any other task starts.
+
+## Added after the probe
+
+The live probe ran on 2026-11-18 and confirmed approach A; its findings are in
+the plan (`docs/superpowers/plans/2026-11-18-lab-team.md`). Three points go
+beyond the sections above, each **(my call)**:
+
+- The lead can choose a model and effort for each sub-agent it starts. Nothing
+  restricts this; every `child_threads` entry records the `model` and `effort`
+  the sub-agent ran on.
+- A challenge batch in which no candidate was scored does not satisfy the
+  backstop: the counter returns to 0 after a challenge batch only when at least
+  one of its candidates was scored.
+- In a run with roles, the lead's request shows it the full instructions of its
+  sub-agents, because the frozen settings are part of the request's constraints.
 
 ## Left to the builder
 
