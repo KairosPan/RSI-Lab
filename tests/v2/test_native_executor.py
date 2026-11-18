@@ -235,6 +235,16 @@ class NativeExecutorTests(unittest.TestCase):
                                              'cached_input_tokens': 0})
         self.assertTrue(receipt['usage_complete'])
 
+    def test_a_call_with_sub_agents_on_is_never_charged_the_stream(self):
+        stream = {'input_tokens': 40, 'output_tokens': 2}
+        receipt = self.execute(settings=TERMINAL_AND_SUBAGENTS, rollout=NO_ROWS, stream_usage=stream)
+        self.assertNotIn('tokens', receipt['actual_costs'])
+        self.assertEqual(receipt['token_source'], 'unknown')
+        self.assertIn('leaves out sub-agents', receipt['token_reason'])
+        receipt = self.execute(settings=TERMINAL, rollout=NO_ROWS, stream_usage=stream)
+        self.assertEqual((receipt['token_source'], receipt['actual_costs']['tokens']), ('stream', 42))
+        self.assertIsNone(receipt['token_reason'])
+
     def test_a_resumed_turn_without_usage_rows_is_unknown(self):
         def without_rows(profile, cwd):
             return usage_row(THREAD, 't1', 't1', 54394, 5524), b''

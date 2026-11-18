@@ -202,7 +202,9 @@ def _settled(source, tokens, reason, turn=None, children=()):
             'children': list(children), 'turn': turn}
 
 
-def _from_stream(stream_usage, why, turn=None):
+def _from_stream(stream_usage, why, turn=None, *, children_possible=False):
+    if children_possible:
+        return _settled('unknown', None, why + ", and the stream's number leaves out sub-agents", turn)
     counts = ([stream_usage.get('input_tokens'), stream_usage.get('output_tokens')]
               if isinstance(stream_usage, dict) else [None])
     if all(type(count) is int and count >= 0 for count in counts):
@@ -210,7 +212,7 @@ def _from_stream(stream_usage, why, turn=None):
     return _settled('unknown', None, why + ', and the stream reported no usage', turn)
 
 
-def settle(*, codex_home, path, thread_id, prefix_bytes, resumed, stream_usage):
+def settle(*, codex_home, path, thread_id, prefix_bytes, resumed, stream_usage, children_possible=False):
     """The tokens one call is charged and where the number comes from.
 
     When the call added usage rows, ``ledger``: their input plus output tokens and those of every sub-agent it
@@ -224,6 +226,9 @@ def settle(*, codex_home, path, thread_id, prefix_bytes, resumed, stream_usage):
     Without a ``path``, the thread's own rollout is first looked for in ``codex_home`` by its exact thread id, as
     ``read_child`` locates a child, when both are given and the id is safe: a rollout the strict context reader
     refused still holds the call's usage rows. Found exactly once, it is the path; otherwise there is none.
+
+    The stream's usage leaves out every sub-agent, so a call that could start any (``children_possible``) is
+    never settled from it: where a fresh thread would be, its usage is ``unknown`` instead.
     """
     if path is None and codex_home is not None and isinstance(thread_id, str) and THREAD_ID.fullmatch(thread_id):
         try:
@@ -233,7 +238,7 @@ def settle(*, codex_home, path, thread_id, prefix_bytes, resumed, stream_usage):
     if path is None:
         if resumed:
             return _settled('unknown', None, "the resumed thread's rollout could not be read")
-        return _from_stream(stream_usage, 'the call has no rollout to read')
+        return _from_stream(stream_usage, 'the call has no rollout to read', children_possible=children_possible)
     try:
         turn = read_turn(path, thread_id=thread_id, prefix_bytes=prefix_bytes)
     except LedgerUnavailable as exc:
@@ -241,7 +246,8 @@ def settle(*, codex_home, path, thread_id, prefix_bytes, resumed, stream_usage):
     if not turn['rows']:
         if resumed:
             return _settled('unknown', None, 'the resumed turn added no usage rows', turn)
-        return _from_stream(stream_usage, 'the fresh turn added no usage rows', turn)
+        return _from_stream(stream_usage, 'the fresh turn added no usage rows', turn,
+                            children_possible=children_possible)
     children, unreadable = [], []
     for child in turn['children']:
         try:

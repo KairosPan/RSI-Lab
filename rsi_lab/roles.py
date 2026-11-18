@@ -943,7 +943,7 @@ class CodexExecutor:
             path=result.get('native_session_ref') if session is not None else None,
             thread_id=result.get('provider_thread_id'),
             prefix_bytes=(prior.get('native_prefix') or {}).get('prefix_bytes') if resumed else 0,
-            resumed=resumed, stream_usage=usage)
+            resumed=resumed, stream_usage=usage, children_possible=settings['subagents'] is not None)
         if spent['tokens'] is not None:
             costs['tokens'] = spent['tokens']
         context = None

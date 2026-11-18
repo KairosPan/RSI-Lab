@@ -124,6 +124,19 @@ class CodexLedgerTests(unittest.TestCase):
         self.reset_home()
         self.assertEqual(self.settle(path=None, resumed=False, stream_usage=stream)['source'], 'stream')
 
+    def test_a_call_that_could_start_sub_agents_is_never_settled_from_the_stream(self):
+        # The stream's usage leaves out every sub-agent the call started.
+        stream = {'input_tokens': 20, 'output_tokens': 5}
+        for case, prepare in (('no rollout', lambda: None), ('no rows', lambda: self.write(fixture(self.cwd)))):
+            with self.subTest(case=case):
+                self.reset_home()
+                path = prepare()
+                got = self.settle(path=path, resumed=False, stream_usage=stream, children_possible=True)
+                self.assertEqual((got['source'], got['tokens']), ('unknown', None))
+                self.assertIn('leaves out sub-agents', got['reason'])
+                got = self.settle(path=path, resumed=False, stream_usage=stream)
+                self.assertEqual((got['source'], got['tokens']), ('stream', 25))
+
     def test_fallbacks(self):
         base = fixture(self.cwd)
         stream = {'input_tokens': 20, 'output_tokens': 5}
