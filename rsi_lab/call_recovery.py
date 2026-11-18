@@ -15,9 +15,10 @@ import uuid
 
 from .store import digest
 from .journal import read_journal
-from .transport import _json, audited_events
+from .transport import BENIGN_FAILURE_ERRORS, _json, audited_events
 from .session_context import find_owned_rollout, read_native_snapshot, snapshot_from_bytes, verify_snapshot_images
-from . import images
+from . import codex_ledger, images
+from . import native as native_tools
 
 
 class RecoveryBlocked(ValueError):
@@ -63,8 +64,12 @@ def recover_codex_receipt(effect, packet_bytes, calls_root, *, interruption_atte
     """Return an authenticated receipt, None if unfinished, or raise on conflict.
 
     The result carries ``recovery_requires_fencing`` when no durable CLI exit is
-    available, even if the provider already emitted a turn terminal. The caller
+    available, even if the provider already emitted a turn terminal, and for a
+    call with native settings on also when no saved transport result says that
+    what ran under Codex was stopped. The caller
     may settle known costs/execution while retaining the session recovery duty.
+    The call must have run with the Effect's frozen native settings; its tokens
+    are settled as the executor settles them (``codex_ledger.settle_call``).
     This function performs no writes, subprocess launches or provider requests.
     """
     effect_id = effect.get('id')
@@ -130,8 +135,16 @@ def recover_codex_receipt(effect, packet_bytes, calls_root, *, interruption_atte
         _same(start.get(key), value, 'journal ' + key + ' differs')
     _same(start.get('prompt_sha256'), digest(prompt), 'journal prompt hash differs')
     recorded_invocation = start.get('invocation', {})
-    for key in ('model', 'effort', 'command', 'cwd', 'session'):
+    for key in ('model', 'effort', 'command', 'cwd', 'session', 'native'):
         _same(recorded_invocation.get(key), invocation.get(key), 'invocation ' + key + ' changed')
+    # The call ran with the Effect's frozen native settings; neither names any when everything is off.
+    _same(invocation.get('native'), metadata.get('native_capabilities'),
+          'invocation native settings differ from the Effect')
+    try:
+        settings = native_tools.validate(invocation.get('native'))
+    except ValueError as exc:
+        raise RecoveryBlocked('recovery_binding_mismatch', 'invalid native settings') from exc
+    native_on = native_tools.any_on(settings)
     if expected_images:
         _same(recorded_invocation.get('requested_image_manifest'), expected_images,
               'journal image request differs from immutable packet')
@@ -202,12 +215,8 @@ def recover_codex_receipt(effect, packet_bytes, calls_root, *, interruption_atte
         _same(saved.get('execution_status'), status, 'saved execution outcome differs')
         if finished is not None:
             _same(saved.get('returncode'), finished.get('returncode'), 'saved process exit differs')
-    benign_failure_errors = {
-        'Expected exactly one completed turn, observed 0',
-        'Expected exactly one nonempty final assistant message',
-    }
     contract_errors = [message for message in errors if not (status == 'failed_definite' and (
-        message in benign_failure_errors or message.startswith('Codex error event: ')
+        message in BENIGN_FAILURE_ERRORS or message.startswith('Codex error event: ')
         or message.startswith('Codex exited with status ')))]
     protocol_valid = not contract_errors and (saved is None or saved.get('protocol_valid') is not False)
     response, parse_error = None, None
@@ -221,8 +230,6 @@ def recover_codex_receipt(effect, packet_bytes, calls_root, *, interruption_atte
     if saved is not None:
         _same(saved.get('response'), response, 'saved response differs from durable output')
     costs = {'model_calls': 1}
-    if usage is not None and all(type(usage.get(k)) is int and usage[k] >= 0 for k in ('input_tokens', 'output_tokens')):
-        costs['tokens'] = usage['input_tokens'] + usage['output_tokens']
     if saved is not None and type(saved.get('wall_seconds')) in {int, float}:
         wall = saved['wall_seconds']
         if math.isfinite(wall) and wall >= 0:
@@ -231,16 +238,17 @@ def recover_codex_receipt(effect, packet_bytes, calls_root, *, interruption_atte
                'native_session_ref': None, 'native_session_sha256': None, 'native_session_error': None,
                'provider_context_verified': False, 'retained_read_authority': False}
     prior = (session.get('context_manifest') or {}).get('native_prefix')
+    native_path = None
     try:
         if session.get('provider_thread_id') and not prior:
             raise ValueError('Resumed native session has no certified prior prefix')
-        native_path = find_owned_rollout(binding['codex_home'], thread_id, workspace)
+        native_path = find_owned_rollout(binding['codex_home'], thread_id, workspace, native=settings)
         snapshot = read_native_snapshot(native_path, expected_thread_id=thread_id,
-                                        expected_cwd=workspace, expected_prefix=prior)
+                                        expected_cwd=workspace, expected_prefix=prior, native=settings)
         before_record = 0
         if prior:
             before = snapshot_from_bytes(_read(native_path)[:prior['prefix_bytes']], expected_thread_id=thread_id,
-                                         expected_cwd=workspace)
+                                         expected_cwd=workspace, native=settings)
             before_record = before['record_count']
         image_check = verify_snapshot_images(snapshot, expected_images, after_record=before_record)
         if expected_images:
@@ -255,21 +263,32 @@ def recover_codex_receipt(effect, packet_bytes, calls_root, *, interruption_atte
         if (session.get('provider_thread_id') or prior is not None
                 or finished is not None or saved is not None):
             protocol_valid = False
+    # Settled as the executor settles it, from the usage rows the call added to its rollout.
+    charge = codex_ledger.settle_call(folder, settings, session=session, codex_home=binding['codex_home'],
+        path=native_path, thread_id=thread_id, stream_usage=usage, run_root=root.parent)
+    if charge['tokens'] is not None:
+        costs['tokens'] = charge['tokens']
+    if charge['profile_error']:
+        protocol_valid = False
+    messages = ([charge['profile_error']] if charge['profile_error'] else []) + errors
     latest = read_journal(journal_path)
     if (latest['durable_seq'] != capture['durable_seq'] or latest['head_hash'] != capture['head_hash']
             or latest['gaps']):
         raise RecoveryBlocked('journal_changed', 'journal advanced while recovery was reading it')
     if saved is not None:
         _same(_object(result_path), saved, 'saved result changed during recovery')
-    quiesced = finished is not None
+    # As in the executor; with anything on, only a saved result can say that what ran under Codex was stopped.
+    quiesced = finished is not None and (not native_on or (
+        saved is not None and saved.get('descendants_stopped') is not False))
     evidence_path = result_path if saved is not None else journal_path
     return {'status': status, 'actual_costs': costs, 'response': response,
-            'usage': usage, 'usage_complete': usage_complete,
+            'usage': usage, 'usage_complete': usage_complete and charge['usage_known'],
+            **charge['receipt'],
             'terminal_received': True, 'protocol_valid': protocol_valid,
             'provider_thread_id': thread_id, 'context_manifest': context,
             'journal': {'path': str(journal_path), 'durable_seq': capture['durable_seq'],
                         'head_hash': capture['head_hash']},
-            'parse_error': parse_error, 'error': '; '.join(errors) if errors else None,
+            'parse_error': parse_error, 'error': '; '.join(messages) if messages else None,
             'receipt_ref': str(evidence_path), 'receipt_sha256': digest(_read(evidence_path)),
             'sent_packet_sha256': expected_hash, 'sent_prompt_sha256': digest(prompt),
             **({'sent_image_manifest': expected_images,

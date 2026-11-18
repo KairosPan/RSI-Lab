@@ -9,14 +9,17 @@ to a rollout of its own, found by its exact thread id as an owned rollout is
 parent's turn as ``root_turn_id``.
 
 The same bytes say what the call did: its tool calls, its compactions, the last
-account snapshot and the permission profile of its last turn context. Nothing
-here runs Codex or writes anything.
+account snapshot and the permission profile of its last turn context.
+``settle_call`` turns all this into what a finished call's receipt says, for
+the executor and for recovery alike. Nothing here runs Codex or writes anything.
 """
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
+from . import native as native_tools, transport
 from .session_context import THREAD_ID
 from .store import digest
 
@@ -259,3 +262,65 @@ def settle(*, codex_home, path, thread_id, prefix_bytes, resumed, stream_usage, 
         return _settled('unknown', None, '; '.join(unreadable), turn, children)
     spent = _settled('ledger', None, None, turn, children)
     return {**spent, 'tokens': spent['input_tokens'] + spent['output_tokens']}
+
+
+def _profile_in_force(profile, *, run_root, codex_home):
+    """Whether a turn's ``permission_profile`` is the managed, offline one that denies the run root and the Codex home.
+
+    Paths are compared resolved, as the transport resolves the run root and the Codex home it names.
+    """
+    files = profile.get('file_system') if isinstance(profile, dict) else None
+    if (not isinstance(files, dict) or profile.get('type') != 'managed' or profile.get('network') != 'restricted'
+            or files.get('type') != 'restricted' or not isinstance(files.get('entries'), list)
+            or not isinstance(codex_home, str)):
+        return False
+    denied = set()
+    for entry in files['entries']:
+        place = entry.get('path') if isinstance(entry, dict) and entry.get('access') == 'deny' else None
+        if (isinstance(place, dict) and place.get('type') == 'path' and isinstance(place.get('path'), str)
+                and os.path.isabs(place['path'])):
+            try:
+                denied.add(Path(place['path']).resolve())
+            except (OSError, ValueError, RuntimeError):     # Not a usable path: it denies nothing named here.
+                continue
+    return {Path(run_root).resolve(), Path(codex_home).resolve()} <= denied
+
+
+def settle_call(folder, settings, *, session, codex_home, path, thread_id, stream_usage, run_root, dispatched=True):
+    """What one finished call is charged, and what its receipt says of its tokens, its native tools and its confinement.
+
+    The executor and recovery both settle a call here, so a call gets the same receipt from either. ``folder`` is the
+    call's folder, ``settings`` its native settings in normal form and ``session`` its agent session as admitted
+    (``None`` for a call without one). The call is settled by ``settle``: ``codex_home``, ``thread_id`` and
+    ``stream_usage`` are passed on, and ``path`` (the call's own rollout as found, else ``None``) when there is a
+    session. On a resumed thread the call's bytes start at the session's committed ``native_prefix``; sub-agents
+    switched on mean the stream's number is never charged.
+
+    ``tokens`` is what is charged, ``None`` when unknown, and ``usage_known`` is false then. ``profile_error`` is
+    ``'Permission profile was not in force'`` when the terminal is on, the call was ``dispatched`` and its last turn
+    did not run under the managed offline profile that denies ``run_root`` and ``codex_home``; else ``None``.
+    ``receipt`` holds ``token_source``, ``token_reason`` (only when unknown), ``stream_usage`` and ``ledger`` for every
+    call; and when anything is on, ``native_capabilities``, ``native_activity`` (``transport.stream_activity`` of
+    ``folder`` with the turn's tool calls, tool inputs, compactions and ``provider_requests``), ``child_threads`` and
+    ``account_snapshot``. That activity is recorded only: Codex's own tool calls charge no ``tool_calls``.
+    """
+    resumed = session is not None and bool(session.get('provider_thread_id'))
+    prefix = ((session or {}).get('context_manifest') or {}).get('native_prefix') or {}
+    spent = settle(codex_home=codex_home, path=path if session is not None else None, thread_id=thread_id,
+                   prefix_bytes=prefix.get('prefix_bytes') if resumed else 0, resumed=resumed,
+                   stream_usage=stream_usage, children_possible=settings['subagents'] is not None)
+    turn = spent['turn'] or {}
+    receipt = {'token_source': spent['source'],
+               'token_reason': spent['reason'] if spent['source'] == 'unknown' else None,
+               'stream_usage': stream_usage, 'ledger': {name: spent[name] for name in ('requests',) + COUNTERS}}
+    if native_tools.any_on(settings):
+        receipt.update(native_capabilities=settings,
+                       native_activity={**transport.stream_activity(folder),
+                           **{name: turn.get(name) for name in ('tool_calls', 'tool_inputs', 'tool_inputs_omitted',
+                                                                'compactions')},
+                           'provider_requests': turn.get('requests')},
+                       child_threads=spent['children'], account_snapshot=turn.get('account'))
+    confined = (settings['terminal'] is None or not dispatched
+                or _profile_in_force(turn.get('profile'), run_root=run_root, codex_home=codex_home))
+    return {'tokens': spent['tokens'], 'usage_known': spent['source'] != 'unknown',
+            'profile_error': None if confined else 'Permission profile was not in force', 'receipt': receipt}

@@ -38,6 +38,13 @@ PREAMBLE = (
     "Return only one JSON object matching the supplied response schema. Use only the supplied "
     "task and evidence. Do not use tools, read files, browse, delegate, or inspect your environment.\n\n"
 )
+# What a certified turn.failed may leave in the audit of its stream without breaking the protocol; besides these,
+# a Codex error event and a nonzero exit. Recovery reads a failed turn with the same list.
+BENIGN_FAILURE_ERRORS = (
+    'Expected exactly one completed turn, observed 0',
+    'Expected exactly one nonempty final assistant message',
+    'Expected a nonempty final assistant message',
+)
 
 
 def _write_json(path, value):
@@ -750,13 +757,8 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
         # protocol. Keep its error text while permitting the controller to close
         # the native turn without inventing output or a working-memory update.
         expected_failure = stream_complete and terminal == ['turn.failed']
-        benign_failure_errors = (
-            'Expected exactly one completed turn, observed 0',
-            'Expected exactly one nonempty final assistant message',
-            'Expected a nonempty final assistant message',
-        )
         contract_errors = [message for message in errors if not (expected_failure and (
-            message in benign_failure_errors or message.startswith('Codex error event: ')
+            message in BENIGN_FAILURE_ERRORS or message.startswith('Codex error event: ')
             or message.startswith('Codex exited with status ')))]
         protocol_valid = not contract_errors
         if errors:
