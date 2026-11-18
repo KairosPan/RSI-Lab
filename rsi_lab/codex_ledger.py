@@ -323,11 +323,11 @@ def settle_call(folder, settings, *, session, codex_home, path, thread_id, strea
     ``receipt`` holds ``token_source``, ``token_reason`` (only when unknown), ``stream_usage`` and ``ledger`` for every
     call. ``ledger`` adds up the usage rows read, the turn's and its readable children's (``requests`` and the
     counters, a lower bound when the usage is unknown), and names the turns whose rows those are (``turn_ids``, the
-    turn's own; empty when its rollout was not read). ``account_snapshot``, the turn's last account snapshot or ``None``, for a ``dispatched`` call whose turn was
-    read from the rollout, whatever its settings; and when anything is on, ``native_capabilities``,
-    ``native_activity`` (``transport.stream_activity`` of ``folder`` with the turn's tool calls, tool inputs,
-    compactions and ``provider_requests``) and ``child_threads``. That activity is recorded only: Codex's own tool
-    calls charge no ``tool_calls``.
+    turn's own; empty when its rollout was not read). ``account_snapshot``, the turn's last account snapshot or
+    ``None``, is there for a ``dispatched`` call whose turn was read from the rollout, whatever its settings; and
+    when anything is on, ``native_capabilities``, ``native_activity`` (``transport.stream_activity`` of ``folder``
+    with the turn's tool calls, tool inputs, compactions and ``provider_requests``) and ``child_threads``. That
+    activity is recorded only: Codex's own tool calls charge no ``tool_calls``.
     """
     resumed = session is not None and bool(session.get('provider_thread_id'))
     prefix = ((session or {}).get('context_manifest') or {}).get('native_prefix') or {}
