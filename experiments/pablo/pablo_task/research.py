@@ -314,10 +314,16 @@ def registered_adapters(*, executable_methods=False, led=False):
                     recommendation_completion=literature_recommendation_completion,
                     decision_dependencies=literature_decision_dependencies)]
     if executable_methods:
-        from .methods import admit_request, make_adapter as make_method
+        from .methods import DECISION_CONTRACT, DECISION_NOTE, FIELDS, admit_request, make_adapter as make_method
         method = make_method()
-        # A set hook is part of the adapter's identity, so only a Lab-led run registers it.
-        registered.append(replace(method, admit_request=admit_request) if led else method)
+        if led:
+            # The contract gains the Lab's decision and the request hook checks its dispatch claim. Both are
+            # part of the adapter's identity, so only a Lab-led run has them.
+            contract = {**method.manifest['input_contract'], 'fields': sorted(FIELDS | {'decision'}),
+                        'decision': dict(DECISION_CONTRACT), 'decision_note': DECISION_NOTE}
+            method = replace(method, manifest={**method.manifest, 'input_contract': contract},
+                             admit_request=admit_request)
+        registered.append(method)
     return registered
 
 

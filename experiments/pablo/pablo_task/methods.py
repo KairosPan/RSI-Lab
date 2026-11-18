@@ -32,6 +32,12 @@ METHODS = {
 FIELDS = {'run_root', 'run_id', 'proposal_role', 'anchor_parent', 'candidates', 'select_count',
           'method', 'parameters', 'literature_evidence_ids'}
 PARAMETERS = {'neighbors', 'exploration_weight', 'diversity_weight'}
+# Shown only in a Lab-led run's selection contract (research.registered_adapters(led=True)).
+DECISION_CONTRACT = {
+    'challenge_dispatched': 'true or false',
+    'challenge_adopted': 'true or false; true only with proposal_role challenge and challenge_dispatched true',
+    'reason': 'one line, 1 to 300 characters'}
+DECISION_NOTE = "The decision is the Lab's own statement about this batch; it is not part of a Meta recommendation."
 FINGERPRINT = {'kind': 'Morgan_bit_vector', 'radius': 2, 'bits': 2048, 'include_chirality': False}
 
 

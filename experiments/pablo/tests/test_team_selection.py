@@ -179,11 +179,31 @@ class TeamSelectionTests(unittest.TestCase):
         self.assertIsNone(selection.admit_request)
         self.assertEqual(selection.descriptor(), methods.make_adapter().descriptor())
         self.assertIs(led_selection.admit_request, methods.admit_request)
-        self.assertEqual(led_selection, replace(selection, admit_request=methods.admit_request))
+        self.assertEqual(replace(led_selection, manifest=selection.manifest, admit_request=None), selection)
         self.assertIn('admit_request', led_selection.descriptor()['callbacks'])
         self.assertEqual([a.descriptor() for a in led_others], [a.descriptor() for a in others])
         self.assertEqual([a.descriptor() for a in research.registered_adapters()],
                          [a.descriptor() for a in others])
+
+    def test_only_a_led_contract_shows_the_decision(self):
+        fixed = sorted(['run_root', 'run_id', 'proposal_role', 'anchor_parent', 'candidates', 'select_count',
+                        'method', 'parameters', 'literature_evidence_ids'])
+        selection = research.registered_adapters(executable_methods=True)[-1]
+        led_selection = research.registered_adapters(executable_methods=True, led=True)[-1]
+        self.assertEqual(selection.manifest, methods.make_adapter().manifest)
+        self.assertEqual(selection.manifest['input_contract']['fields'], fixed)
+        self.assertFalse({'decision', 'decision_note'} & set(selection.manifest['input_contract']))
+        contract = led_selection.manifest['input_contract']
+        self.assertEqual(contract['fields'], sorted(fixed + ['decision']))
+        self.assertEqual(set(contract['decision']), set(harness.DECISION_FIELDS))
+        self.assertIn('true only with proposal_role challenge', contract['decision']['challenge_adopted'])
+        self.assertIn('1 to 300 characters', contract['decision']['reason'])
+        self.assertIn("the Lab's own statement", contract['decision_note'])
+        self.assertIn('not part of a Meta recommendation', contract['decision_note'])
+        self.assertEqual({k: v for k, v in contract.items() if k not in {'fields', 'decision', 'decision_note'}},
+                         {k: v for k, v in selection.manifest['input_contract'].items() if k != 'fields'})
+        self.assertEqual({k: v for k, v in led_selection.manifest.items() if k != 'input_contract'},
+                         {k: v for k, v in selection.manifest.items() if k != 'input_contract'})
 
     def test_team_guidance_tells_meta_who_decides(self):
         added = (" In a team run the Lab decides each batch's local or challenge role; a recommendation for "
