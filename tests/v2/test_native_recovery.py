@@ -156,7 +156,7 @@ class NativeRecoveryTests(unittest.TestCase):
         self.assertTrue(receipt['protocol_valid']); self.assertIsNone(receipt['error'])
         self.assertEqual((receipt['token_source'], receipt['token_reason']), ('ledger', None))
         self.assertEqual(receipt['ledger'], {'requests': 2, 'input_tokens': 60000 + 42016, 'output_tokens': 100 + 5055,
-                                             'cached_input_tokens': 0})
+                                             'cached_input_tokens': 0, 'turn_ids': ['t2']})
         self.assertEqual(receipt['stream_usage'], {'input_tokens': 20, 'output_tokens': 5})
         self.assertTrue(receipt['usage_complete'])
         self.assertEqual(receipt['native_capabilities'], TERMINAL_AND_SEARCH)

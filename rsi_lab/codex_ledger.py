@@ -102,8 +102,9 @@ def read_turn(path, *, thread_id, prefix_bytes):
     """What the call that began at byte ``prefix_bytes`` of the rollout at ``path`` added to it.
 
     ``rows`` are the call's usage rows, each one provider request, and ``requests`` and the counters add them up;
-    ``turn_ids`` are their distinct turns. ``children`` are the distinct sub-agents started (``SubAgentActivity``
-    of kind ``started``), as recorded: their ids are checked only when ``read_child`` looks for them.
+    ``turn_ids`` are their distinct turns. ``children`` are the distinct sub-agents named by the turn's
+    ``SubAgentActivity`` items of any kind, as recorded: their ids are checked only when ``read_child`` looks for
+    them, which counts a child's rows only under the turns in ``turn_ids``.
     ``tool_calls`` counts ``custom_tool_call`` and ``function_call`` records; ``tool_inputs`` hashes the input of
     the first ``MAX_TOOL_INPUTS`` and keeps its first ``EXCERPT_CHARS`` characters. ``account`` is the last
     ``rate_limits`` snapshot and ``profile`` the ``permission_profile`` of the last ``turn_context``, each
@@ -140,7 +141,8 @@ def read_turn(path, *, thread_id, prefix_bytes):
                 account = _account(payload['rate_limits'])
         elif kind == 'event_msg' and payload.get('type') == 'item_completed':
             item = payload.get('item')
-            if isinstance(item, dict) and item.get('type') == 'SubAgentActivity' and item.get('kind') == 'started':
+            # Any kind: a sub-agent started in an earlier turn may be addressed again in this one.
+            if isinstance(item, dict) and item.get('type') == 'SubAgentActivity':
                 child = item.get('agent_thread_id')
                 if all(known['thread_id'] != child for known in children):
                     children.append({'thread_id': child, 'agent_path': item.get('agent_path')})
@@ -319,7 +321,9 @@ def settle_call(folder, settings, *, session, codex_home, path, thread_id, strea
     ``'Permission profile was not in force'`` when the terminal is on, the call was ``dispatched`` and its last turn
     did not run under the managed offline profile that denies ``run_root`` and ``codex_home``; else ``None``.
     ``receipt`` holds ``token_source``, ``token_reason`` (only when unknown), ``stream_usage`` and ``ledger`` for every
-    call; ``account_snapshot``, the turn's last account snapshot or ``None``, for a ``dispatched`` call whose turn was
+    call. ``ledger`` adds up the usage rows read, the turn's and its readable children's (``requests`` and the
+    counters, a lower bound when the usage is unknown), and names the turns whose rows those are (``turn_ids``, the
+    turn's own; empty when its rollout was not read). ``account_snapshot``, the turn's last account snapshot or ``None``, for a ``dispatched`` call whose turn was
     read from the rollout, whatever its settings; and when anything is on, ``native_capabilities``,
     ``native_activity`` (``transport.stream_activity`` of ``folder`` with the turn's tool calls, tool inputs,
     compactions and ``provider_requests``) and ``child_threads``. That activity is recorded only: Codex's own tool
@@ -333,7 +337,8 @@ def settle_call(folder, settings, *, session, codex_home, path, thread_id, strea
     turn = spent['turn'] or {}
     receipt = {'token_source': spent['source'],
                'token_reason': spent['reason'] if spent['source'] == 'unknown' else None,
-               'stream_usage': stream_usage, 'ledger': {name: spent[name] for name in ('requests',) + COUNTERS}}
+               'stream_usage': stream_usage, 'ledger': {**{name: spent[name] for name in ('requests',) + COUNTERS},
+                                                        'turn_ids': list(turn.get('turn_ids', []))}}
     if dispatched and spent['turn'] is not None:
         receipt['account_snapshot'] = turn['account']
     if native_tools.any_on(settings):

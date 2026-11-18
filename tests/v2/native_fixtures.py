@@ -53,8 +53,14 @@ def collab(call_id, name, output):
 
 def sub_agent_started(child, path):
     """The ``item_completed`` event a spawn writes to the parent's rollout."""
+    return sub_agent_activity(child, path, 'started')
+
+
+def sub_agent_activity(child, path, kind):
+    """An ``item_completed`` event of a sub-agent's activity in the parent's rollout; the probe saw the kinds
+    ``started``, ``interacted``, ``interrupted`` and ``completed``."""
     return frame('event_msg', {'type': 'item_completed', 'item': {
-        'type': 'SubAgentActivity', 'kind': 'started', 'agent_thread_id': child, 'agent_path': path}})
+        'type': 'SubAgentActivity', 'kind': kind, 'agent_thread_id': child, 'agent_path': path}})
 
 
 def agent_message(author, recipient, text):

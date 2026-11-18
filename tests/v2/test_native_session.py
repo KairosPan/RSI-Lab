@@ -31,6 +31,15 @@ EVERYTHING = {'web_search': True, 'terminal': {'readable_roots': []}, 'subagents
 CHILD = '33333333-3333-3333-3333-333333333333'
 
 
+def session_meta(cwd):
+    """The base fixture's ``session_meta`` record, which still counts after a compaction."""
+    return fixture(cwd).splitlines(keepends=True)[0]
+
+
+def world_state(full, number):
+    return frame('world_state', {'full': full, 'state': {'number': number}})
+
+
 class NativeSessionTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
@@ -70,12 +79,26 @@ class NativeSessionTests(unittest.TestCase):
         plain = snapshot_from_bytes(head, expected_thread_id=THREAD, expected_cwd=self.cwd, native=TERMINAL)
         after = snapshot_from_bytes(head + tail, expected_thread_id=THREAD, expected_cwd=self.cwd,
                                     expected_prefix=plain, native=TERMINAL)
+        counted = len(session_meta(self.cwd)) + len(tail)
         self.assertEqual(plain['observable_text_history_bytes'], len(head)); self.assertEqual(plain['compactions'], 0)
-        self.assertEqual(after['observable_text_history_bytes'], len(tail)); self.assertEqual(after['compactions'], 1)
+        self.assertEqual(after['observable_text_history_bytes'], counted); self.assertEqual(after['compactions'], 1)
         self.assertEqual(after['prefix_bytes'], len(head + tail))
         ready = build_effective_context({'x': 1}, session_id='s', owner={'role': 'lab'}, snapshot=after,
-                                        max_input_bytes=len(tail) + 64)
+                                        max_input_bytes=counted + 64)
         self.assertEqual(ready['status'], 'ready')
+
+    def test_the_session_meta_and_the_last_full_world_state_before_a_compaction_still_count(self):
+        # A compaction replaces the conversation, not the instructions and environment Codex keeps sending.
+        head = (fixture(self.cwd) + world_state(True, 1) + tool_call('c1', 'x' * 4000) + world_state(True, 2)
+                + world_state(False, 3))
+        tail = (compacted([{'type': 'message', 'role': 'user', 'content': [{'type': 'input_text', 'text': 'kept'}]}])
+                + tool_call('c2', 'y') + world_state(True, 4))
+        got = self.read(head + tail, TERMINAL)
+        self.assertEqual(got['observable_text_history_bytes'],
+                         len(session_meta(self.cwd)) + len(world_state(True, 2)) + len(tail))
+        self.assertEqual(got['history_counted_from_record'], len(head.splitlines()) + 1)
+        # Before any compaction the whole file counts, as before.
+        self.assertEqual(self.read(head, TERMINAL)['observable_text_history_bytes'], len(head))
 
     def test_compaction_is_refused_when_everything_is_off(self):
         with self.assertRaisesRegex(ContextUnavailable, 'context_unverifiable'):
@@ -172,7 +195,7 @@ class NativeSessionTests(unittest.TestCase):
                 + tool_call('c2', 'y') + frame('compacted', {'message': 'Only a summary remains'})
                 + tool_call('c3', 'z'))
         got = self.read(head + tail, TERMINAL)
-        self.assertEqual(got['observable_text_history_bytes'], len(tail))
+        self.assertEqual(got['observable_text_history_bytes'], len(session_meta(self.cwd)) + len(tail))
         self.assertEqual(got['compactions'], 2)
         self.assertEqual(got['history_counted_from_record'], len(head.splitlines()) + 1)
 
@@ -199,7 +222,7 @@ class NativeSessionTests(unittest.TestCase):
         head = fixture(self.cwd) + message
         tail = compacted([]) + message
         got = self.read(head + tail, TERMINAL)
-        self.assertEqual(got['observable_text_history_bytes'], len(tail) - encoded)
+        self.assertEqual(got['observable_text_history_bytes'], len(session_meta(self.cwd)) + len(tail) - encoded)
         self.assertEqual(len(got['image_inputs']), 2)
         self.assertEqual(got['observable_image_bytes'], 2 * got['image_inputs'][0]['bytes'])
 

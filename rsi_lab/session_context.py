@@ -134,8 +134,9 @@ def snapshot_from_bytes(raw, *, expected_thread_id, expected_cwd, expected_prefi
     ``native``, ``compactions``, ``compaction_supported: True`` and
     ``history_counted_from_record``: the 1-based number of the last
     ``compacted`` record that holds a ``replacement_history`` list, from which
-    the text history counts, inclusive; ``None`` when there is none and the
-    whole file counts. Everything off reads exactly as before.
+    the text history counts, inclusive, together with the ``session_meta``
+    records and the last full ``world_state`` before it; ``None`` when there
+    is none and the whole file counts. Everything off reads exactly as before.
     """
     _identity(expected_thread_id)
     settings = native_tools.validate(native)
@@ -153,7 +154,9 @@ def snapshot_from_bytes(raw, *, expected_thread_id, expected_cwd, expected_prefi
     image_inputs, image_bytes, image_encoding_bytes = [], 0, 0
     # Text history starts at the last compacted record that holds its replacement history (record
     # number ``history_record``), else at the file's start; image encodings before it are not in its bytes.
+    # The session_meta records and the last full world_state before that start still count (``carried``).
     offset, history_start, encoding_before_start, compactions, history_record = 0, 0, 0, 0, None
+    meta_bytes, world_bytes, carried = 0, 0, 0
     for number, (line, ended) in enumerate(zip(raw.splitlines(), raw.splitlines(keepends=True)), 1):
         start, offset = offset, offset + len(ended)
         if not line.strip():
@@ -166,6 +169,10 @@ def snapshot_from_bytes(raw, *, expected_thread_id, expected_cwd, expected_prefi
             raise ContextUnavailable('context_unverifiable', f'invalid rollout envelope {number}')
         kind, payload = record.get('type'), record['payload']
         records.append(record)
+        if kind == 'session_meta':
+            meta_bytes += len(ended)
+        elif kind == 'world_state' and payload.get('full') is True:
+            world_bytes = len(ended)
         if kind in kinds['outer'] and payload.get('type') not in COMPACTION_KINDS:
             if kind == 'compacted':
                 compactions += 1
@@ -173,6 +180,7 @@ def snapshot_from_bytes(raw, *, expected_thread_id, expected_cwd, expected_prefi
                 # compacted; without one, Codex rebuilds from earlier messages and the count stays where it was.
                 if isinstance(payload.get('replacement_history'), list):
                     history_record, history_start, encoding_before_start = number, start, image_encoding_bytes
+                    carried = meta_bytes + world_bytes
         elif kind in COMPACTION_KINDS or payload.get('type') in COMPACTION_KINDS:
             unsupported.append({'record': number, 'kind': kind, 'payload_kind': payload.get('type')})
         elif kind not in OUTER_KINDS:
@@ -238,7 +246,8 @@ def snapshot_from_bytes(raw, *, expected_thread_id, expected_cwd, expected_prefi
                                  json.dumps(unsupported, separators=(',', ':')))
     # Count the complete raw snapshot, not only user/assistant text. This is a
     # conservative application-byte accounting that includes context metadata,
-    # instructions, schemas, reasoning payloads and audit-only events too.
+    # instructions, schemas, reasoning payloads and audit-only events too. The
+    # one exception, a compaction in a session with native settings on, is below.
     snapshot = {'contract': CONTRACT, 'provider_thread_id': expected_thread_id, 'cwd': wanted_cwd,
                 'prefix_bytes': len(raw), 'prefix_sha256': digest(raw), 'record_count': len(records),
                 'messages': messages, 'messages_sha256': digest(messages),
@@ -254,10 +263,12 @@ def snapshot_from_bytes(raw, *, expected_thread_id, expected_cwd, expected_prefi
                                             'prefix_sha256': expected_prefix['prefix_sha256']}
                                            if expected_prefix is not None else None)}
     if settings != native_tools.OFF:
-        # A compaction replaces the history before it, so the text from the last one onward is what remains.
+        # A compaction replaces the conversation before it, not the session's instructions and environment. So
+        # the text counts from the last one onward, plus the session_meta records and the last full world_state
+        # that precede it; the other records before it are left out.
         snapshot.update(native=settings, compactions=compactions, compaction_supported=True,
                         history_counted_from_record=history_record,
-                        observable_text_history_bytes=(len(raw) - history_start
+                        observable_text_history_bytes=(len(raw) - history_start + carried
                                                        - (image_encoding_bytes - encoding_before_start)))
     return snapshot
 

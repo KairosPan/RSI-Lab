@@ -11,8 +11,8 @@ import unittest
 
 from rsi_lab import codex_ledger
 from rsi_lab.store import digest
-from tests.v2.native_fixtures import (PROFILE, account, child_rollout, collab, compacted, frame, sub_agent_started,
-    tool_call, turn_context, usage_row)
+from tests.v2.native_fixtures import (PROFILE, account, child_rollout, collab, compacted, frame, sub_agent_activity,
+    sub_agent_started, tool_call, turn_context, usage_row)
 from tests.v2.test_session_context import OTHER, THREAD, fixture
 
 CHILD = '33333333-3333-3333-3333-333333333333'
@@ -218,6 +218,17 @@ class CodexLedgerTests(unittest.TestCase):
         got = codex_ledger.read_child(self.home, CHILD, parent_thread_id=THREAD, root_turn_ids=['t1', 't2'])
         self.assertEqual(got, {'thread_id': CHILD, 'rollout_ref': str(path.resolve()), 'rollout_sha256': digest(raw),
                                'requests': 1, 'input_tokens': 5, 'output_tokens': 1, 'cached_input_tokens': 0})
+
+    def test_children_are_taken_from_every_sub_agent_activity_of_the_turn(self):
+        # A sub-agent started in an earlier turn and addressed again in this one writes rows under this turn.
+        first = fixture(self.cwd) + sub_agent_started(CHILD, '/root/a') + usage_row(THREAD, 't1', 't1', 10, 1)
+        raw = (first + sub_agent_activity(CHILD, '/root/a', 'interacted') + usage_row(THREAD, 't2', 't2', 20, 2)
+               + sub_agent_activity(CHILD, '/root/a', 'completed'))
+        self.write_child(child_rollout(CHILD, THREAD, [('c1', 't1', 5, 1), ('c2', 't2', 7, 3)]))
+        got = codex_ledger.settle(codex_home=self.home, path=self.write(raw), thread_id=THREAD,
+                                  prefix_bytes=len(first), resumed=True, stream_usage=None)
+        self.assertEqual((got['source'], got['tokens'], got['requests']), ('ledger', 20 + 2 + 7 + 3, 2))
+        self.assertEqual(got['turn']['children'], [{'thread_id': CHILD, 'agent_path': '/root/a'}])
 
     def test_a_child_started_twice_is_counted_once(self):
         parent = fixture(self.cwd) + sub_agent_started(CHILD, '/root/a') * 2 + usage_row(THREAD, 't1', 't1', 10, 1)

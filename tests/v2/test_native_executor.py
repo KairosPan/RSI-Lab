@@ -184,7 +184,7 @@ class NativeExecutorTests(unittest.TestCase):
         self.assertEqual(receipt['native_activity']['tool_calls'], 1)
         self.assertEqual(receipt['account_snapshot']['plan_type'], 'pro')
         self.assertEqual(receipt['ledger'], {'requests': 2, 'input_tokens': 83032 + 22828, 'output_tokens': 291 + 37,
-                                             'cached_input_tokens': 0})
+                                             'cached_input_tokens': 0, 'turn_ids': ['t1']})
         self.assertEqual(receipt['stream_usage'], {'input_tokens': 83032, 'output_tokens': 291})
         self.assertEqual(receipt['native_capabilities'], TERMINAL_AND_SUBAGENTS)
         self.assertEqual(receipt['native_activity']['provider_requests'], 1)
@@ -265,7 +265,7 @@ class NativeExecutorTests(unittest.TestCase):
         self.assertEqual(receipt['actual_costs']['tokens'], 42)
         self.assertEqual(receipt['token_source'], 'stream')
         self.assertEqual(receipt['ledger'], {'requests': 0, 'input_tokens': 0, 'output_tokens': 0,
-                                             'cached_input_tokens': 0})
+                                             'cached_input_tokens': 0, 'turn_ids': []})
         self.assertTrue(receipt['usage_complete'])
 
     def test_a_call_with_sub_agents_on_is_never_charged_the_stream(self):
@@ -293,12 +293,13 @@ class NativeExecutorTests(unittest.TestCase):
         # Requests in flight at the kill wrote no usage rows: the rows read are a lower bound, not the call's cost.
         cases = {'a resumed call with everything off': (
                      {'settings': None, 'resumed': True, 'rollout': TWO_TURNS}, 102016 + 5155,
-                     {'requests': 1, 'input_tokens': 102016, 'output_tokens': 5155, 'cached_input_tokens': 0}),
+                     {'requests': 1, 'input_tokens': 102016, 'output_tokens': 5155, 'cached_input_tokens': 0,
+                      'turn_ids': ['t2']}),
                  'a native call with a sub-agent': (
                      {'settings': TERMINAL_AND_SUBAGENTS, 'rollout': PARENT_WITH_CHILD, 'child': CHILD_ROWS},
                      83032 + 291 + 22828 + 37,
                      {'requests': 2, 'input_tokens': 83032 + 22828, 'output_tokens': 291 + 37,
-                      'cached_input_tokens': 0})}
+                      'cached_input_tokens': 0, 'turn_ids': ['t1']})}
         for case, (arguments, tokens, ledger) in cases.items():
             with self.subTest(case=case):
                 receipt = self.execute(**arguments, finished=False)
