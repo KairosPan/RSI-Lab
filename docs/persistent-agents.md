@@ -88,7 +88,7 @@
 
 其他取值会使 Runtime 拒绝启动该运行。
 
-可选的 `native_capabilities` 也写在顶层，为每个角色打开 Codex 自身的工具：网页搜索、受限终端和子 agent。它按角色分别设置，键只能是 `lab`、`meta` 和 `literature`；没有这个块，或块里没有写某个角色时，该角色全部关闭。没有这个块的运行发出的 Codex 命令、提示词和请求包与没有这项功能时逐字节相同。有这个块时，全部关闭的角色发出的命令和提示词仍然相同，请求包只有运行配置的 hash（`decision_dependencies.config_hash` 及由它生成的 token）不同，因为运行配置本身不同。完整的运行配置示例见 [`examples/native-capabilities-run.json`](../examples/native-capabilities-run.json)，它在上面的模板上加了这个块，把 `model_timeout_seconds` 设为 1800、`max_effective_context_bytes` 设为 4,194,304，并为使用工具的轮次放大了预算：`model_reservation` 预约 200,000 tokens 和 1800 秒（与超时相同），`budgets.tokens` 为 20,000,000，`budgets.wall_seconds` 为 36,000。块的写法如下，其中的目录是占位符：
+可选的 `native_capabilities` 也写在顶层，为每个角色打开 Codex 自身的工具：网页搜索、受限终端和子 agent。它按角色分别设置，键只能是 `lab`、`meta` 和 `literature`；没有这个块，或块里没有写某个角色时，该角色全部关闭。没有这个块的运行发出的 Codex 命令、提示词和请求包与没有这项功能时逐字节相同。有这个块时，全部关闭的角色发出的 Codex 命令仍然相同；提示词和请求包只有运行配置的 hash（`decision_dependencies.config_hash` 及由它生成的 token，它们随任务数据写在提示词里）不同，因为运行配置本身不同。完整的运行配置示例见 [`examples/native-capabilities-run.json`](../examples/native-capabilities-run.json)，它在上面的模板上加了这个块，把 `model_timeout_seconds` 设为 1800、`max_effective_context_bytes` 设为 4,194,304，并为使用工具的轮次放大了预算：`model_reservation` 预约 200,000 tokens 和 1800 秒（与超时相同），`budgets.tokens` 为 20,000,000，`budgets.wall_seconds` 为 36,000。块的写法如下，其中的目录是占位符：
 
 ```json
 "native_capabilities": {
