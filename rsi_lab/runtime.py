@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from datetime import datetime
 import json
+import os
+from pathlib import Path
 import time
 
 from .controller import Controller, identity, effect_holds_execution, effect_is_quarantined
@@ -26,7 +28,7 @@ from .research_policy import normalize_research_policy
 from .driver_report import build_report
 from .orchestration import Orchestration, orchestration_config
 from .preflight import feature_report, preflight, request_report
-from . import work_claims, decision_dependencies
+from . import work_claims, decision_dependencies, native
 
 
 COMPLETION_KIND = 'runtime_effect_completion'
@@ -77,6 +79,9 @@ class Runtime:
         self.config = store.run(run_id)['config']
         unknown_usage_policy(self.config)
         model_failure_retries(self.config)
+        self.native = native.capabilities(self.config)
+        native.check_roots(self.native, run_root=Path(store.root),
+                           codex_home=Path(os.environ.get('CODEX_HOME') or Path.home() / '.codex'))
         orchestration = orchestration_config(self.config)
         self.research_policy = normalize_research_policy(self.config.get('research_policy'))
         self.agents = AgentState(store, run_id)

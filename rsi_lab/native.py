@@ -1,0 +1,117 @@
+"""Per-role switches for Codex's own tools: web search, a confined terminal and sub-agents.
+
+A run config may carry ``native_capabilities`` keyed by role. Each role's entry
+is read into one settings object in normal form::
+
+    {'web_search': bool,
+     'terminal': None | {'readable_roots': [absolute directory, ...]},
+     'subagents': None | {'max_concurrent': 1..8}}
+
+A run without the block, and a role absent from it, has everything off.
+"""
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+
+ROLES = ('lab', 'meta', 'literature')
+PROFILE = 'rsi_agent'
+OFF = {'web_search': False, 'terminal': None, 'subagents': None}
+DEFAULT_MAX_CONCURRENT = 3
+MAX_CONCURRENT = 8
+
+
+def capabilities(config):
+    """One normal-form settings object per role from the run config.
+
+    ``terminal`` and ``subagents`` may be ``false``, ``true`` or an object; a
+    missing key is off. Readable roots must be absolute existing directories
+    and are stored resolved. Anything else raises ``ValueError``.
+    """
+    block = config.get('native_capabilities', {})
+    if type(block) is not dict or set(block) - set(ROLES):
+        raise ValueError('native_capabilities must be an object keyed by lab, meta or literature')
+    return {role: _role(role, block.get(role, {})) for role in ROLES}
+
+
+def validate(settings):
+    """A checked copy of one normal-form settings object; ``None`` is everything off.
+
+    Only the shape is checked: readable roots must be absolute, but the
+    filesystem is not consulted.
+    """
+    return dict(OFF) if settings is None else _shape(settings, 'native_capabilities')
+
+
+def any_on(settings):
+    """Whether a normal-form settings object (or ``None``) switches anything on."""
+    return validate(settings) != OFF
+
+
+def check_roots(by_role, *, run_root, codex_home):
+    """Refuse a readable root equal to or inside the run root or the Codex home.
+
+    There the root's read entry would be more specific than the denial of
+    those directories and would override it. A root that merely contains them
+    is allowed: the denial covers what lies beneath.
+    """
+    denied = (('the run root', Path(run_root).resolve()), ('the Codex home', Path(codex_home).resolve()))
+    for role, settings in by_role.items():
+        for root in (settings['terminal'] or {}).get('readable_roots', ()):
+            resolved = Path(root).resolve()
+            for name, path in denied:
+                if resolved.is_relative_to(path):
+                    raise ValueError('native_capabilities.' + role + '.terminal.readable_roots entries may not be '
+                                     'or lie inside ' + name + ': ' + root)
+
+
+def _role(role, entry):
+    where = 'native_capabilities.' + role
+    if type(entry) is not dict or set(entry) - set(OFF):
+        raise ValueError(where + ' may only set web_search, terminal and subagents')
+    settings = _shape({
+        'web_search': entry.get('web_search', False),
+        'terminal': _switch(where + '.terminal', entry.get('terminal', False), {'readable_roots': []}),
+        'subagents': _switch(where + '.subagents', entry.get('subagents', False),
+                             {'max_concurrent': DEFAULT_MAX_CONCURRENT})}, where)
+    if settings['terminal'] is not None:
+        roots = settings['terminal']['readable_roots']
+        for root in roots:
+            if not Path(root).is_dir():
+                raise ValueError(where + '.terminal.readable_roots entries must be existing directories: ' + root)
+        settings['terminal']['readable_roots'] = [str(Path(root).resolve()) for root in roots]
+    return settings
+
+
+def _switch(where, value, default):
+    """The config form of one capability in normal form: false is off, true is the default."""
+    if value is False:
+        return None
+    if value is True:
+        return default
+    if type(value) is not dict:
+        raise ValueError(where + ' must be true, false or an object')
+    return {**default, **value}
+
+
+def _shape(settings, where):
+    if type(settings) is not dict or set(settings) != set(OFF):
+        raise ValueError(where + ' must hold exactly web_search, terminal and subagents')
+    web_search, terminal, subagents = settings['web_search'], settings['terminal'], settings['subagents']
+    if type(web_search) is not bool:
+        raise ValueError(where + '.web_search must be true or false')
+    if terminal is not None:
+        if (type(terminal) is not dict or set(terminal) != {'readable_roots'}
+                or type(terminal['readable_roots']) is not list
+                or any(type(root) is not str or not os.path.isabs(root) for root in terminal['readable_roots'])):
+            raise ValueError(where + '.terminal may only hold readable_roots, a list of absolute paths')
+        terminal = {'readable_roots': list(terminal['readable_roots'])}
+    if subagents is not None:
+        if (type(subagents) is not dict or set(subagents) != {'max_concurrent'}
+                or type(subagents['max_concurrent']) is not int
+                or not 1 <= subagents['max_concurrent'] <= MAX_CONCURRENT):
+            raise ValueError(where + '.subagents may only hold max_concurrent, an integer from 1 to '
+                             + str(MAX_CONCURRENT))
+        subagents = {'max_concurrent': subagents['max_concurrent']}
+    return {'web_search': web_search, 'terminal': terminal, 'subagents': subagents}
