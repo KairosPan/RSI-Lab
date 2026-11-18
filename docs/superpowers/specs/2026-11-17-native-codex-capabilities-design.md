@@ -393,7 +393,8 @@ are left as they were written.
   around it; duplicate roots are dropped, and a root deleted after `init` stops
   every Runtime start until it is recreated.
 - Before dispatch, a terminal call is refused, with nothing sent, when the
-  workspace already holds one of those four names.
+  workspace already holds one of those four names, or when its `.tmp`, the
+  commands' temporary folder, exists and is not a directory.
 - After the call, the last `turn_context` of the rollout must show a managed,
   restricted profile with restricted network that denies the run root and the
   Codex home; otherwise the call is invalid with
@@ -423,20 +424,44 @@ leaves the call reported as not confirmed.
 - Every receipt says where its number came from (`token_source`: `ledger`,
   `stream` or `unknown`) and, when unknown, why (`token_reason`). The executor
   and recovery settle through the same function, `codex_ledger.settle_call`.
+- A turn that did not reach its terminal event (killed at its timeout,
+  interrupted, or Codex exiting without `turn.completed` or `turn.failed`) is
+  never charged, even when it wrote usage rows: a request in flight when it was
+  stopped, its own or a sub-agent's, wrote none. Its usage is unknown, the
+  reason says so, and the token reservation stays held, as before this change.
+  The executor passes whether the turn reached its terminal event; recovery
+  only recovers a call whose terminal event the journal holds.
+- The receipt's `ledger` adds up the rows read, a lower bound when the usage is
+  unknown, and also carries `turn_ids`, the turns whose rows those are.
+- A turn's sub-agents are those named by any of its `SubAgentActivity` items,
+  whatever the kind (the probe saw `started`, `interacted`, `interrupted` and
+  `completed`), so a sub-agent started in an earlier turn and addressed again
+  is charged. Its rows still count only under the turn's own ids.
 
 **Compaction (section 5).** Only the outer `compacted` record is accepted;
 other compaction kinds and thread rollback stay unsupported. History is counted
 from the last `compacted` record that carries a `replacement_history` list; one
 without it leaves the count where it was, and before any such record the whole
-file counts. The context manifest then labels the method
+file counts. After such a compaction the count also takes in the
+`session_meta` records and the last full `world_state` record before it: they
+hold the session's instructions and environment, which a compaction does not
+replace. The context manifest then labels the method
 `rollout-bytes-since-last-compaction-estimate-v1`.
 
 **Account snapshot (sections 6 and 10).** `account_snapshot` is recorded on the
 receipt of every dispatched call whose turn was read from the rollout, with
 settings on or off (`null` when the turn recorded none), and left out when the
-turn could not be read. `status()['codex_account']` shows the newest one.
+turn could not be read. `status()['codex_account']` shows the newest one, by
+the order the Effects were created in.
 
 **Reading the stream (section 4).** The event stream is split on `\n` only, for
 every call: Codex leaves U+2028, U+2029 and U+0085 unescaped inside JSON
 strings, and splitting on them broke valid frames. The rollout's usage rows are
 read with the same rule.
+
+**Capacity warning (section 10).** `feature_report()`, and so `features`,
+carries `native_warnings`, a list of strings. It holds one warning when any
+role has something on and the effective capacity limit
+(`max_effective_context_bytes`, else `max_input_bytes`, else 131072) is below
+1048576: a tool-using turn's records pass such a limit, and later turns then
+block on capacity. It is empty otherwise.

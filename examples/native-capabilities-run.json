@@ -11,8 +11,8 @@
   "model_timeout_seconds": 1800,
   "model_reservation": {
     "model_calls": 1,
-    "tokens": 4096,
-    "wall_seconds": 300
+    "tokens": 200000,
+    "wall_seconds": 1800
   },
   "native_capabilities": {
     "lab": {"web_search": true, "terminal": {"readable_roots": []}, "subagents": {"max_concurrent": 3}},
@@ -22,7 +22,7 @@
   "budgets": {
     "model_calls": {"limit": 12, "hard": true, "settlement_reserve": 1},
     "tool_calls": {"limit": 24, "hard": true},
-    "tokens": {"limit": 1000000, "hard": false},
-    "wall_seconds": {"limit": 3600, "hard": false}
+    "tokens": {"limit": 20000000, "hard": false},
+    "wall_seconds": {"limit": 36000, "hard": false}
   }
 }

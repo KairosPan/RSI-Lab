@@ -233,6 +233,11 @@ class NativeSettingsTests(unittest.TestCase):
         self.assertEqual(config['model_timeout_seconds'], 1800)
         self.assertEqual(config['max_effective_context_bytes'], 4194304)
         self.assertEqual(config['model'], 'YOUR_MODEL_ID')
+        # Budgets a native run does not exhaust in a couple of tool-using turns; a call may run its whole timeout.
+        self.assertEqual(config['budgets']['tokens']['limit'], 20000000)
+        self.assertEqual(config['budgets']['wall_seconds']['limit'], 36000)
+        self.assertEqual(config['model_reservation'], {'model_calls': 1, 'tokens': 200000,
+                                                       'wall_seconds': config['model_timeout_seconds']})
 
     def test_init_accepts_the_example_and_features_reports_its_settings(self):
         ledger = str(self.root / 'ledger')
