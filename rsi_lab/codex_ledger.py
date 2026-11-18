@@ -10,8 +10,9 @@ parent's turn as ``root_turn_id``.
 
 The same bytes say what the call did: its tool calls, its compactions, the last
 account snapshot and the permission profile of its last turn context.
-``settle_call`` turns all this into what a finished call's receipt says, for
-the executor and for recovery alike. Nothing here runs Codex or writes anything.
+``settle_call`` turns all this into what the receipt of a call that has ended
+says, for the executor and for recovery alike; a turn cut off before its
+terminal event is never charged. Nothing here runs Codex or writes anything.
 """
 from __future__ import annotations
 
@@ -215,7 +216,8 @@ def _from_stream(stream_usage, why, turn=None, *, children_possible=False):
     return _settled('unknown', None, why + ', and the stream reported no usage', turn)
 
 
-def settle(*, codex_home, path, thread_id, prefix_bytes, resumed, stream_usage, children_possible=False):
+def settle(*, codex_home, path, thread_id, prefix_bytes, resumed, stream_usage, children_possible=False,
+           finished=True):
     """The tokens one call is charged and where the number comes from.
 
     When the call added usage rows, ``ledger``: their input plus output tokens and those of every sub-agent it
@@ -232,7 +234,22 @@ def settle(*, codex_home, path, thread_id, prefix_bytes, resumed, stream_usage, 
 
     The stream's usage leaves out every sub-agent, so a call that could start any (``children_possible``) is
     never settled from it: where a fresh thread would be, its usage is ``unknown`` instead.
+
+    A turn that did not reach its terminal event (not ``finished``: killed, interrupted or cut off) is never
+    charged: a request still in flight when it was stopped, its own or a sub-agent's, wrote no usage row. Its
+    usage is ``unknown``, the reason says so first, and the rows read are still added up, as a lower bound.
     """
+    spent = _settle(codex_home=codex_home, path=path, thread_id=thread_id, prefix_bytes=prefix_bytes,
+                    resumed=resumed, stream_usage=stream_usage, children_possible=children_possible)
+    if finished:
+        return spent
+    reason = 'the turn did not finish, and requests in flight when it was stopped wrote no usage rows'
+    return {**spent, 'tokens': None, 'source': 'unknown',
+            'reason': reason + ('; ' + spent['reason'] if spent['source'] == 'unknown' else '')}
+
+
+def _settle(*, codex_home, path, thread_id, prefix_bytes, resumed, stream_usage, children_possible):
+    """``settle`` for a turn that reached its terminal event."""
     if path is None and codex_home is not None and isinstance(thread_id, str) and THREAD_ID.fullmatch(thread_id):
         try:
             path = _rollout_of(codex_home, thread_id)
@@ -286,15 +303,17 @@ def _profile_in_force(profile, *, run_root, codex_home):
     return {Path(run_root).resolve(), Path(codex_home).resolve()} <= denied
 
 
-def settle_call(folder, settings, *, session, codex_home, path, thread_id, stream_usage, run_root, dispatched=True):
-    """What one finished call is charged, and what its receipt says of its tokens, its native tools and its confinement.
+def settle_call(folder, settings, *, session, codex_home, path, thread_id, stream_usage, run_root, finished,
+                dispatched=True):
+    """What one ended call is charged, and what its receipt says of its tokens, its native tools and its confinement.
 
     The executor and recovery both settle a call here, so a call gets the same receipt from either. ``folder`` is the
     call's folder, ``settings`` its native settings in normal form and ``session`` its agent session as admitted
-    (``None`` for a call without one). The call is settled by ``settle``: ``codex_home``, ``thread_id`` and
-    ``stream_usage`` are passed on, and ``path`` (the call's own rollout as found, else ``None``) when there is a
-    session. On a resumed thread the call's bytes start at the session's committed ``native_prefix``; sub-agents
-    switched on mean the stream's number is never charged.
+    (``None`` for a call without one). The call is settled by ``settle``: ``codex_home``, ``thread_id``,
+    ``stream_usage`` and ``finished`` (whether the turn reached its terminal event) are passed on, and ``path`` (the
+    call's own rollout as found, else ``None``) when there is a session. On a resumed thread the call's bytes start at
+    the session's committed ``native_prefix``; sub-agents switched on mean the stream's number is never charged; a
+    turn that did not finish is never charged.
 
     ``tokens`` is what is charged, ``None`` when unknown, and ``usage_known`` is false then. ``profile_error`` is
     ``'Permission profile was not in force'`` when the terminal is on, the call was ``dispatched`` and its last turn
@@ -310,7 +329,7 @@ def settle_call(folder, settings, *, session, codex_home, path, thread_id, strea
     prefix = ((session or {}).get('context_manifest') or {}).get('native_prefix') or {}
     spent = settle(codex_home=codex_home, path=path if session is not None else None, thread_id=thread_id,
                    prefix_bytes=prefix.get('prefix_bytes') if resumed else 0, resumed=resumed,
-                   stream_usage=stream_usage, children_possible=settings['subagents'] is not None)
+                   stream_usage=stream_usage, children_possible=settings['subagents'] is not None, finished=finished)
     turn = spent['turn'] or {}
     receipt = {'token_source': spent['source'],
                'token_reason': spent['reason'] if spent['source'] == 'unknown' else None,

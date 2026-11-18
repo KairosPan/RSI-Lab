@@ -263,9 +263,11 @@ def recover_codex_receipt(effect, packet_bytes, calls_root, *, interruption_atte
         if (session.get('provider_thread_id') or prior is not None
                 or finished is not None or saved is not None):
             protocol_valid = False
-    # Settled as the executor settles it, from the usage rows the call added to its rollout.
+    # Settled as the executor settles it, from the usage rows the call added to its rollout. Only a call whose one
+    # terminal event the journal holds is recovered here.
     charge = codex_ledger.settle_call(folder, settings, session=session, codex_home=binding['codex_home'],
-        path=native_path, thread_id=thread_id, stream_usage=usage, run_root=root.parent)
+        path=native_path, thread_id=thread_id, stream_usage=usage, run_root=root.parent,
+        finished=len(terminals) == 1)
     if charge['tokens'] is not None:
         costs['tokens'] = charge['tokens']
     if charge['profile_error']:

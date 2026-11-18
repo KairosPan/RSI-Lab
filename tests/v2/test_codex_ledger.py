@@ -137,6 +137,31 @@ class CodexLedgerTests(unittest.TestCase):
                 got = self.settle(path=path, resumed=False, stream_usage=stream)
                 self.assertEqual((got['source'], got['tokens']), ('stream', 25))
 
+    def test_a_turn_that_did_not_finish_is_never_charged(self):
+        # A request in flight when the turn was stopped wrote no usage row, so the rows read are only a lower bound.
+        parent = fixture(self.cwd) + sub_agent_started(CHILD, '/root/a') + usage_row(THREAD, 't1', 't1', 10, 1)
+        stream = {'input_tokens': 20, 'output_tokens': 5}
+
+        def rows_and_a_child():
+            self.write_child()
+            return self.write(parent)
+        cases = {'rows and a child': (rows_and_a_child, (2, 15, 2)), 'no rollout, a fresh thread': (lambda: None, (0, 0, 0))}
+        for case, (prepare, (requests, inp, out)) in cases.items():
+            with self.subTest(case=case):
+                self.reset_home()
+                path = prepare()
+                got = self.settle(path=path, resumed=False, stream_usage=stream, finished=False)
+                self.assertEqual((got['source'], got['tokens']), ('unknown', None))
+                self.assertEqual(got['reason'], 'the turn did not finish, and requests in flight when it was '
+                                                'stopped wrote no usage rows')
+                self.assertEqual((got['requests'], got['input_tokens'], got['output_tokens']), (requests, inp, out))
+                self.assertNotEqual(self.settle(path=path, resumed=False, stream_usage=stream)['source'], 'unknown')
+        self.reset_home()                               # The child cannot be read: both reasons are given.
+        got = self.settle(path=self.write(parent), resumed=False, stream_usage=stream, finished=False)
+        self.assertEqual((got['source'], got['tokens'], got['requests']), ('unknown', None, 1))
+        self.assertTrue(got['reason'].startswith('the turn did not finish'))
+        self.assertIn(CHILD, got['reason'])
+
     def test_fallbacks(self):
         base = fixture(self.cwd)
         stream = {'input_tokens': 20, 'output_tokens': 5}

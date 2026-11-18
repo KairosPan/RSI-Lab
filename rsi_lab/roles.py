@@ -913,13 +913,17 @@ class CodexExecutor:
                    and result.get('returncode') == 0) if execution is not None else (
                    result.get('error') is None and complete and not errors and result.get('returncode') == 0)
         usage = result.get('usage')
+        # A result written before transports recorded it says so through its audited events.
+        terminal_received = result.get('terminal_received', complete)
         costs = {'model_calls': 0 if result.get('dispatched') is False else 1, 'wall_seconds': result['wall_seconds']}
         # Codex has exited, so its rollout is complete. On a resumed thread the stream's usage is the
         # thread's running total; the usage rows the call added after its committed prefix are what it spent.
+        # A turn without its terminal event is not charged: what was in flight when it was stopped wrote no rows.
         # Recovery settles a call it rebuilds from its folder with the same function and inputs.
         charge = codex_ledger.settle_call(folder, settings, session=session, codex_home=result.get('codex_home'),
             path=result.get('native_session_ref'), thread_id=result.get('provider_thread_id'), stream_usage=usage,
-            run_root=self.calls_root.parent, dispatched=result.get('dispatched') is not False)
+            run_root=self.calls_root.parent, finished=terminal_received is True,
+            dispatched=result.get('dispatched') is not False)
         if charge['tokens'] is not None:
             costs['tokens'] = charge['tokens']
         context = None
@@ -957,7 +961,7 @@ class CodexExecutor:
                 'response': result.get('response'), 'usage': usage,
                 'usage_complete': result.get('usage_complete', False) and charge['usage_known'],
                 **charge['receipt'],
-                'terminal_received': result.get('terminal_received', complete),
+                'terminal_received': terminal_received,
                 'native_writer_quiesced': result.get('returncode') is not None and (
                     not native_on or result.get('descendants_stopped') is not False),
                 'never_dispatched': result.get('dispatched') is False,

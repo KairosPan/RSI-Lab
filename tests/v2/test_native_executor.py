@@ -30,6 +30,10 @@ RESPONSE = {'command': {'mode': 'lab', 'action': 'no_action', 'issue_id': None, 
                         'evidence_ids': [], 'payload': {'reason': 'Synthetic turn'}}}
 EXEC = 'text(await tools.exec_command({cmd: "ls"}))'
 SAME = object()
+# What transport.invoke returns for a call killed at its deadline before its terminal event.
+UNFINISHED = {'response': None, 'usage': None, 'usage_complete': False, 'protocol_valid': False,
+              'execution_status': 'unknown', 'terminal_received': False, 'stream_complete': False, 'returncode': -9,
+              'error': 'Codex timed out after 300 seconds; remote completion and usage may be unknown'}
 
 
 # Each rollout gives, after the base fixture, the records an earlier committed turn wrote and those this call adds.
@@ -75,10 +79,12 @@ def config_form(settings):
 
 class NativeExecutorTests(unittest.TestCase):
     def execute(self, *, settings, rollout=CONFINED_TURN, child=None, stream_usage=STREAM_USAGE, resumed=False,
-                packet_settings=SAME, transport_extra=None, stream_items=(), workspace_files=(), profile=None):
+                packet_settings=SAME, transport_extra=None, stream_items=(), workspace_files=(), profile=None,
+                finished=True):
         """Prepare a Lab turn under ``packet_settings`` (``settings`` unless given) and run it through the Controller
         with the executor, which sees ``settings`` in the Effect. Returns the executor's receipt; a ``ValueError``
-        it raises is raised here. ``profile(run_root, codex_home, workspace)`` replaces the confined profile."""
+        it raises is raised here. ``profile(run_root, codex_home, workspace)`` replaces the confined profile.
+        A call that is not ``finished`` was killed before its answer and terminal event (``UNFINISHED``)."""
         packet_settings = settings if packet_settings is SAME else packet_settings
         config = {'native_capabilities': {'lab': config_form(packet_settings)}} if packet_settings else {}
         store, controller, runtime = open_run(self, config=config)
@@ -126,8 +132,8 @@ class NativeExecutorTests(unittest.TestCase):
                                                                else invocation))
             events = ([{'type': 'thread.started', 'thread_id': THREAD}, {'type': 'turn.started'}]
                       + [{'type': 'item.completed', 'item': item} for item in stream_items]
-                      + [{'type': 'item.completed', 'item': {'type': 'agent_message', 'text': json.dumps(RESPONSE)}},
-                         {'type': 'turn.completed', 'usage': stream_usage}])
+                      + ([{'type': 'item.completed', 'item': {'type': 'agent_message', 'text': json.dumps(RESPONSE)}},
+                          {'type': 'turn.completed', 'usage': stream_usage}] if finished else []))
             (folder / 'events.jsonl').write_text(''.join(json.dumps(event) + '\n' for event in events))
             with path.open('ab') as stream:
                 stream.write((b'' if resumed else fixture(workspace)) + records(workspace)[1])
@@ -142,7 +148,7 @@ class NativeExecutorTests(unittest.TestCase):
                       'workspace': options['session']['workspace'], 'journal': None, 'dispatched': True,
                       'native_session_ref': str(path), 'native_session_sha256': digest(path.read_bytes()),
                       'native_session_error': None, **({'native': options['native']} if on else {}),
-                      **(transport_extra or {})}
+                      **({} if finished else UNFINISHED), **(transport_extra or {})}
             (folder / 'transport_result.json').write_text(json.dumps(result))
             return result
 
@@ -281,6 +287,37 @@ class NativeExecutorTests(unittest.TestCase):
         self.assertFalse(receipt['usage_complete'])
         self.assertEqual(receipt['stream_usage'], {'input_tokens': 156410, 'output_tokens': 10679})
         self.assertTrue(self.effect['accounting_unknown'])
+
+    def test_a_turn_that_did_not_finish_leaves_its_tokens_unknown(self):
+        # Requests in flight at the kill wrote no usage rows: the rows read are a lower bound, not the call's cost.
+        cases = {'a resumed call with everything off': (
+                     {'settings': None, 'resumed': True, 'rollout': TWO_TURNS}, 102016 + 5155,
+                     {'requests': 1, 'input_tokens': 102016, 'output_tokens': 5155, 'cached_input_tokens': 0}),
+                 'a native call with a sub-agent': (
+                     {'settings': TERMINAL_AND_SUBAGENTS, 'rollout': PARENT_WITH_CHILD, 'child': CHILD_ROWS},
+                     83032 + 291 + 22828 + 37,
+                     {'requests': 2, 'input_tokens': 83032 + 22828, 'output_tokens': 291 + 37,
+                      'cached_input_tokens': 0})}
+        for case, (arguments, tokens, ledger) in cases.items():
+            with self.subTest(case=case):
+                receipt = self.execute(**arguments, finished=False)
+                self.assertEqual(receipt['status'], 'unknown')
+                self.assertNotIn('tokens', receipt['actual_costs'])
+                self.assertEqual(receipt['token_source'], 'unknown')
+                self.assertIn('the turn did not finish', receipt['token_reason'])
+                self.assertIn('requests in flight when it was stopped wrote no usage rows', receipt['token_reason'])
+                self.assertEqual(receipt['ledger'], ledger)
+                self.assertFalse(receipt['usage_complete'])
+                self.assertNotIn('tokens', self.effect['actual_costs'])
+                self.assertTrue(self.effect['accounting_unknown'])
+                self.assertEqual(self.effect['status'], 'unknown')
+            with self.subTest(case=case + ', finished'):
+                receipt = self.execute(**arguments)
+                self.assertEqual((receipt['status'], receipt['token_source']), ('succeeded', 'ledger'))
+                self.assertIsNone(receipt['token_reason'])
+                self.assertEqual(receipt['actual_costs']['tokens'], tokens)
+                self.assertEqual(receipt['ledger'], ledger)
+                self.assertFalse(self.effect['accounting_unknown'])
 
     def test_a_resumed_native_session_with_tool_records_runs_and_is_read_with_its_settings(self):
         receipt = self.execute(settings=SEARCH, resumed=True, rollout=SEARCHED_TWICE)
