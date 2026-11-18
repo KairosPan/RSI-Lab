@@ -6,6 +6,7 @@ import time
 from rsi_lab.session_context import read_native_snapshot
 from rsi_lab.store import digest
 from pablo_task.adapter import ADAPTER_ID, VERSION, read_progress
+from pablo_task import team
 
 def write_json(path, value):
     path = Path(path)
@@ -86,7 +87,14 @@ def snapshot(runtime, status, reason=None):
             'remaining_to_checkpoint': campaign['checkpoint_new_evaluations'] - completed,
             'remaining_to_full_target': campaign['target_new_evaluations'] - completed,
             'total_observations': progress['initial_count'] + progress['new_evaluations']}
+    note_not_blind(runtime, result)
     write_json(store.root / 'progress.json', result)
+    return result
+
+def note_not_blind(runtime, result):
+    """A run whose config states whether it is blind repeats that statement in each report it writes."""
+    if 'pablo_not_blind' in runtime.config:
+        result['not_blind'] = runtime.config['pablo_not_blind']
     return result
 
 def attention_reason(state):
@@ -114,6 +122,7 @@ def record_attention(runtime, reason):
             result['state'] = runtime.status()
         except Exception as status_error:
             result['state_error'] = f'{type(status_error).__name__}: {status_error}'
+        note_not_blind(runtime, result)
         write_json(runtime.store.root / 'progress.json', result)
     write_json(runtime.store.root / 'attention.json', result)
     return result
@@ -133,7 +142,7 @@ def rebuild_at_boundary(runtime):
         checked = read_native_snapshot(path,
             expected_thread_id=session['provider_thread_id'],
             expected_cwd=str(runtime.store.root / 'agents' / session['id'] / 'workspace'),
-            expected_prefix=manifest.get('native_prefix'))
+            expected_prefix=manifest.get('native_prefix'), native=team.session_native(runtime.native, session['role']))
         if checked['prefix_sha256'] != (manifest.get('native_prefix') or {}).get('prefix_sha256'):
             raise RuntimeError('Native session advanced outside its committed turn; reconcile before rebuilding')
         checkpoint = runtime.agents.seal_checkpoint(session['id'],

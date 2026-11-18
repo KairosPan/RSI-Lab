@@ -31,7 +31,7 @@ from rsi_lab.runtime import Runtime
 from rsi_lab.roles import CodexExecutor
 from rsi_lab.store import Store, digest
 from rsi_lab.producers.sources import freeze_sources, source_contracts, deliver_pending
-from pablo_task import adapter, oracle, harness, methods
+from pablo_task import adapter, oracle, harness, methods, team
 from pablo_task.research import project_publication, registered_adapters, research_policy
 
 FEATURES = {'meta_lab': True, 'scientific_memory': True, 'literature': True}
@@ -100,12 +100,21 @@ def source_manifest():
 
 def make_runtime(store, run_id):
     config = store.run(run_id)['config']
-    enhanced = harness.configuration(config) is not None
+    policy = harness.configuration(config)
+    enhanced = policy is not None
+    led = enhanced and policy['version'] == harness.LED_VERSION
     if config.get('research_architecture') == ARCHITECTURE and (
             not enhanced or config.get('batch_interpretation_capabilities') != [adapter.ADAPTER_ID]):
         raise ValueError('PABLO v3 requires the local/challenge Harness and batch interpretation barrier')
-    runtime = Runtime(store, run_id, adapters=registered_adapters(executable_methods=enhanced),
-                      scientific_identity_provider=project_publication)
+    if config.get('research_architecture') == team.ARCHITECTURE and (
+            not led or config.get('batch_interpretation_capabilities') != [adapter.ADAPTER_ID]
+            or not set(team.ROLES) <= team.lab_roles(config)):
+        raise ValueError('PABLO team run requires the Lab-led Harness, the batch interpretation barrier '
+                         'and the local and challenge roles among the Lab sub-agent roles')
+    # Only a Lab-led run's selection adapter carries the decision and the dispatch check.
+    adapters = (registered_adapters(executable_methods=True, led=True) if led
+                else registered_adapters(executable_methods=enhanced))
+    runtime = Runtime(store, run_id, adapters=adapters, scientific_identity_provider=project_publication)
     expected = expectations(config)
     runtime.preflight(expected)
     config = runtime.config
@@ -183,7 +192,7 @@ def startup_preflight(runtime):
             snapshot = read_native_snapshot(prior['native_session_ref'],
                 expected_thread_id=session['provider_thread_id'],
                 expected_cwd=str(runtime.store.root / 'agents' / session['id'] / 'workspace'),
-                expected_prefix=prior.get('native_prefix'))
+                expected_prefix=prior.get('native_prefix'), native=team.session_native(runtime.native, role))
             if snapshot['prefix_sha256'] != (prior.get('native_prefix') or {}).get('prefix_sha256'):
                 raise ValueError('PABLO native session advanced outside its committed turn')
         elif session['committed_turn']:
@@ -322,6 +331,18 @@ def prepare(args):
         raise ValueError('A fresh absolute run directory and absolute settled parent are required')
     if args.run_id == args.parent_run_id:
         raise ValueError('New continuation needs a distinct run ID')
+    team_settings = None
+    if getattr(args, 'team', False):
+        if getattr(args, 'native_capabilities', None) is None:
+            raise ValueError('A team run needs its native capabilities file')
+        # The terminal may not read the checkout, the frozen source copy, the parent run or this run.
+        protected = [REPO] + [Path(p) for p in (args.parent_source_root, args.parent_root) if p is not None] + [root]
+        team_settings = team.preparation(json.loads(Path(args.native_capabilities).read_text()),
+            protected=protected, rebuild_history_bytes=getattr(args, 'rebuild_history_bytes', None),
+            backstop=getattr(args, 'challenge_backstop_batches',
+                             harness.LED_DEFAULT_CONFIG['challenge_backstop_batches']))
+    architecture = team.ARCHITECTURE if team_settings else ARCHITECTURE
+    harness_config = team_settings['pablo_harness'] if team_settings else harness.DEFAULT_CONFIG
     parent = load_parent(args.parent_root, args.parent_run_id, args.parent_source_root)
     new_campaign = getattr(args, 'new_campaign', False)
     campaign = continuation_checkpoint(parent, args.new_evaluations, new_campaign=new_campaign)
@@ -364,7 +385,7 @@ def prepare(args):
                     a['actual_costs'] for a in lineage['prior_attempts'])
             finally:
                 source.close()
-    lineage['research_architecture'] = ARCHITECTURE
+    lineage['research_architecture'] = architecture
     lineage['parent_validated_source_root'] = parent.get('validated_source_root', str(REPO))
     lineage['research_campaign'] = campaign
     if new_campaign:
@@ -407,13 +428,16 @@ def prepare(args):
         'After the scoring budget reaches zero, interpret the final result and complete pending improvement '
         'reviews without requesting more tool execution. Completion of scoring is not biological efficacy.'
     )
-    goal += (' The PABLO Lab Harness is restored: obey constraints.adapter_context["pablo.evaluate"].harness '
+    # A team run's paragraph replaces the sentences on the fixed local/challenge schedule.
+    goal += (' ' + team.GOAL + ' ' if team_settings else
+             ' The PABLO Lab Harness is restored: obey constraints.adapter_context["pablo.evaluate"].harness '
              'for the currently due local/challenge role, eligible observed anchor, plateau regime and batch allowance. '
              'Local refines an observed high-scoring series; challenge tests a competing structural series. '
-             'After score stagnation the frozen host policy increases challenge frequency. '
-             'For every scoring batch first execute pablo.select_candidates version 1.0 on a larger plausible pool. '
+             'After score stagnation the frozen host policy increases challenge frequency. ')
+    goal += ('For every scoring batch first execute pablo.select_candidates version 1.0 on a larger plausible pool. '
              'Inputs are run_root, run_id, proposal_role, anchor_parent, candidates, select_count, method, parameters, '
-             'literature_evidence_ids. Implemented methods are fingerprint_diversity and knn_ucb_diversity; parameters '
+             'literature_evidence_ids' + (', decision' if team_settings else '') + '. '
+             'Implemented methods are fingerprint_diversity and knn_ucb_diversity; parameters '
              'contain neighbors (1..32), exploration_weight (0..2), diversity_weight (0..2). '
              'Use actually delivered applicable literature abstracts as motivation; these reviewed method primitives '
              'are not arbitrary paper reproductions or validated predictions. Cite the literature facts in the command. '
@@ -458,8 +482,8 @@ def prepare(args):
         config.update(integration_smoke=args.integration_smoke, task_id=args.run_id, task_plan_id=args.run_id, goal=goal,
             pablo_run_root=str(root), pablo_initial_ref=initial_ref,
             pablo_max_new_evaluations=args.new_evaluations, pablo_continuation_lineage_ref=lineage_ref,
-            research_features=FEATURES, research_architecture=ARCHITECTURE,
-            pablo_harness=copy.deepcopy(harness.DEFAULT_CONFIG),
+            research_features=FEATURES, research_architecture=architecture,
+            pablo_harness=copy.deepcopy(harness_config),
             batch_interpretation_capabilities=[adapter.ADAPTER_ID],
             research_campaign=campaign, resource_budget_provenance=budget_provenance,
             research_policy=research_policy(),
@@ -471,14 +495,20 @@ def prepare(args):
             orchestration={'no_result_steps': 4, 'max_changes': 10},
             authorized_sources=[s['source_id'] for s in sources],
             authorized_source_contracts=source_contracts(sources), frozen_sources=sources)
+        if team_settings:
+            config.update(copy.deepcopy(team_settings), research_policy=research_policy(team=True))
+        elif parent['config'].get('research_architecture') == team.ARCHITECTURE:
+            # A plain run does not inherit a team parent's tools, statement or limits.
+            for key in team.RUN_SETTINGS:
+                config.pop(key, None)
         Controller(store).initialize(args.run_id, budgets=budgets, max_external=1, config=config)
         plan = legacy_host.task_plan(root, args.run_id, initial_ref, args.new_evaluations, goal)
         plan['protocol']['parameters'].update(initial_count=count, global_observation_ordinal_offset=count,
-            target_total_observations=count + args.new_evaluations, research_architecture=ARCHITECTURE,
+            target_total_observations=count + args.new_evaluations, research_architecture=architecture,
             research_campaign=campaign)
         plan['arms'][0]['shards'][0]['protocol_sha256'] = digest(plan['protocol'])
         plan['capability_versions'].update({'pablo.lookup': '1.0', 'literature.search': '1.0', methods.ADAPTER_ID: methods.VERSION})
-        plan['protocol']['parameters']['pablo_harness'] = copy.deepcopy(harness.DEFAULT_CONFIG)
+        plan['protocol']['parameters']['pablo_harness'] = copy.deepcopy(harness_config)
         plan['arms'][0]['shards'][0]['protocol_sha256'] = digest(plan['protocol'])
         plan['budget'] = {'new_oracle_evaluations': args.new_evaluations,
                           **{name: policy['limit'] for name, policy in budgets.items()}}
@@ -521,7 +551,7 @@ def prepare(args):
         legacy_host.write_json(root / 'memory-import.json', imported)
         legacy_host.write_json(root / 'manifest.json', {
             'schema_version': 'pablo_research_manifest_v2', 'source_hashes': source_manifest(),
-            'research_architecture': ARCHITECTURE, 'research_policy': config['research_policy'],
+            'research_architecture': architecture, 'research_policy': config['research_policy'],
             'model': config['model'], 'effort': config['effort'], 'research_features': FEATURES,
             'target_new_evaluations': args.new_evaluations, 'inherited_observations': count,
             'research_campaign': campaign,
@@ -680,6 +710,19 @@ def drive(args):
         continuation.write_cumulative(root, args.run_id)
 
 
+def challenge_backstop(text):
+    """An option value: an integer from 1 to 100, or 'off', kept as written until the option is checked."""
+    if text == 'off':
+        return text
+    try:
+        value = int(text)
+    except ValueError:
+        value = None
+    if value is None or not 1 <= value <= 100:
+        raise argparse.ArgumentTypeError('must be an integer from 1 to 100, or off')
+    return value
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, required=True)
@@ -709,9 +752,38 @@ def main():
     parser.add_argument('--effort', choices=['low', 'medium', 'high', 'xhigh'])
     parser.add_argument('--max-input-bytes', type=int)
     parser.add_argument('--prior-attempt-root', type=Path)
+    parser.add_argument('--team', action='store_true',
+                        help='Prepare a team run: the Lab leads local and challenge sub-agents and decides each batch role')
+    parser.add_argument('--native-capabilities', type=Path,
+                        help='JSON file holding the native_capabilities block of a team run (required with --team)')
+    parser.add_argument('--challenge-backstop-batches', type=challenge_backstop,
+                        help='Team run: batches that neither beat the best score nor were challenge batches before a '
+                             'challenge batch is required, 1..100 or off (default: 4)')
+    parser.add_argument('--rebuild-history-bytes', type=int,
+                        help='Team run: native history size at which an idle session is rebuilt, at least 262144 '
+                             '(default: 4194304)')
     parser.add_argument('--prepare-only', action='store_true')
     parser.add_argument('--resume', action='store_true')
     args = parser.parse_args()
+    team_options = (('--native-capabilities', args.native_capabilities),
+                    ('--challenge-backstop-batches', args.challenge_backstop_batches),
+                    ('--rebuild-history-bytes', args.rebuild_history_bytes))
+    if args.resume and (args.team or any(value is not None for _, value in team_options)):
+        parser.error('Team settings are frozen at preparation and cannot be given on resume; prepare a fresh run')
+    if not args.team:
+        for option, value in team_options:
+            if value is not None:
+                parser.error(option + ' requires --team')
+    elif args.native_capabilities is None:
+        parser.error('--team requires --native-capabilities')
+    if args.rebuild_history_bytes is not None and args.rebuild_history_bytes < team.MIN_REBUILD_HISTORY_BYTES:
+        parser.error('--rebuild-history-bytes must be at least ' + str(team.MIN_REBUILD_HISTORY_BYTES))
+    if args.team:
+        # Not given is the default; off is stored as None.
+        if args.challenge_backstop_batches is None:
+            args.challenge_backstop_batches = harness.LED_DEFAULT_CONFIG['challenge_backstop_batches']
+        elif args.challenge_backstop_batches == 'off':
+            args.challenge_backstop_batches = None
     for option, value in (('--max-recommendations', args.max_recommendations),
                           ('--max-pending-recommendations', args.max_pending_recommendations)):
         if value is not None and not 0 <= value <= 1000:
