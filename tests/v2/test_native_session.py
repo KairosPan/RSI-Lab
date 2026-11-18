@@ -89,14 +89,15 @@ class NativeSessionTests(unittest.TestCase):
         self.assertEqual(set(plain), TODAYS_SNAPSHOT_KEYS)
         self.assertIs(plain['compaction_supported'], False)
 
-    def test_settings_that_are_on_add_three_keys_and_change_no_other_value(self):
+    def test_settings_that_are_on_add_four_keys_and_change_no_other_value(self):
         raw = (fixture(self.cwd) + frame('world_state', {'full': True, 'state': {}})
                + usage_row(THREAD, 't1', 't1', 7, 1))
         plain = self.read(raw, None)
         for settings in (SEARCH, TERMINAL, SUBAGENTS, EVERYTHING):
             with self.subTest(settings=settings):
                 self.assertEqual(self.read(raw, settings),
-                                 {**plain, 'native': settings, 'compactions': 0, 'compaction_supported': True})
+                                 {**plain, 'native': settings, 'compactions': 0, 'compaction_supported': True,
+                                  'history_counted_from_record': None})
 
     def test_rollout_kinds_follow_the_settings(self):
         tools = {'custom_tool_call', 'custom_tool_call_output'}
@@ -155,11 +156,40 @@ class NativeSessionTests(unittest.TestCase):
             with self.subTest(tail=tail), self.assertRaisesRegex(ContextUnavailable, 'context_unverifiable'):
                 self.read(fixture(self.cwd) + tail, EVERYTHING)
 
-    def test_a_compaction_without_its_replacement_history_is_refused(self):
-        # Counting history from a compaction is sound only when the record holds what replaced the history.
+    def test_a_compaction_without_its_replacement_history_counts_the_whole_file(self):
+        # Counting from a compaction is sound only when the record holds what replaced the history.
         for payload in ({'message': 'Only a summary remains'}, {'message': '', 'replacement_history': None}):
-            with self.subTest(payload=payload), self.assertRaisesRegex(ContextUnavailable, 'context_unverifiable'):
-                self.read(fixture(self.cwd) + frame('compacted', payload), TERMINAL)
+            with self.subTest(payload=payload):
+                raw = fixture(self.cwd) + tool_call('c1', 'x') + frame('compacted', payload) + tool_call('c2', 'y')
+                got = self.read(raw, TERMINAL)
+                self.assertEqual(got['observable_text_history_bytes'], len(raw))
+                self.assertEqual(got['compactions'], 1)
+                self.assertIsNone(got['history_counted_from_record'])
+
+    def test_history_counts_from_the_last_compaction_that_carries_its_history(self):
+        head = fixture(self.cwd) + tool_call('c1', 'x' * 4000)
+        tail = (compacted([{'type': 'message', 'role': 'user', 'content': [{'type': 'input_text', 'text': 'kept'}]}])
+                + tool_call('c2', 'y') + frame('compacted', {'message': 'Only a summary remains'})
+                + tool_call('c3', 'z'))
+        got = self.read(head + tail, TERMINAL)
+        self.assertEqual(got['observable_text_history_bytes'], len(tail))
+        self.assertEqual(got['compactions'], 2)
+        self.assertEqual(got['history_counted_from_record'], len(head.splitlines()) + 1)
+
+    def test_the_manifest_names_where_history_is_counted_from(self):
+        today = 'complete-rollout-bytes-conservative-estimate-v1'
+        since = 'rollout-bytes-since-last-compaction-estimate-v1'
+        base = fixture(self.cwd) + tool_call('c1', 'x')
+        arguments = {'session_id': 's', 'owner': {'role': 'lab'}}
+        for snapshot, method in ((None, today), (snapshot_from_bytes(fixture(self.cwd), expected_thread_id=THREAD,
+                                                                     expected_cwd=self.cwd), today),
+                                 (self.read(base, TERMINAL), today),
+                                 (self.read(base + frame('compacted', {'message': 'Only a summary remains'}), TERMINAL),
+                                  today),
+                                 (self.read(base + compacted([]) + tool_call('c2', 'y'), TERMINAL), since)):
+            with self.subTest(snapshot=None if snapshot is None else snapshot.get('history_counted_from_record')):
+                manifest = build_effective_context({'x': 1}, snapshot=snapshot, **arguments)['manifest']
+                self.assertEqual(manifest['history_token_method'], method)
 
     def test_images_after_the_last_compaction_stay_outside_its_text_count(self):
         image = native_image()

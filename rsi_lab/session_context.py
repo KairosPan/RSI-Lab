@@ -129,11 +129,13 @@ def snapshot_from_bytes(raw, *, expected_thread_id, expected_cwd, expected_prefi
 
     ``native`` is the session's role settings (``native.validate``). Settings
     that switch anything on also accept the records ``native.rollout_kinds``
-    names, counted in the byte totals and parsed no further except that a tool
-    output must be text, and a ``compacted`` record that holds its replacement
-    history. The snapshot then carries ``native``, ``compactions`` and
-    ``compaction_supported: True``, and its text history counts from the last
-    ``compacted`` record, inclusive. Everything off reads exactly as before.
+    names, ``compacted`` among them, counted in the byte totals and parsed no
+    further except that a tool output must be text. The snapshot then carries
+    ``native``, ``compactions``, ``compaction_supported: True`` and
+    ``history_counted_from_record``: the 1-based number of the last
+    ``compacted`` record that holds a ``replacement_history`` list, from which
+    the text history counts, inclusive; ``None`` when there is none and the
+    whole file counts. Everything off reads exactly as before.
     """
     _identity(expected_thread_id)
     settings = native_tools.validate(native)
@@ -149,8 +151,9 @@ def snapshot_from_bytes(raw, *, expected_thread_id, expected_cwd, expected_prefi
             raise ContextUnavailable('session_owner_mismatch', 'prefix belongs to another thread')
     records, messages, contexts, metadata, unsupported, runtime_metadata = [], [], [], [], [], []
     image_inputs, image_bytes, image_encoding_bytes = [], 0, 0
-    # Text history starts at the last compacted record; image encodings before it are not in its bytes.
-    offset, history_start, encoding_before_start, compactions = 0, 0, 0, 0
+    # Text history starts at the last compacted record that holds its replacement history (record
+    # number ``history_record``), else at the file's start; image encodings before it are not in its bytes.
+    offset, history_start, encoding_before_start, compactions, history_record = 0, 0, 0, 0, None
     for number, (line, ended) in enumerate(zip(raw.splitlines(), raw.splitlines(keepends=True)), 1):
         start, offset = offset, offset + len(ended)
         if not line.strip():
@@ -164,12 +167,12 @@ def snapshot_from_bytes(raw, *, expected_thread_id, expected_cwd, expected_prefi
         kind, payload = record.get('type'), record['payload']
         records.append(record)
         if kind in kinds['outer'] and payload.get('type') not in COMPACTION_KINDS:
-            # Counting from a compaction is sound only when it holds the history that replaced what it compacted.
-            if kind == 'compacted' and not isinstance(payload.get('replacement_history'), list):
-                unsupported.append({'record': number, 'kind': 'compaction_without_replacement_history'})
-            elif kind == 'compacted':
+            if kind == 'compacted':
                 compactions += 1
-                history_start, encoding_before_start = start, image_encoding_bytes
+                # Counting from a compaction is sound only when it holds the history that replaced what it
+                # compacted; without one, Codex rebuilds from earlier messages and the count stays where it was.
+                if isinstance(payload.get('replacement_history'), list):
+                    history_record, history_start, encoding_before_start = number, start, image_encoding_bytes
         elif kind in COMPACTION_KINDS or payload.get('type') in COMPACTION_KINDS:
             unsupported.append({'record': number, 'kind': kind, 'payload_kind': payload.get('type')})
         elif kind not in OUTER_KINDS:
@@ -253,6 +256,7 @@ def snapshot_from_bytes(raw, *, expected_thread_id, expected_cwd, expected_prefi
     if settings != native_tools.OFF:
         # A compaction replaces the history before it, so the text from the last one onward is what remains.
         snapshot.update(native=settings, compactions=compactions, compaction_supported=True,
+                        history_counted_from_record=history_record,
                         observable_text_history_bytes=(len(raw) - history_start
                                                        - (image_encoding_bytes - encoding_before_start)))
     return snapshot
@@ -385,7 +389,9 @@ def build_effective_context(packet, *, session_id, owner, snapshot=None,
         'observable_input_token_bound': input_token_bound, 'output_reserve_tokens': output_reserve_tokens,
         'total_token_bound': total_token_bound,
         'tokenizer': tokenizer_id if token_counter is not None else 'utf8-bytes-conservative-estimate-v1',
-        'history_token_method': 'complete-rollout-bytes-conservative-estimate-v1',
+        'history_token_method': ('rollout-bytes-since-last-compaction-estimate-v1'
+                                 if snapshot is not None and snapshot.get('history_counted_from_record') is not None
+                                 else 'complete-rollout-bytes-conservative-estimate-v1'),
         'runtime_overhead_tokens': runtime_overhead_tokens, 'provider_context_verified': False,
         'retained_read_authority': False,
         'capacity_scope': 'Observable text history/request plus independently bounded image bytes; image tokens and hidden provider context are not certified'}
