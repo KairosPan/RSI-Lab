@@ -79,13 +79,78 @@ successful score receipt. A proposal containing ten candidates but accepting
 three earns three scores, not ten. This is allocation and provenance accounting,
 not evidence that the role caused improvement.
 
+## Lab-led version
+
+`pablo_lab_led_v1` is a second version beside the fixed schedule above. The Lab
+chooses each batch's role itself; the batch index no longer decides it. A run
+that freezes `pablo_local_challenge_v1` behaves exactly as described above.
+
+A led run freezes `pablo_harness = harness.LED_DEFAULT_CONFIG`: the fixed
+version's fields without `challenge_every_batches`, plus
+`challenge_backstop_batches` (an integer 1 to 100, or `null` for off; default
+4). `stale_batch_threshold` and `stale_score_threshold` are kept, but they no
+longer decide roles; the next plan reports them as two plain facts,
+`signals.score_plateau` and `signals.stale_batches`. The batch size rule (3
+candidates, more after stale batches) is unchanged.
+
+**The counter.** `unchallenged_stale_batches` starts at 0 for every run,
+whatever the initial observations say, so inherited stagnation never arms the
+backstop. After each settled scoring batch it returns to 0 if the batch beat the
+best score, or if the batch was a challenge batch with at least one accepted
+score row; otherwise it grows by one. A challenge batch in which no candidate
+was scored therefore does not satisfy the backstop.
+
+**The backstop.** When the counter reaches `challenge_backstop_batches`, the
+next plan's `required_role` is `challenge`; otherwise, and always when the
+backstop is off, it is `null`. A required batch must be a challenge batch whose
+decision says Challenge was dispatched; anything else is refused with "The
+backstop requires a challenge batch proposed by the Challenge sub-agent". When
+nothing is required the Lab may run either role, including a challenge batch of
+its own design.
+
+**The decision.** In a led run `validate_proposal(..., decision=...)` requires
+the Lab's statement about the batch, with exactly three fields:
+`challenge_dispatched` and `challenge_adopted` (true or false; adopted only with
+dispatched true on a challenge batch) and `reason`, one line of 1 to 300
+characters once surrounding whitespace is removed. A fixed-schedule proposal
+with a decision is refused, and so is a led proposal without one. The led
+binding carries `required_role` and the normalized decision in place of
+`regime` and `reason`, and `validate_binding` checks the binding's own decision
+again at scoring: a decision that is malformed, not in normal form or no longer
+meets the backstop is refused. The harness checks the decision's shape and the
+backstop, not its truth. `check_dispatch(decision, child_threads)` compares
+`challenge_dispatched` with the record of the Lab call that made the request:
+true needs a sub-agent whose recorded role is `challenge`, whether that call
+started it or addressed it again; false needs none. A sub-agent whose role could
+not be read does not count.
+
+**What replay adds.** `project` takes each settled batch's role from its binding
+and refuses a batch without one. With bindings verified it checks, as for the
+fixed schedule, that the binding names the state it was admitted under and that
+the anchor and candidates implement the chosen role; it also checks the decision
+and that a required challenge was obeyed. Role credit goes to the chosen role.
+The projection offers both roles: `eligible_anchors` (up to 20 each),
+`eligible_anchor_count`, `omitted_anchor_count` and `anchor_rule` are keyed by
+`local` and `challenge`, and `instructions` holds both role texts. It adds
+`decisions`, the last 8 batches as `turn`, `proposal_role`, `required` (whether
+the backstop required a challenge), `decision`, `improved` and
+`accepted_scores`, and `totals`: challenge batches the Lab chose, challenge
+batches the backstop required, and batches whose decision says Challenge was
+dispatched but not adopted. A missing challenge anchor blocks the run only when
+a challenge batch is required. A led run has no allocation regime, so its
+projection has no `strategy_transitions`.
+
 ## Offline regression verification
 
 `experiments/pablo/tests/test_harness.py` uses synthetic scores and no model,
 network or evaluator. It covers original cadence, each independent stagnation
 trigger, strict-improvement reset, inherited plateau state, pending/unknown
 effects, explicit anchor fallback/blocking, stale role bindings, unique actual
-credit and remaining score capacity.
+credit and remaining score capacity. Its `LedHarnessTests` cover the led
+version: the counter (inherited stagnation, the exact limit, a new best, a
+scored and an unscored challenge, the backstop off), refused proposals and
+replays when a challenge is required, the decision shape, the dispatch check
+against a call record, replay totals, the configuration and the projection.
 
 `experiments/pablo/tests/test_harness_runtime.py` runs the complete real Runtime
 path with fixture model replies, an explicitly synthetic literature fact, real
