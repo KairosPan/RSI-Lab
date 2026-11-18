@@ -146,6 +146,30 @@ def read_turn(path, *, thread_id, prefix_bytes):
             'compactions': compactions, 'account': account, 'profile': profile}
 
 
+def _rollout_of(codex_home, thread_id):
+    """The one rollout of ``thread_id`` (already checked safe), located by its exact file name under the Codex
+    home's ``sessions`` or ``archived_sessions``, as an owned rollout is; nothing else is opened.
+
+    ``LedgerUnavailable`` when a match is a symlink, not a file or outside its tree, when the tree cannot be
+    listed, and when not exactly one file matches.
+    """
+    home, matches = Path(codex_home).resolve(), []
+    try:
+        for folder in ('sessions', 'archived_sessions'):
+            root = (home / folder).resolve()
+            if not root.is_dir():
+                continue
+            for candidate in root.rglob(f'rollout-*-{thread_id}.jsonl'):
+                if candidate.is_symlink() or not candidate.is_file() or not candidate.resolve().is_relative_to(root):
+                    raise LedgerUnavailable('its rollout is a symlink, not a file, or outside the sessions tree')
+                matches.append(candidate)
+    except OSError as exc:
+        raise LedgerUnavailable('the sessions tree cannot be listed') from exc
+    if len(matches) != 1:
+        raise LedgerUnavailable(f'expected one rollout, found {len(matches)}')
+    return matches[0]
+
+
 def read_child(codex_home, child_thread_id, *, parent_thread_id, root_turn_ids):
     """A sub-agent's usage in the parent's turns ``root_turn_ids``, from its own rollout.
 
@@ -156,21 +180,8 @@ def read_child(codex_home, child_thread_id, *, parent_thread_id, root_turn_ids):
     """
     _identity(child_thread_id, 'the sub-agent thread')
     _identity(parent_thread_id, 'the parent thread')
-    home, matches = Path(codex_home).resolve(), []
-    try:
-        for folder in ('sessions', 'archived_sessions'):
-            root = (home / folder).resolve()
-            if not root.is_dir():
-                continue
-            for candidate in root.rglob(f'rollout-*-{child_thread_id}.jsonl'):
-                if candidate.is_symlink() or not candidate.is_file() or not candidate.resolve().is_relative_to(root):
-                    raise LedgerUnavailable('its rollout is a symlink, not a file, or outside the sessions tree')
-                matches.append(candidate)
-    except OSError as exc:
-        raise LedgerUnavailable('the sessions tree cannot be listed') from exc
-    if len(matches) != 1:
-        raise LedgerUnavailable(f'expected one rollout, found {len(matches)}')
-    raw = _read(matches[0])
+    rollout = _rollout_of(codex_home, child_thread_id)
+    raw = _read(rollout)
     records = _records(raw)
     meta = next((payload for kind, payload in records if kind == 'session_meta'), None)
     if meta is None or meta.get('id') != child_thread_id or meta.get('parent_thread_id') != parent_thread_id:
@@ -178,7 +189,7 @@ def read_child(codex_home, child_thread_id, *, parent_thread_id, root_turn_ids):
     rows = [_counters(payload.get('usage')) for kind, payload in records
             if kind == 'token_usage_record' and payload.get('thread_id') == child_thread_id
             and payload.get('session_id') == parent_thread_id and payload.get('root_turn_id') in root_turn_ids]
-    return {'thread_id': child_thread_id, 'rollout_ref': str(matches[0].resolve()), 'rollout_sha256': digest(raw),
+    return {'thread_id': child_thread_id, 'rollout_ref': str(rollout.resolve()), 'rollout_sha256': digest(raw),
             'requests': len(rows), **{name: sum(row[name] for row in rows) for name in COUNTERS}}
 
 
@@ -209,7 +220,16 @@ def settle(*, codex_home, path, thread_id, prefix_bytes, resumed, stream_usage):
     usage is ``unknown``. A rollout or a sub-agent rollout that cannot be read makes the usage ``unknown`` on any
     thread, never zero and never the stream's, with the reason; ``turn`` is then ``None`` when the call's own
     rollout is the one that cannot be read.
+
+    Without a ``path``, the thread's own rollout is first looked for in ``codex_home`` by its exact thread id, as
+    ``read_child`` locates a child, when both are given and the id is safe: a rollout the strict context reader
+    refused still holds the call's usage rows. Found exactly once, it is the path; otherwise there is none.
     """
+    if path is None and codex_home is not None and isinstance(thread_id, str) and THREAD_ID.fullmatch(thread_id):
+        try:
+            path = _rollout_of(codex_home, thread_id)
+        except LedgerUnavailable:
+            pass             # Not found exactly once: the rules run without a rollout.
     if path is None:
         if resumed:
             return _settled('unknown', None, "the resumed thread's rollout could not be read")

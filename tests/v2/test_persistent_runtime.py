@@ -123,11 +123,10 @@ class PersistentRuntimeTests(unittest.TestCase):
         return rows[0]
 
     def reconcile_unknown_tokens(self):
-        """Settle, as an operator does, the one resumed call whose tokens the ledger could not establish.
+        """Settle, as an operator does, the one resumed call whose own rollout shows no usage rows for its turn.
 
-        Its owned rollout gained no usage rows for its turn, or was refused and not read. Its token usage is then
-        unknown, never the stream's running total, and its token reservation stays held until this
-        reconciliation; the synthetic provider reports 25 tokens per turn.
+        Its token usage is unknown, never the stream's running total, so its token reservation stays held until
+        then; the synthetic provider reports 25 tokens per turn.
         """
         [effect] = [row for row in self.store.list('run', 'effect') if row['accounting_unknown']]
         self.assertEqual(json.loads(self.store.read_blob(effect['result_ref']))['token_source'], 'unknown')
@@ -484,8 +483,6 @@ raise AssertionError('Crash fixture did not reach its exit boundary')
         self.assertEqual(self.rt.agents.working_memory(current['id'])['content']['next_step'],
                          'Preserve the original plan')
         self.assertEqual(len(self.calls), 2)
-        # The rollout it refused to resume is not read for its cost.
-        self.reconcile_unknown_tokens()
         self.assert_settled()
 
     def test_wrong_provider_thread_cannot_commit_private_memory(self):

@@ -991,7 +991,8 @@ class CodexExecutor:
         return {'status': 'succeeded' if success else 'failed_definite' if execution == 'failed_definite' else 'unknown', 'actual_costs': costs,
                 'response': result.get('response'), 'usage': usage,
                 'usage_complete': result.get('usage_complete', False) and spent['source'] != 'unknown',
-                'token_source': spent['source'], 'stream_usage': usage,
+                'token_source': spent['source'], 'token_reason': spent['reason'] if spent['source'] == 'unknown' else None,
+                'stream_usage': usage,
                 'ledger': {name: spent[name] for name in ('requests',) + codex_ledger.COUNTERS},
                 'terminal_received': result.get('terminal_received', complete),
                 'native_writer_quiesced': result.get('returncode') is not None and (

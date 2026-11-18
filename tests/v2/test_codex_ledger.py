@@ -37,8 +37,8 @@ class CodexLedgerTests(unittest.TestCase):
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    def write(self, raw):
-        path = self.day() / f'rollout-2000-01-01T00-00-00-{THREAD}.jsonl'
+    def write(self, raw, folder='sessions'):
+        path = self.day(folder) / f'rollout-2000-01-01T00-00-00-{THREAD}.jsonl'
         path.write_bytes(raw)
         return path
 
@@ -93,6 +93,36 @@ class CodexLedgerTests(unittest.TestCase):
     def test_a_resumed_thread_without_its_rollout_is_never_charged_the_stream(self):
         got = self.settle(path=None, resumed=True, stream_usage={'input_tokens': 20, 'output_tokens': 5})
         self.assertEqual((got['source'], got['tokens']), ('unknown', None)); self.assertIn('resumed', got['reason'])
+
+    def test_a_resumed_thread_without_a_path_is_charged_from_its_own_rollout(self):
+        # The strict context reader may refuse a rollout it cannot resume; its usage rows are still readable.
+        first = fixture(self.cwd) + usage_row(THREAD, 't1', 't1', 54394, 5524)
+        for folder in ('sessions', 'archived_sessions'):
+            with self.subTest(folder=folder):
+                self.reset_home()
+                self.write(first + usage_row(THREAD, 't2', 't2', 102016, 5155) + compacted(None), folder)
+                got = codex_ledger.settle(codex_home=self.home, path=None, thread_id=THREAD, prefix_bytes=len(first),
+                                          resumed=True, stream_usage={'input_tokens': 156410, 'output_tokens': 10679})
+                self.assertEqual((got['source'], got['tokens'], got['requests']), ('ledger', 102016 + 5155, 1))
+
+    def test_a_thread_whose_rollout_is_not_found_once_keeps_the_rules_without_a_path(self):
+        raw = fixture(self.cwd) + usage_row(THREAD, 't1', 't1', 10, 1)
+        stream = {'input_tokens': 20, 'output_tokens': 5}
+
+        def twice():
+            self.write(raw); self.write(raw, 'archived_sessions')
+
+        def as_symlink():
+            outside = self.root / 'elsewhere.jsonl'
+            outside.write_bytes(raw)
+            (self.day() / f'rollout-2000-01-01T00-00-00-{THREAD}.jsonl').symlink_to(outside)
+        for prepare in (twice, as_symlink):
+            with self.subTest(prepare=prepare.__name__):
+                self.reset_home(); prepare()
+                got = self.settle(path=None, resumed=True, stream_usage=stream)
+                self.assertEqual((got['source'], got['tokens']), ('unknown', None)); self.assertIn('resumed', got['reason'])
+        self.reset_home()
+        self.assertEqual(self.settle(path=None, resumed=False, stream_usage=stream)['source'], 'stream')
 
     def test_fallbacks(self):
         base = fixture(self.cwd)

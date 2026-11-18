@@ -164,6 +164,7 @@ class NativeExecutorTests(unittest.TestCase):
         self.assertEqual(receipt['actual_costs']['tokens'], 83032 + 291 + 22828 + 37)
         self.assertEqual(receipt['actual_costs']['model_calls'], 1)
         self.assertEqual(receipt['token_source'], 'ledger')
+        self.assertIsNone(receipt['token_reason'])
         self.assertEqual(receipt['child_threads'][0]['thread_id'], CHILD)
         self.assertEqual(receipt['native_activity']['tool_calls'], 1)
         self.assertEqual(receipt['account_snapshot']['plan_type'], 'pro')
@@ -189,6 +190,7 @@ class NativeExecutorTests(unittest.TestCase):
         receipt = self.execute(settings=TERMINAL_AND_SUBAGENTS, rollout=PARENT_WITH_CHILD, child=None)
         self.assertNotIn('tokens', receipt['actual_costs'])
         self.assertFalse(receipt['usage_complete']); self.assertEqual(receipt['token_source'], 'unknown')
+        self.assertIn(CHILD, receipt['token_reason'])
         self.assertTrue(self.effect['accounting_unknown'])
 
     def test_a_terminal_turn_without_the_profile_is_invalid(self):
