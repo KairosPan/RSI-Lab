@@ -1,0 +1,232 @@
+"""What one Codex call added to its rollout, and the tokens it is charged.
+
+Codex writes one ``token_usage_record`` per provider request to the thread's
+rollout. On a resumed thread the event stream's ``turn.completed`` usage is the
+thread's running total, so it counts every earlier turn again; the rows a call
+appended after its prefix are what that call spent. A sub-agent writes its rows
+to a rollout of its own, found by its exact thread id as an owned rollout is
+(no scanning); its rows name the parent thread as ``session_id`` and the
+parent's turn as ``root_turn_id``.
+
+The same bytes say what the call did: its tool calls, its compactions, the last
+account snapshot and the permission profile of its last turn context. Nothing
+here runs Codex or writes anything.
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from .session_context import THREAD_ID
+from .store import digest
+
+COUNTERS = ('input_tokens', 'output_tokens', 'cached_input_tokens')
+# The record field that holds each tool call's input text.
+TOOL_CALLS = {'custom_tool_call': 'input', 'function_call': 'arguments'}
+MAX_TOOL_INPUTS = 32
+EXCERPT_CHARS = 200
+
+
+class LedgerUnavailable(ValueError):
+    """A rollout cannot say what a call spent."""
+
+
+def _identity(thread_id, what):
+    if not isinstance(thread_id, str) or not THREAD_ID.fullmatch(thread_id):
+        raise LedgerUnavailable(f'{what} is not a safe thread identity')
+
+
+def _read(path):
+    path = Path(path)
+    try:
+        if path.is_symlink() or not path.is_file():
+            raise LedgerUnavailable(f'{path} is missing or a symlink')
+        return path.read_bytes()
+    except OSError as exc:
+        raise LedgerUnavailable(f'{path} cannot be read') from exc
+
+
+def _records(raw, start=0):
+    """The ``(type, payload)`` of every record in ``raw[start:]``, split on ``b'\\n'`` only. Each must be complete
+    and a JSON object with an object payload, and ``start`` must fall on a record boundary."""
+    if start > len(raw):
+        raise LedgerUnavailable('the rollout is shorter than its prefix')
+    if start and raw[start - 1:start] != b'\n':
+        raise LedgerUnavailable('the prefix does not end on a record boundary')
+    tail = raw[start:]
+    if tail and not tail.endswith(b'\n'):
+        raise LedgerUnavailable('the rollout has no complete final record')
+    records = []
+    for number, line in enumerate(tail.split(b'\n')[:-1], 1):
+        try:
+            record = json.loads(line.decode('utf-8'))
+        except ValueError as exc:                       # UnicodeDecodeError is a ValueError too
+            raise LedgerUnavailable(f'line {number} from byte {start} is not JSON') from exc
+        if not isinstance(record, dict) or not isinstance(record.get('payload'), dict):
+            raise LedgerUnavailable(f'line {number} from byte {start} is not a record with a payload')
+        records.append((record.get('type'), record['payload']))
+    return records
+
+
+def _counters(usage):
+    """A usage row's per-request counters; ``cached_input_tokens`` is 0 when absent."""
+    counters = ({name: usage.get(name, 0 if name == 'cached_input_tokens' else None) for name in COUNTERS}
+                if isinstance(usage, dict) else None)
+    if counters is None or any(type(value) is not int or value < 0 for value in counters.values()):
+        raise LedgerUnavailable('a usage row has invalid counters')
+    return counters
+
+
+def _tool_input(payload):
+    text = payload.get(TOOL_CALLS[payload['type']])
+    if not isinstance(text, str):
+        text = json.dumps(text, ensure_ascii=False, sort_keys=True)
+    return {'name': payload.get('name'), 'sha256': digest(text.encode('utf-8', 'surrogatepass')),
+            'excerpt': text[:EXCERPT_CHARS]}
+
+
+def _account(limits):
+    primary = limits.get('primary') if isinstance(limits.get('primary'), dict) else {}
+    credits = limits.get('credits') if isinstance(limits.get('credits'), dict) else {}
+    return {'plan_type': limits.get('plan_type'), 'used_percent': primary.get('used_percent'),
+            'window_minutes': primary.get('window_minutes'), 'resets_at': primary.get('resets_at'),
+            'credits_balance': credits.get('balance'), 'has_credits': credits.get('has_credits'),
+            'unlimited': credits.get('unlimited')}
+
+
+def read_turn(path, *, thread_id, prefix_bytes):
+    """What the call that began at byte ``prefix_bytes`` of the rollout at ``path`` added to it.
+
+    ``rows`` are the call's usage rows, each one provider request, and ``requests`` and the counters add them up;
+    ``turn_ids`` are their distinct turns. ``children`` are the distinct sub-agents started (``SubAgentActivity``
+    of kind ``started``), as recorded: their ids are checked only when ``read_child`` looks for them.
+    ``tool_calls`` counts ``custom_tool_call`` and ``function_call`` records; ``tool_inputs`` hashes the input of
+    the first ``MAX_TOOL_INPUTS`` and keeps its first ``EXCERPT_CHARS`` characters. ``account`` is the last
+    ``rate_limits`` snapshot and ``profile`` the ``permission_profile`` of the last ``turn_context``, each
+    ``None`` when absent.
+
+    ``LedgerUnavailable`` is raised when the bytes after the prefix are not whole JSON records starting on a
+    record boundary, or a usage row belongs to another thread or session, names no turn or has invalid counters.
+    """
+    _identity(thread_id, 'the session thread')
+    if type(prefix_bytes) is not int or prefix_bytes < 0:
+        raise LedgerUnavailable('the prefix must be a byte count')
+    rows, children, tool_inputs = [], [], []
+    tool_calls = compactions = 0
+    account = profile = None
+    for kind, payload in _records(_read(path), prefix_bytes):
+        if kind == 'token_usage_record':
+            if payload.get('thread_id') != thread_id or payload.get('session_id') != thread_id:
+                raise LedgerUnavailable('a usage row belongs to another thread')
+            turn, root = payload.get('turn_id'), payload.get('root_turn_id')
+            if not (isinstance(turn, str) and turn and isinstance(root, str) and root):
+                raise LedgerUnavailable('a usage row names no turn')
+            rows.append({'turn_id': turn, 'root_turn_id': root, **_counters(payload.get('usage'))})
+        elif kind == 'compacted':
+            compactions += 1
+        elif kind == 'turn_context':
+            value = payload.get('permission_profile')
+            profile = value if isinstance(value, dict) else None
+        elif kind == 'response_item' and payload.get('type') in TOOL_CALLS:
+            tool_calls += 1
+            if len(tool_inputs) < MAX_TOOL_INPUTS:
+                tool_inputs.append(_tool_input(payload))
+        elif kind == 'event_msg' and payload.get('type') == 'token_count':
+            if isinstance(payload.get('rate_limits'), dict):
+                account = _account(payload['rate_limits'])
+        elif kind == 'event_msg' and payload.get('type') == 'item_completed':
+            item = payload.get('item')
+            if isinstance(item, dict) and item.get('type') == 'SubAgentActivity' and item.get('kind') == 'started':
+                child = item.get('agent_thread_id')
+                if all(known['thread_id'] != child for known in children):
+                    children.append({'thread_id': child, 'agent_path': item.get('agent_path')})
+    return {'rows': rows, 'turn_ids': list(dict.fromkeys(row['turn_id'] for row in rows)), 'requests': len(rows),
+            **{name: sum(row[name] for row in rows) for name in COUNTERS}, 'children': children,
+            'tool_calls': tool_calls, 'tool_inputs': tool_inputs, 'tool_inputs_omitted': tool_calls - len(tool_inputs),
+            'compactions': compactions, 'account': account, 'profile': profile}
+
+
+def read_child(codex_home, child_thread_id, *, parent_thread_id, root_turn_ids):
+    """A sub-agent's usage in the parent's turns ``root_turn_ids``, from its own rollout.
+
+    The rollout is located by its exact file name under ``sessions`` or ``archived_sessions``, as an owned
+    rollout is: exactly one non-symlink file must match, and its first ``session_meta`` must name the child and
+    this parent. A row counts only when its ``thread_id`` is the child, its ``session_id`` the parent and its
+    ``root_turn_id`` one of ``root_turn_ids``; the forked parent history and earlier turns do not.
+    """
+    _identity(child_thread_id, 'the sub-agent thread')
+    _identity(parent_thread_id, 'the parent thread')
+    home, matches = Path(codex_home).resolve(), []
+    try:
+        for folder in ('sessions', 'archived_sessions'):
+            root = (home / folder).resolve()
+            if not root.is_dir():
+                continue
+            for candidate in root.rglob(f'rollout-*-{child_thread_id}.jsonl'):
+                if candidate.is_symlink() or not candidate.is_file() or not candidate.resolve().is_relative_to(root):
+                    raise LedgerUnavailable('its rollout is a symlink, not a file, or outside the sessions tree')
+                matches.append(candidate)
+    except OSError as exc:
+        raise LedgerUnavailable('the sessions tree cannot be listed') from exc
+    if len(matches) != 1:
+        raise LedgerUnavailable(f'expected one rollout, found {len(matches)}')
+    raw = _read(matches[0])
+    records = _records(raw)
+    meta = next((payload for kind, payload in records if kind == 'session_meta'), None)
+    if meta is None or meta.get('id') != child_thread_id or meta.get('parent_thread_id') != parent_thread_id:
+        raise LedgerUnavailable('its rollout does not record it as a sub-agent of this thread')
+    rows = [_counters(payload.get('usage')) for kind, payload in records
+            if kind == 'token_usage_record' and payload.get('thread_id') == child_thread_id
+            and payload.get('session_id') == parent_thread_id and payload.get('root_turn_id') in root_turn_ids]
+    return {'thread_id': child_thread_id, 'rollout_ref': str(matches[0].resolve()), 'rollout_sha256': digest(raw),
+            'requests': len(rows), **{name: sum(row[name] for row in rows) for name in COUNTERS}}
+
+
+def _settled(source, tokens, reason, turn=None, children=()):
+    """The settlement: ``tokens`` is what is charged, ``None`` when unknown; ``requests`` and the counters add up
+    the usage rows read, the turn's and its readable children's."""
+    parts = ([turn] if turn is not None else []) + list(children)
+    return {'tokens': tokens, 'source': source, 'reason': reason,
+            **{name: sum(part[name] for part in parts) for name in ('requests',) + COUNTERS},
+            'children': list(children), 'turn': turn}
+
+
+def _from_stream(stream_usage, why, turn=None):
+    counts = ([stream_usage.get('input_tokens'), stream_usage.get('output_tokens')]
+              if isinstance(stream_usage, dict) else [None])
+    if all(type(count) is int and count >= 0 for count in counts):
+        return _settled('stream', sum(counts), why, turn)
+    return _settled('unknown', None, why + ', and the stream reported no usage', turn)
+
+
+def settle(*, codex_home, path, thread_id, prefix_bytes, resumed, stream_usage):
+    """The tokens one call is charged and where the number comes from.
+
+    Without a rollout (``path`` is ``None``) the stream's input plus output tokens are charged. When the call
+    added usage rows, ``ledger``: their input plus output tokens and those of every sub-agent it started, read
+    through ``read_child``. Without rows, a fresh thread's stream number is the turn's own and is charged, but a
+    resumed thread's is the thread's running total, so its usage is ``unknown``. A rollout or a sub-agent rollout
+    that cannot be read makes the usage ``unknown`` too, never zero, with the reason; ``turn`` is then ``None``
+    when the call's own rollout is the one that cannot be read.
+    """
+    if path is None:
+        return _from_stream(stream_usage, 'the call has no rollout to read')
+    try:
+        turn = read_turn(path, thread_id=thread_id, prefix_bytes=prefix_bytes)
+    except LedgerUnavailable as exc:
+        return _settled('unknown', None, f'the rollout cannot be read: {exc}')
+    if not turn['rows']:
+        if resumed:
+            return _settled('unknown', None, 'the resumed turn added no usage rows', turn)
+        return _from_stream(stream_usage, 'the fresh turn added no usage rows', turn)
+    children, unreadable = [], []
+    for child in turn['children']:
+        try:
+            children.append(read_child(codex_home, child['thread_id'], parent_thread_id=thread_id,
+                                       root_turn_ids=turn['turn_ids']))
+        except LedgerUnavailable as exc:
+            unreadable.append(f'sub-agent {child["thread_id"]!r}: {exc}')
+    if unreadable:
+        return _settled('unknown', None, '; '.join(unreadable), turn, children)
+    spent = _settled('ledger', None, None, turn, children)
+    return {**spent, 'tokens': spent['input_tokens'] + spent['output_tokens']}

@@ -76,19 +76,26 @@ def account(balance, used_percent, plan_type='pro'):
         'credits': {'has_credits': True, 'unlimited': False, 'balance': balance}}})
 
 
-def turn_context(turn, profile=None):
-    """A ``turn_context`` record of ``turn``; it carries ``permission_profile`` only when ``profile`` is given."""
-    payload = {'turn_id': turn, 'root_turn_id': turn, 'model': 'test-model', 'effort': 'low',
-               'approval_policy': 'never'}
+SANDBOX_POLICY = {'type': 'workspace-write', 'network_access': False, 'exclude_tmpdir_env_var': True,
+                  'exclude_slash_tmp': True}
+
+
+def turn_context(turn, profile=None, *, cwd='/workspace'):
+    """A ``turn_context`` record of ``turn`` run in ``cwd`` under the probe's ``sandbox_policy``; it carries
+    ``permission_profile`` only when ``profile`` is given."""
+    payload = {'turn_id': turn, 'root_turn_id': turn, 'cwd': str(cwd), 'model': 'test-model', 'effort': 'low',
+               'approval_policy': 'never', 'sandbox_policy': dict(SANDBOX_POLICY)}
     if profile is not None:
         payload['permission_profile'] = profile
     return frame('turn_context', payload)
 
 
-def child_rollout(child, parent, turn_rows):
-    """A sub-agent's own rollout: its ``session_meta``, then the parent's (the history is forked), then one usage
-    row per ``(turn_id, root_turn_id, input_tokens, output_tokens)`` in ``turn_rows``."""
-    own = frame('session_meta', {'id': child, 'parent_thread_id': parent,
-                                 'source': {'subagent': {'thread_spawn': {'parent_thread_id': parent, 'depth': 1}}}})
-    return own + frame('session_meta', {'id': parent}) + b''.join(
+def child_rollout(child, parent, turn_rows, *, agent_path='/root/a', cwd='/workspace'):
+    """A sub-agent's own rollout: its ``session_meta``, spawned at ``agent_path`` in ``cwd``, then the parent's
+    (the history is forked), then one usage row per ``(turn_id, root_turn_id, input_tokens, output_tokens)`` in
+    ``turn_rows``."""
+    spawn = {'parent_thread_id': parent, 'depth': 1, 'agent_path': agent_path}
+    own = frame('session_meta', {'id': child, 'parent_thread_id': parent, 'cwd': str(cwd),
+                                 'source': {'subagent': {'thread_spawn': spawn}}})
+    return own + frame('session_meta', {'id': parent, 'cwd': str(cwd)}) + b''.join(
         usage_row(child, turn, root, inp, out, session=parent) for turn, root, inp, out in turn_rows)
