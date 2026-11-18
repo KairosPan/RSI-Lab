@@ -187,17 +187,23 @@ def _process_table():
     return table
 
 
-def _descendants(pid):
-    """Every transitive child of ``pid`` as ``{pid: start}``, from one read of the process table."""
+# Seconds between samples of the process table while a call with the terminal on runs.
+TRACK_SECONDS = 1.0
+
+
+def _track(tracked, table, root=None):
+    """Add to ``tracked`` (``{pid: start}``) every process ``table`` shows below ``root`` or below a tracked process
+    that is still the same one, with the same start time: a pid reused by a later process is no root."""
     children = {}
-    for child, (parent, start) in _process_table().items():
-        children.setdefault(parent, []).append((child, start))
-    found, pending = {}, [pid]
+    for pid, (parent, start) in table.items():
+        children.setdefault(parent, []).append(pid)
+    pending = [pid for pid, start in tracked.items() if pid in table and table[pid][1] == start]
+    if root is not None:
+        pending.append(root)
     while pending:
-        for child, start in children.pop(pending.pop(), ()):
-            found[child] = start
+        for child in children.pop(pending.pop(), ()):
+            tracked[child] = table[child][1]
             pending.append(child)
-    return found
 
 
 def _gone(pid):
@@ -211,60 +217,92 @@ def _gone(pid):
     return False
 
 
-def _terminate(process):
-    """Kill the invocation's process group and every process it started.
+def _stop(tracked):
+    """Stop every process of ``tracked`` (``{pid: start}``) that is still the same one.
 
-    A command Codex runs can lead its own process group, out of reach of
-    Codex's. The descendants are listed with their start times before any
-    signal, since a killed parent's children are reparented and no longer
-    found through it. A pid can be reused once its process is gone, so the
-    table is read again just before the descendants are signalled, and only a
-    pid still present with its listed start time is signalled: through its
-    group when it leads one, by pid otherwise, and this process's own group
-    never. Codex's own pid cannot have been reused, as Codex is not reaped
-    before this. Returns whether every listed process is gone within 5
-    seconds, a pid that now has another start time counting as gone: ``False``
-    when either read fails, as nothing can then be confirmed, though Codex's
-    group is killed all the same.
+    A pid can be reused once its process is gone, so the table is read just
+    before any signal, and only a pid still present with its recorded start
+    time is signalled: through its group when it leads one, by pid otherwise,
+    and this process's own group never. Returns whether, within 5 seconds, no
+    tracked process is left, a pid that is gone or has another start time
+    counting as stopped; ``False``, with no signal sent, when that read fails.
     """
+    if not tracked:
+        return True
     try:
-        listed = _descendants(process.pid)
+        table = _process_table()
     except (OSError, ValueError):
-        listed = None
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    if listed is None:
         return False
-    if listed:
+    own_group = os.getpgrp()
+    for pid, start in tracked.items():
+        if pid not in table or table[pid][1] != start:
+            continue         # Gone, or the pid now names another process: nothing tracked is left to stop.
         try:
-            table = _process_table()
-        except (OSError, ValueError):
-            return False
-        own_group = os.getpgrp()
-        for pid, start in listed.items():
-            if pid not in table or table[pid][1] != start:
-                continue     # Gone, or the pid now names another process: nothing listed is left to stop.
-            try:
-                if os.getpgid(pid) == pid and pid != own_group:
-                    os.killpg(pid, signal.SIGKILL)
-                else:
-                    os.kill(pid, signal.SIGKILL)
-            except OSError:  # Gone already, or not this process's to signal: the check below decides.
-                pass
+            if os.getpgid(pid) == pid and pid != own_group:
+                os.killpg(pid, signal.SIGKILL)
+            else:
+                os.kill(pid, signal.SIGKILL)
+        except OSError:      # Gone already, or not this process's to signal: the check below decides.
+            pass
+    remaining = tracked
     deadline = time.monotonic() + 5
     while True:
-        listed = {pid: start for pid, start in listed.items() if not _gone(pid)}
-        if listed:
+        remaining = {pid: start for pid, start in remaining.items() if not _gone(pid)}
+        if remaining:
             try:
                 table = _process_table()
             except (OSError, ValueError):
                 table = {}   # Then no pid still answering counts as reused.
-            listed = {pid: start for pid, start in listed.items() if pid not in table or table[pid][1] == start}
-        if not listed or time.monotonic() >= deadline:
-            return not listed
+            remaining = {pid: start for pid, start in remaining.items() if pid not in table or table[pid][1] == start}
+        if not remaining or time.monotonic() >= deadline:
+            return not remaining
         time.sleep(.05)
+
+
+def _terminate(process, tracked=None):
+    """Kill the invocation's process group and every process seen under it.
+
+    A command Codex runs can lead its own process group, out of reach of
+    Codex's. Before any signal, what now runs below Codex is added to
+    ``tracked``, the processes earlier samples saw under the call (none when
+    the terminal is off), since a killed parent's children are reparented and
+    no longer found through it. Codex's group is then killed, and every
+    tracked process by ``_stop``. Codex's own pid cannot have been reused, as
+    Codex is not reaped before this. Returns whether every process seen under
+    the call, at a sample or at the kill, was stopped; a process that detaches
+    and loses its parent between two samples is not seen. ``False`` when a
+    read of the process table fails, as nothing can then be confirmed, though
+    Codex's group is killed all the same.
+    """
+    tracked = {} if tracked is None else tracked
+    try:
+        _track(tracked, _process_table(), process.pid)
+        listed = True
+    except (OSError, ValueError):
+        listed = False
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    return _stop(tracked) and listed
+
+
+def _sweep(tracked):
+    """Stop what still runs of ``tracked`` once a call has ended without a kill.
+
+    A last sample follows the tracked processes that are still the same to
+    their children. Codex's pid is no root: Codex has been reaped, and its pid
+    can be reused. Returns what ``_stop`` returns, ``False`` when the last
+    sample cannot be read; ``True`` when nothing was tracked.
+    """
+    if not tracked:
+        return True
+    try:
+        _track(tracked, _process_table())
+        sampled = True
+    except (OSError, ValueError):
+        sampled = False
+    return _stop(tracked) and sampled
 
 
 def _provider_stdout(folder):
@@ -446,13 +484,15 @@ def _archive_images(folder, images, manifest):
     return [record['path'] for record in files]
 
 
-def _stream_process(process, prompt, journal, folder, timeout, stop):
+def _stream_process(process, prompt, journal, folder, timeout, stop, tracked=None):
     """Drain both pipes while sending input; no turn-sized communicate buffer.
 
     Each received chunk is durable before parsing complete event frames. This
     also preserves non-UTF8 data and unfinished frames if the writer is killed.
     ``stop`` kills the process tree when the deadline elapses; the pipes then
-    have 5 seconds to drain.
+    have 5 seconds to drain. Given ``tracked``, the process table is sampled
+    every ``TRACK_SECONDS`` until then, adding to it what runs under the
+    process; a sample that cannot be read is skipped.
     """
     selector = selectors.DefaultSelector()
     pending = memoryview(prompt.encode('utf-8'))
@@ -460,6 +500,7 @@ def _stream_process(process, prompt, journal, folder, timeout, stop):
     captures = {name: (folder / ('events.jsonl' if name == 'stdout' else 'stderr.log')).open('xb', buffering=0)
                 for name in buffers}
     deadline = time.monotonic() + timeout
+    next_sample = time.monotonic() if tracked is not None else math.inf
     timed_out, drain_deadline = False, None
     try:
         for name in ('stdout', 'stderr'):
@@ -470,6 +511,12 @@ def _stream_process(process, prompt, journal, folder, timeout, stop):
         selector.register(process.stdin, selectors.EVENT_WRITE, 'stdin')
         while selector.get_map():
             now = time.monotonic()
+            if not timed_out and now >= next_sample:
+                next_sample = now + TRACK_SECONDS
+                try:
+                    _track(tracked, _process_table(), process.pid)
+                except (OSError, ValueError):
+                    pass     # The next sample tries again.
             if not timed_out and now >= deadline:
                 timed_out = True
                 stop()
@@ -541,9 +588,16 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
     Execution completion, parsing, and application validation are separate.
     Native settings that switch anything on need a session and the run root;
     they are recorded as ``native`` in the invocation and the result, which
-    carry no such key when everything is off. The result's
-    ``descendants_stopped`` is ``True`` when Codex ended on its own, otherwise
-    whether killing it stopped every process it had started.
+    carry no such key when everything is off.
+
+    The result's ``descendants_stopped`` says whether every process seen under
+    the call was stopped by its end. With the terminal on, the process table
+    is sampled every ``TRACK_SECONDS`` while Codex runs, and whatever was seen
+    and still runs is stopped however the call ends. A timeout or an
+    interruption that kills Codex also stops what runs under it at the kill.
+    A process that detaches and loses its parent between two samples is not
+    seen. With the terminal off nothing is sampled, and a call Codex ends on
+    its own reports ``True``.
     """
     if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError('Prompt must be nonempty text')
@@ -599,11 +653,15 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
     stream_complete = False
     journal_snapshot = None
     descendants_stopped = True
+    tracked = {}                             # Every process seen under the call, as pid: start time.
+    terminal = settings['terminal'] is not None
+    killed = False
 
     def stop():
-        nonlocal descendants_stopped
+        nonlocal descendants_stopped, killed
+        killed = True
         descendants_stopped = False          # Stays False if _terminate is interrupted before it confirms.
-        descendants_stopped = _terminate(process)
+        descendants_stopped = _terminate(process, tracked)
 
     invocation = {'backend': 'codex', 'model': model, 'effort': effort,
                   'timeout_seconds': timeout, 'started_at_unix': time.time(), 'dispatched': False,
@@ -640,7 +698,8 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
             invocation.update(sent_image_manifest=image_manifest,
                               sent_image_manifest_sha256=image_digest)
         _write_json(folder / 'invocation.json', invocation)
-        returncode, timed_out, partial_tail = _stream_process(process, sent_prompt, journal, folder, timeout, stop)
+        returncode, timed_out, partial_tail = _stream_process(process, sent_prompt, journal, folder, timeout, stop,
+                                                              tracked if terminal else None)
         captured = read_journal(folder / 'journal.jsonl')
         stdout = raw_stream(captured, 'stdout').decode('utf-8', errors='replace')
         raw, usage, usage_complete, errors = audited_events(folder)
@@ -733,6 +792,10 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
         if not isinstance(exc, Exception):
             interrupted = exc
     finally:
+        if terminal and process is not None and not killed:
+            # Codex ended without a kill, however the call ended: what was seen under it and still runs is stopped.
+            descendants_stopped = False      # Stays False if _sweep is interrupted before it confirms.
+            descendants_stopped = _sweep(tracked)
         if journal is not None:
             journal_snapshot = journal.snapshot()
             journal.close()

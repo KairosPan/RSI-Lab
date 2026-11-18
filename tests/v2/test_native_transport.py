@@ -460,6 +460,61 @@ class NativeTransportTests(unittest.TestCase):
     def test_a_call_that_ends_on_its_own_reports_descendants_stopped(self):
         self.assertTrue(self.invoke(frames(), session=self.session())['descendants_stopped'])
 
+    def orphaning_codex(self, marker, *, ends):
+        """A "Codex" that starts a launcher, which starts a 60-second grandchild in its own session, records it to
+        ``marker`` and exits after about 0.5 seconds, orphaning it; "Codex" then runs about 1.5 seconds more and
+        writes a valid event stream, if it ``ends``, or never ends. Neither descendant holds Codex's pipes."""
+        detached = 'stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL'
+        launcher = ('import os,subprocess,sys,time;'
+                    'p=subprocess.Popen([sys.executable,"-c","import time;time.sleep(60)"],start_new_session=True,'
+                    + detached + ');' + record(marker) + 'time.sleep(.5)')
+        rest = ('time.sleep(1.5);sys.stdout.write(%r);sys.stdout.flush()' % self.wire(frames()) if ends
+                else 'time.sleep(60)')
+        return ('import subprocess,sys,time;sys.stdin.read();'
+                'subprocess.Popen([sys.executable,"-c",%r],%s).wait();' % (launcher, detached) + rest)
+
+    def test_a_terminal_call_that_ends_on_its_own_stops_what_it_orphaned(self):
+        marker = self.root / 'grandchild.pid'
+        self.addCleanup(self.stop_recorded, marker)
+        with patch.object(transport, 'TRACK_SECONDS', .1):
+            result = self.invoke(code=self.orphaning_codex(marker, ends=True), native=TERMINAL)
+        self.assertEqual(result['execution_status'], 'succeeded', result['error'])
+        self.assertTrue(result['descendants_stopped'])
+        self.assert_stopped(marker)
+
+    def test_a_terminal_call_that_times_out_stops_what_it_orphaned(self):
+        marker = self.root / 'grandchild.pid'
+        self.addCleanup(self.stop_recorded, marker)
+        with patch.object(transport, 'TRACK_SECONDS', .1):
+            result = self.invoke(code=self.orphaning_codex(marker, ends=False), native=TERMINAL, timeout=2.5)
+        self.assertEqual(result['execution_status'], 'unknown')
+        self.assertTrue(result['descendants_stopped'])
+        self.assert_stopped(marker)
+
+    def test_a_call_without_the_terminal_never_reads_the_process_table(self):
+        for name, settings in (('off', None), ('search', SEARCH)):
+            with self.subTest(settings=name):
+                marker = self.root / (name + '.pid')
+                self.addCleanup(self.stop_recorded, marker)     # Its grandchild is not tracked, so it outlives the call.
+                with patch.object(transport, 'TRACK_SECONDS', .1), \
+                        patch.object(transport, '_process_table', wraps=transport._process_table) as table:
+                    result = self.invoke(code=self.orphaning_codex(marker, ends=True), native=settings,
+                                         folder=self.root / 'calls' / name)
+                table.assert_not_called()
+                self.assertEqual(result['execution_status'], 'succeeded', result['error'])
+                self.assertTrue(result['descendants_stopped'])
+
+    def test_tracking_follows_codex_and_every_tracked_process_that_is_still_the_same(self):
+        # 200 was seen under Codex and still runs, orphaned; 500 was seen too, but its pid now names a later process.
+        tracked = {200: 'T1', 500: 'T5'}
+        table = {1: (0, 'boot'), 100: (1, 'T0'), 150: (100, 'T6'), 200: (1, 'T1'), 210: (200, 'T7'),
+                 211: (210, 'T8'), 500: (1, 'T9'), 510: (500, 'T9'), 600: (1, 'T2')}
+        transport._track(tracked, table, 100)
+        self.assertEqual(tracked, {200: 'T1', 500: 'T5', 150: 'T6', 210: 'T7', 211: 'T8'})
+        # Without a root (Codex reaped, its pid free for reuse) only what is under a tracked process is followed.
+        transport._track(tracked, {**table, 300: (150, 'T4'), 160: (100, 'T3')})
+        self.assertEqual(tracked, {200: 'T1', 500: 'T5', 150: 'T6', 210: 'T7', 211: 'T8', 300: 'T4'})
+
     def test_an_unreadable_process_table_still_kills_codex_and_reports_false(self):
         real = transport._POPEN
         failures = {'ps cannot start': OSError('ps unavailable'),
