@@ -188,6 +188,29 @@ class FeatureReportTests(unittest.TestCase):
         store, controller, rt = open_run(self)
         self.assertEqual(rt.feature_report()['native_capabilities'], {role: native.OFF for role in native.ROLES})
 
+    def test_a_native_run_on_a_small_capacity_limit_is_warned(self):
+        # A tool-using turn's records pass a small limit, and later turns then block on capacity.
+        search = {'native_capabilities': {'literature': {'web_search': True}}}
+        for limits, warned in (({}, True), ({'max_input_bytes': 1048575}, True),
+                               ({'max_input_bytes': 1048576}, False),
+                               ({'max_input_bytes': 4194304, 'max_effective_context_bytes': 524288}, True),
+                               ({'max_input_bytes': 131072, 'max_effective_context_bytes': 4194304}, False)):
+            with self.subTest(limits=limits):
+                store, controller, rt = open_run(self, config={**search, **limits})
+                warnings = rt.feature_report()['native_warnings']
+                self.assertEqual(len(warnings), 1 if warned else 0, warnings)
+                self.assertTrue(all(isinstance(warning, str) for warning in warnings))
+                if warned:
+                    limit = limits.get('max_effective_context_bytes', limits.get('max_input_bytes', 131072))
+                    self.assertIn(str(limit), warnings[0])
+                    self.assertIn('max_effective_context_bytes', warnings[0])
+
+    def test_a_run_with_every_role_off_has_no_native_warning(self):
+        for config in ({}, {'native_capabilities': {'lab': {'web_search': False}}}):
+            with self.subTest(config=config):
+                store, controller, rt = open_run(self, config=config)
+                self.assertEqual(rt.feature_report()['native_warnings'], [])
+
 
 def with_account(plan_type):
     """Complete a scripted receipt with the account snapshot Codex recorded during the call, or ``None``."""
@@ -209,6 +232,18 @@ class CodexAccountStatusTests(unittest.TestCase):
         # The newest receipt read no snapshot; the one before it did.
         self.assertEqual(rt.status()['codex_account']['plan_type'], 'pro')
         self.assertEqual(rt.status()['codex_account']['credits_balance'], '1200.50')
+
+    def test_a_later_change_to_an_older_call_does_not_bring_back_its_snapshot(self):
+        # Reconciling an old call changes its Effect last; its snapshot is still the older one.
+        store, controller, rt = open_run(self)
+        for event, plan_type in (('lab-1', 'plus'), ('lab-2', 'pro')):
+            out = rt.run_lab(rt.enqueue_lab(event)['id'], Scripted({'lab': none}, receipt=with_account(plan_type)), RES)
+            self.assertEqual(out['proposal']['status'], 'applied', out['proposal'])
+        older = min((e for e in store.list('r', 'effect') if e['kind'] == 'lab'), key=lambda e: e['created_seq'])
+        store.mutate('r', 'test-touch', 'test_effect_touched',
+                     lambda tx: tx.update('effect', older['id'], {'provider_handle': older.get('provider_handle')}),
+                     {'effect_id': older['id']})
+        self.assertEqual(rt.status()['codex_account']['plan_type'], 'pro')
 
     def test_a_receipt_without_the_key_leaves_the_account_unknown(self):
         store, controller, rt = open_run(self)

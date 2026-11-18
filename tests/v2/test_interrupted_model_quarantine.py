@@ -265,6 +265,12 @@ class InterruptedModelQuarantineTests(unittest.TestCase):
         with self.assertRaises(RecoveryBlocked):
             self.certify({**self.attestation, 'source_root': str(root)})
 
+    def test_the_proof_digests_the_native_settings_code_it_ran(self):
+        # Certification decides through rsi_lab/native.py that the call had every native tool off.
+        import rsi_lab.native as settings_code
+        files = self.certify(self.attestation)['interruption_quarantine_proof']['recovery_implementation']['files']
+        self.assertEqual(files['native.py'], digest(Path(settings_code.__file__).read_bytes()))
+
     def test_resume_prefix_and_changed_fence_are_rejected(self):
         self.effect = copy.deepcopy(self.effect)
         session = self.effect['metadata']['agent_session']

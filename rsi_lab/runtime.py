@@ -2236,13 +2236,15 @@ class Runtime:
     def _codex_account(self):
         """The ``account_snapshot`` of the newest model receipt that records one, else ``None``.
 
-        Receipts are taken newest first by when their Effect last changed. The
-        snapshot is shared by everything the Codex account does; it is shown,
-        never used to admit or refuse work.
+        Receipts are taken newest first by when their Effect was created, which
+        with model calls made one at a time is the order they ran in: a later
+        reconciliation of an older call does not make its snapshot the newest.
+        The snapshot is shared by everything the Codex account does; it is
+        shown, never used to admit or refuse work.
         """
         effects = [e for e in self.store.list(self.run_id, 'effect')
                    if e['kind'] in {'lab', 'meta', 'literature'} and e.get('result_ref')]
-        for effect in sorted(effects, key=lambda e: (e['updated_seq'], e['created_seq']), reverse=True):
+        for effect in sorted(effects, key=lambda e: e['created_seq'], reverse=True):
             snapshot = json.loads(self.store.read_blob(effect['result_ref'])).get('account_snapshot')
             if snapshot is not None:
                 return snapshot

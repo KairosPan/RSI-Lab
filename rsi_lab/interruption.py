@@ -214,7 +214,7 @@ def certify_interruption(effect, packet, folder, request, invocation, capture, f
     implementation = Path(__file__).resolve().parent
     code = {name: digest((implementation / name).read_bytes()) for name in (
         'interruption.py', 'call_recovery.py', 'controller.py', 'agent_state.py', 'store.py',
-        'transport.py', 'journal.py', 'session_context.py', 'images.py')}
+        'transport.py', 'journal.py', 'session_context.py', 'images.py', 'native.py')}
     proof = {'schema_version': QUARANTINE_KIND, 'effect_id': effect['id'], 'run_id': effect['run_id'],
         'work_id': effect['work_id'], 'session_id': meta['agent_session_id'], 'turn_id': meta['agent_turn_id'],
         'session_fence': meta['session_fence'], 'packet_sha256': digest(packet),

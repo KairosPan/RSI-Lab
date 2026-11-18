@@ -12,6 +12,7 @@ import copy
 import json
 
 from . import input_view
+from . import native as native_tools
 from .improvements import enabled
 from .roles import ACTIONS, lab_settings_enabled, response_schema, schema_summary
 
@@ -33,6 +34,23 @@ PRESENT = {'scientific_memory': 'the run config sets research_features.scientifi
 ADD_TO_CONFIG = 'The run config is frozen at init; start a new run whose config has it.'
 DROP_FROM_CONFIG = 'The run config is frozen at init; start a new run whose config leaves it out.'
 LOAD_ADAPTER = 'Pass it in Runtime(..., adapters=[...]); on the command line use --adapter-factory.'
+# The smallest capacity limit a run with Codex's own tools on is not warned about.
+NATIVE_CAPACITY_BYTES = 1048576
+
+
+def native_warnings(runtime):
+    """What would otherwise show only after a native run's first calls: one warning when any role has something on
+    and the effective capacity limit (``max_effective_context_bytes``, else ``max_input_bytes``, else 131072) is
+    below ``NATIVE_CAPACITY_BYTES``; else none."""
+    config = runtime.config
+    limit = config.get('max_effective_context_bytes', config.get('max_input_bytes', 131072))
+    if (not any(native_tools.any_on(settings) for settings in runtime.native.values())
+            or (type(limit) is int and limit >= NATIVE_CAPACITY_BYTES)):
+        return []
+    return [f'Native tools are on, but the effective capacity limit is {limit} bytes (max_effective_context_bytes, '
+            f'else max_input_bytes, else 131072), below {NATIVE_CAPACITY_BYTES}: the records of a turn that uses '
+            'tools will pass it, and later turns will block on capacity until agent-rebuild. Set '
+            f'max_effective_context_bytes to at least {NATIVE_CAPACITY_BYTES} in a new run.']
 
 
 def feature_report(runtime):
@@ -64,6 +82,7 @@ def feature_report(runtime):
                                    for key in sorted(catalog)],
             # Codex's own tools for each role, as the Runtime read them from the config: readable roots resolved.
             'native_capabilities': copy.deepcopy(runtime.native),
+            'native_warnings': native_warnings(runtime),
             'modes': modes}
 
 
