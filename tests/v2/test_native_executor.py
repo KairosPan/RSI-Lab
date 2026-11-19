@@ -564,6 +564,54 @@ class NativeExecutorTests(unittest.TestCase):
         self.assertEqual((self.workspace() / '.agents/skills/plot-check/SKILL.md').read_bytes(), SKILL_MD)
         self.assertEqual((self.workspace() / '.agents/skills/plot-check/scripts/check.py').read_bytes(), CHECK_PY)
 
+    def test_a_resumed_turn_with_every_new_key_is_prepared_read_and_settled_with_the_full_settings(self):
+        # The first turn's call wrote the skills and was shown the list when the thread began; the resumed turn gets
+        # no new list, as Codex writes one again only when the skills change.
+        settings = {**WITH_SKILLS, 'view_image': True, 'tool_servers': {'chem': here(CHEM)}}
+
+        def resumed(profile, cwd):
+            return (skills_list([str(cwd / '.agents' / 'skills')], DECLARED, after=ROLE_LESS_PARTS)
+                    + turn_context('t1', profile, cwd=cwd) + usage_row(THREAD, 't1', 't1', 54394, 5524),
+                    turn_context('t2', profile, cwd=cwd) + usage_row(THREAD, 't2', 't2', 102016, 5155))
+
+        def first_calls_skills(workspace):
+            # What the first turn's call left in .agents: an older copy of the skill, with a file since removed.
+            skill = workspace / '.agents' / 'skills' / 'plot-check'
+            skill.mkdir(parents=True)
+            (skill / 'SKILL.md').write_bytes(SKILL_MD.replace(b'Open the plot', b'Open the old plot'))
+            (skill / 'old.py').write_bytes(b'print("old")\n')
+        reads = []
+
+        def recording(read):
+            def read_and_record(*arguments, **options):
+                reads.append(options.get('native'))
+                return read(*arguments, **options)
+            return read_and_record
+        with patch.dict(os.environ, {'CHEM_API_KEY': 'invented-secret-4f1c'}), \
+                patch('rsi_lab.runtime.read_native_snapshot', recording(read_native_snapshot)), \
+                patch('rsi_lab.session_context.read_native_snapshot', recording(read_native_snapshot)):
+            receipt = self.execute(settings=settings, resumed=True, rollout=resumed, arrange=self.put_skill_files,
+                                   workspace_files=[first_calls_skills])
+        self.assertEqual((receipt['status'], receipt['error']), ('succeeded', None))
+        self.assertTrue(receipt['protocol_valid'])
+        # Prepared, sent and settled with the Effect's full settings, never their request form: the Runtime read the
+        # session's snapshot with them to prepare the call, and the executor before and after it.
+        self.assertEqual(self.effect['metadata']['native_capabilities'], settings)
+        self.assertEqual(self.calls[0]['native'], settings)
+        self.assertEqual(reads, [settings] * 3)
+        self.assertEqual(receipt['native_capabilities'], native.receipt_form(settings))
+        self.assertEqual((receipt['token_source'], receipt['actual_costs']['tokens']), ('ledger', 102016 + 5155))
+        # The first call's .agents was replaced by the frozen skills.
+        self.assertEqual(self.files_in_workspace(), ['.agents/skills/plot-check/SKILL.md',
+                                                     '.agents/skills/plot-check/scripts/check.py'])
+        self.assertEqual((self.workspace() / '.agents/skills/plot-check/SKILL.md').read_bytes(), SKILL_MD)
+        # A resumed lead shown no new list is valid and records no skills_shown; its other records are there.
+        activity = receipt['native_activity']
+        self.assertNotIn('skills_shown', activity)
+        self.assertNotIn('skills_unexpected', activity)
+        self.assertEqual((activity['tool_server_calls'], activity['images_viewed']['count']), ([], 0))
+        self.assertNotIn('invented-secret-4f1c', json.dumps(receipt, ensure_ascii=False))
+
     def test_a_list_other_than_the_declared_one_makes_the_call_invalid(self):
         receipt = self.execute(settings=WITH_SKILLS, arrange=self.put_skill_files, rollout=listing(DECLARED, SECRET))
         self.assertEqual(receipt['status'], 'succeeded')
