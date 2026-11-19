@@ -655,6 +655,21 @@ class CodexLedgerTests(unittest.TestCase):
                        text.replace('### Available skills', '- `r0` = `/u/.codex/skills`\n### Available skills')):
             with self.subTest(broken=broken), self.assertRaises(ValueError):
                 codex_ledger.parse_skills_list(broken)
+        # A line naming a skill's file anywhere but as a skill line of "Available skills" may be a skill Codex listed
+        # in a form not foreseen: the list cannot be read, never compared as clean.
+        declared = skills_list_text([self.ws_root()], DECLARED)
+        line = 'secret-notes: Notes of the owner. (file: r0/secret-notes/SKILL.md)'
+        for probe in ('  - ' + line, '* ' + line, '\t- ' + line, '#### More\n- ' + line, line,
+                      '#### (file: r0/secret-notes/SKILL.md)'):
+            with self.subTest(probe=probe):
+                text = declared.replace('\n</skills_instructions>', '\n' + probe + '\n</skills_instructions>')
+                with self.assertRaises(ValueError):
+                    codex_ledger.parse_skills_list(text)
+                self.assertEqual(codex_ledger.compare_skills([text], declared=['plot-check'], workspace=self.cwd),
+                                 {'shown': [], 'unexpected': 0, 'folders': [], 'missing': [], 'unreadable': 1})
+        for place in ('## Skills\n', '### Skill roots\n'):
+            with self.subTest(place=place), self.assertRaises(ValueError):
+                codex_ledger.parse_skills_list(declared.replace(place, place + '- ' + line + '\n'))
 
     def test_the_skills_lists_are_read_where_codex_wrote_them(self):
         first, second = skills_list_text([self.ws_root()], DECLARED), skills_list_text([self.ws_root()])
@@ -662,19 +677,31 @@ class CodexLedgerTests(unittest.TestCase):
         def message(role, *texts):
             return frame('response_item', {'type': 'message', 'role': role,
                                             'content': [{'type': 'input_text', 'text': text} for text in texts]})
-        # Not lists: another role, a part that does not begin with the list (white space is not skipped), another kind
-        # of part, text that is not a string.
-        others = (message('user', first) + message('developer', 'Permissions.', ' ' + first)
+        # Not lists: another role, a part that does not hold the tag, a part that is not text.
+        others = (message('user', first) + message('developer', 'Permissions.')
                   + frame('response_item', {'type': 'message', 'role': 'developer', 'content': [
-                      {'type': 'output_text', 'text': first}, {'type': 'input_text', 'text': 7}]}))
-        prefix = fixture(self.cwd) + message('developer', first) + b'not a record\n' + usage_row(THREAD, 't1', 't1',
-                                                                                                10, 1)
-        # Each part that begins the list is one, wherever it stands in its message: the role's instructions first,
-        # then the list, then the permissions; or two lists in one message.
-        raw = (prefix + others + message('developer', 'You check plots.', second, '<permissions instructions>')
-               + message('developer', first, second) + usage_row(THREAD, 't2', 't2', 10, 1))
+                      {'type': 'input_text', 'text': 7}, {'type': 'input_image', 'image_url': first}]}))
+        # Lists: every text part of a developer message that holds the tag anywhere, each on its own, wherever it
+        # stands: the role's instructions first, then the list, then the permissions; two lists in one message; a part
+        # with the tag after white space or after other text, which cannot be read; an output_text part.
+        hidden = ' ' + first, 'Before. ' + second
+        lists = (message('developer', 'You check plots.', second, '<permissions instructions>')
+                 + message('developer', first, second) + message('developer', *hidden)
+                 + frame('response_item', {'type': 'message', 'role': 'developer', 'content': [
+                     {'type': 'output_text', 'text': first}]}))
+        prefix = (fixture(self.cwd) + message('developer', first)
+                  + b'not a record ' + codex_ledger.SKILLS_LIST_START.encode() + b'\n'
+                  + usage_row(THREAD, 't1', 't1', 10, 1))
+        raw = prefix + others + lists + usage_row(THREAD, 't2', 't2', 10, 1)
+        found = [second, first, second, *hidden, first]
         turn = codex_ledger.read_turn(self.write(raw), thread_id=THREAD, prefix_bytes=len(prefix))
-        self.assertEqual((turn['skills_lists'], turn['earlier_skills_lists']), ([second, first, second], [first]))
+        # The prefix is read only for the copies a sub-agent started in the call may carry.
+        self.assertEqual((turn['skills_lists'], turn['earlier_skills_lists']), (found, []))
+        raw = prefix + others + lists + sub_agent_started(CHILD, '/root/a') + usage_row(THREAD, 't2', 't2', 10, 1)
+        turn = codex_ledger.read_turn(self.write(raw), thread_id=THREAD, prefix_bytes=len(prefix))
+        self.assertEqual((turn['skills_lists'], turn['earlier_skills_lists']), (found, [first]))
+        self.assertEqual(codex_ledger.compare_skills(found, declared=['plot-check'], workspace=self.cwd)['unreadable'],
+                         2)
         # A sub-agent's are those of its whole rollout, the forked copy of its parent's included.
         self.write_child(CHILD_ROLLOUT + message('developer', first) + others
                          + message('developer', 'You check plots.', second))
@@ -848,17 +875,31 @@ class CodexLedgerTests(unittest.TestCase):
                 # The lead's own list is checked and recorded beside it.
                 self.assertEqual(got['receipt']['native_activity']['skills_shown'], ['plot-check'])
         # The sub-agent's rollout cannot be read, or the turn added no usage rows and it was never looked for.
+        # Under a role without skills too: what such a sub-agent was shown cannot be checked.
         for rows in (True, False):
             with self.subTest(rows=rows):
                 self.reset_home()
                 got = self.settle_call(started, WITH_SKILLS_AND_SUBAGENTS, rows=rows, workspace=self.cwd)
                 self.assertEqual(got['skills_error'], NOT_DECLARED + CHILD + ': rollout unreadable')
+                got = self.settle_call(sub_agent_started(CHILD, '/root/a'), TERMINAL_AND_SUBAGENTS, rows=rows,
+                                       workspace=self.cwd)
+                self.assertEqual(got['skills_error'], NOT_SKILLED + CHILD + ': rollout unreadable')
         # A sub-agent named by an id that is not text cannot be read.
         unnamed = frame('event_msg', {'type': 'item_completed', 'item': {
             'type': 'SubAgentActivity', 'kind': 'started', 'agent_thread_id': ['x'], 'agent_path': '/root/b'}})
         got = self.settle_call(self.declared_list() + unnamed, WITH_SKILLS_AND_SUBAGENTS, workspace=self.cwd)
         self.assertEqual(got['skills_error'], NOT_DECLARED + "['x']: rollout unreadable")
-        self.assertIsNone(self.settle_call(unnamed, TERMINAL_AND_SUBAGENTS, workspace=self.cwd)['skills_error'])
+        self.assertEqual(self.settle_call(unnamed, TERMINAL_AND_SUBAGENTS, workspace=self.cwd)['skills_error'],
+                         NOT_SKILLED + "['x']: rollout unreadable")
+        # Under a role without skills the lead's own unread rollout is not checked, and a sub-agent only addressed
+        # again whose rollout cannot be read is not either.
+        self.reset_home()
+        self.assertIsNone(self.settle_call(b'{"type": "event_msg", "payload": \n', TERMINAL_AND_SUBAGENTS,
+                                           workspace=self.cwd)['skills_error'])
+        self.assertIsNone(self.settle_call(sub_agent_activity(CHILD, '/root/a', 'interacted'), TERMINAL_AND_SUBAGENTS,
+                                           earlier=sub_agent_started(CHILD, '/root/a')
+                                           + usage_row(THREAD, 't1', 't1', 10, 1),
+                                           turn='t2', workspace=self.cwd)['skills_error'])
         # Both threads at fault are named, the lead first.
         self.reset_home(); self.write_child()
         got = self.settle_call(sub_agent_started(CHILD, '/root/a'), WITH_SKILLS_AND_SUBAGENTS, workspace=self.cwd)
@@ -889,7 +930,14 @@ class CodexLedgerTests(unittest.TestCase):
                                                     '/u/.codex/skills'),
                  'another list instead': (sub_agent_meta(CHILD, THREAD, forked=True) + other
                                           + usage_row(CHILD, 'c2', 't2', 5, 1, session=THREAD),
-                                          NOT_SKILLED + CHILD + ': 1 skills from /u/.codex/skills')}
+                                          NOT_SKILLED + CHILD + ': 1 skills from /u/.codex/skills'),
+                 # A fresh list of its own that equals the lead's old one: only a forked sub-agent carries copies,
+                 # and each list in the lead's prefix excuses one copy, no more.
+                 'the same text, not forked': (sub_agent_meta(CHILD, THREAD, forked=False) + old
+                                               + usage_row(CHILD, 'c2', 't2', 5, 1, session=THREAD),
+                                               NOT_SKILLED + CHILD + ': 1 skills from /u/.codex/skills'),
+                 'the copy and the same text again': (forked(old), NOT_SKILLED + CHILD + ': 1 skills from '
+                                                      '/u/.codex/skills')}
         for case, (rollout, error) in cases.items():
             with self.subTest(case=case):
                 self.reset_home(); self.write_child(rollout)
@@ -897,6 +945,11 @@ class CodexLedgerTests(unittest.TestCase):
                                        turn='t2', workspace=self.cwd)
                 self.assertEqual(got['skills_error'], error)
                 self.assertNotIn('personal-notes', json.dumps(got['receipt']))
+        # A lead whose prefix holds the list twice excuses two copies.
+        self.reset_home(); self.write_child(forked(old))
+        got = self.settle_call(sub_agent_started(CHILD, '/root/a'), TERMINAL_AND_SUBAGENTS,
+                               earlier=old + earlier, turn='t2', workspace=self.cwd)
+        self.assertIsNone(got['skills_error'])
         # Under a role with skills every list is compared, copies included.
         self.reset_home(); self.write_child(forked(self.declared_list()))
         got = self.settle_call(sub_agent_started(CHILD, '/root/a'), WITH_SKILLS_AND_SUBAGENTS, earlier=earlier,

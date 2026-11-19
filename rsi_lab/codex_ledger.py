@@ -21,6 +21,7 @@ Nothing here runs Codex or writes anything.
 """
 from __future__ import annotations
 
+from collections import Counter
 import json
 import os
 from pathlib import Path
@@ -48,15 +49,19 @@ IMAGE_PATHS = 'image_view_paths'
 IMAGES_OUTSIDE = 'Codex showed images outside the folders this role may read: {outside} of {viewed}'
 SUB_AGENTS_UNCHECKED = ("Codex's sub-agents could not be checked for images outside the folders this role may read: "
                         '{unchecked} of {named}')
-# Codex's skills list of a thread: an input_text part of a developer message, in any position, whose text begins with
-# SKILLS_LIST_START and ends with SKILLS_LIST_END. read_turn returns the texts of those the call added
-# (SKILLS_LISTS[0]) and of those before it (SKILLS_LISTS[1]); read_child those of the sub-agent's whole rollout
-# (SKILLS_LISTS[0]). No receipt records them.
+# Codex's skills list of a thread: a text part of a developer message, in any position, that begins with
+# SKILLS_LIST_START and ends with SKILLS_LIST_END. Any text part of such a message holding SKILLS_LIST_START is taken
+# for a list, and one that is not of that form is a list that cannot be read. read_turn returns the texts of those the
+# call added (SKILLS_LISTS[0]) and of those before it (SKILLS_LISTS[1]); read_child those of the sub-agent's whole
+# rollout (SKILLS_LISTS[0]). No receipt records them.
 SKILLS_LIST_START, SKILLS_LIST_END = '<skills_instructions>', '</skills_instructions>'
 SKILLS_LISTS = ('skills_lists', 'earlier_skills_lists')
+TEXT_PARTS = ('input_text', 'output_text')
 SKILL_ROOT = re.compile(r'- `(r\d+)` = `(.+)`')
 # The description is greedy, so the last "(file: …)" of a line is the skill's file. A name holds no white space.
 SKILL_LINE = re.compile(r'- ([^:\s]+): (.*) \(file: (r\d+)/(.+)\)')
+# What marks a line as naming a skill's file: anywhere but a skill line of "Available skills" it makes a list unreadable.
+SKILL_FILE = re.compile(r'\(file: r\d+/')
 SKILLS_SECTIONS = {'### Skill roots': 'roots', '### Available skills': 'skills'}
 SKILLS_TO_NONE = 'Codex showed a skills list to a role without skills: '
 SKILLS_NOT_DECLARED = 'Codex showed skills other than the declared ones: '
@@ -103,24 +108,11 @@ def _records(raw, start=0):
     return records
 
 
-def _loose_records(raw):
-    """The ``(type, payload)`` of every line of ``raw`` that is a JSON object with an object payload; any other line
-    is passed over. For bytes a call did not add, where what cannot be read only means a list not found."""
-    records = []
-    for line in raw.split(b'\n'):
-        try:
-            record = json.loads(line.decode('utf-8'))
-        except ValueError:
-            continue
-        if isinstance(record, dict) and isinstance(record.get('payload'), dict):
-            records.append((record.get('type'), record['payload']))
-    return records
-
-
 def _skills_lists(records):
-    """The texts of the skills lists among ``records``: every ``input_text`` part, in any position, of a
-    ``response_item`` ``message`` whose ``role`` is ``developer``, when its text begins with ``SKILLS_LIST_START``.
-    Each such part is a list on its own, its text alone. A sub-agent started with a declared role gets the role's
+    """The texts of the skills lists among ``records``: every text part (``TEXT_PARTS``), in any position, of a
+    ``response_item`` ``message`` whose ``role`` is ``developer``, when its text holds ``SKILLS_LIST_START``
+    anywhere. Each such part is a list on its own, its text alone; one that does not begin with the tag is still
+    taken, and ``parse_skills_list`` refuses it. A sub-agent started with a declared role gets the role's
     instructions as the first part of that message and the list as the second; the lead and other sub-agents get the
     list first, then other parts."""
     texts = []
@@ -130,9 +122,26 @@ def _skills_lists(records):
                 or not isinstance(content, list)):
             continue
         texts += [entry['text'] for entry in content
-                  if isinstance(entry, dict) and entry.get('type') == 'input_text'
-                  and isinstance(entry.get('text'), str) and entry['text'].startswith(SKILLS_LIST_START)]
+                  if isinstance(entry, dict) and entry.get('type') in TEXT_PARTS
+                  and isinstance(entry.get('text'), str) and SKILLS_LIST_START in entry['text']]
     return texts
+
+
+def _earlier_skills_lists(raw):
+    """The skills lists (``_skills_lists``) in ``raw``, bytes a call did not add, read line by line: a line that does
+    not hold ``SKILLS_LIST_START`` as written is passed over unparsed, and so is one that is not a JSON object with an
+    object payload. These only excuse a forked sub-agent's copies, so a list not found here can only make an error."""
+    marker, records = SKILLS_LIST_START.encode(), []
+    for line in raw.split(b'\n'):
+        if marker not in line:
+            continue
+        try:
+            record = json.loads(line.decode('utf-8'))
+        except ValueError:
+            continue
+        if isinstance(record, dict) and isinstance(record.get('payload'), dict):
+            records.append((record.get('type'), record['payload']))
+    return _skills_lists(records)
 
 
 def _counters(usage):
@@ -263,7 +272,9 @@ def read_turn(path, *, thread_id, prefix_bytes):
     ``None`` when absent. ``tool_server_calls``, ``tool_server_calls_omitted``, ``images_viewed`` and every viewed
     image's path (``IMAGE_PATHS``) are those of ``_tools_and_images``, from the ``item_completed`` events and the
     tool outputs after the prefix. ``skills_lists`` are the texts of the skills lists Codex wrote after the prefix
-    and ``earlier_skills_lists`` those within it, read from every line that is a record (``_loose_records``).
+    and ``earlier_skills_lists`` those within it (``_earlier_skills_lists``). These serve only to excuse the copies a
+    sub-agent started with the lead's history carries, so the prefix is read only when the turn started a sub-agent;
+    otherwise ``earlier_skills_lists`` is empty.
 
     ``LedgerUnavailable`` is raised when the bytes after the prefix are not whole JSON records starting on a
     record boundary, or a usage row belongs to another thread or session, names no turn or has invalid counters.
@@ -318,7 +329,8 @@ def read_turn(path, *, thread_id, prefix_bytes):
             'tool_calls': tool_calls, 'tool_inputs': tool_inputs, 'tool_inputs_omitted': tool_calls - len(tool_inputs),
             'compactions': compactions, 'account': account, 'profile': profile, **_tools_and_images(items, outputs),
             'skills_lists': _skills_lists(records),
-            'earlier_skills_lists': _skills_lists(_loose_records(raw[:prefix_bytes]))}
+            'earlier_skills_lists': (_earlier_skills_lists(raw[:prefix_bytes])
+                                     if any(child['started_in_call'] for child in children) else [])}
 
 
 def _rollout_of(codex_home, thread_id):
@@ -572,14 +584,22 @@ def parse_skills_list(text):
     ``### Skill roots`` or ``### Available skills`` starts that section and any other line beginning with ``#`` ends
     one. In the roots section every line beginning with ``- `` must be ``SKILL_ROOT``, each label once; in the
     skills section every such line must be ``SKILL_LINE`` under a label the roots section gave. Both sections must
-    be there and the roots section must not be empty. Every other line, such as prose, is ignored.
-    ``ValueError`` otherwise.
+    be there and the roots section must not be empty. Any other line that names a skill's file (``SKILL_FILE``), such
+    as one indented, bulleted otherwise or under another heading, is refused: Codex may have listed a skill there.
+    Every other line, such as prose or a bullet under another heading, is ignored. ``ValueError`` otherwise.
     """
     if not isinstance(text, str) or not text.startswith(SKILLS_LIST_START) or not text.endswith(SKILLS_LIST_END):
         raise ValueError('a skills list must begin with <skills_instructions> and end with </skills_instructions>')
     roots, skills, sections, section = {}, [], set(), None
     for line in text[len(SKILLS_LIST_START):-len(SKILLS_LIST_END)].split('\n'):
-        if line.startswith('#'):
+        if section == 'skills' and line.startswith('- '):
+            match = SKILL_LINE.fullmatch(line)
+            if match is None or match[3] not in roots:
+                raise ValueError('a skill line cannot be read')
+            skills.append({'name': match[1], 'description': match[2], 'root': match[3], 'file': match[4]})
+        elif SKILL_FILE.search(line):
+            raise ValueError('a line that is not a skill line names a skill file')
+        elif line.startswith('#'):
             section = SKILLS_SECTIONS.get(line.rstrip())
             sections.add(section)
         elif section == 'roots' and line.startswith('- '):
@@ -587,11 +607,6 @@ def parse_skills_list(text):
             if match is None or match[1] in roots:
                 raise ValueError('a skill root line cannot be read')
             roots[match[1]] = match[2]
-        elif section == 'skills' and line.startswith('- '):
-            match = SKILL_LINE.fullmatch(line)
-            if match is None or match[3] not in roots:
-                raise ValueError('a skill line cannot be read')
-            skills.append({'name': match[1], 'description': match[2], 'root': match[3], 'file': match[4]})
     if not {'roots', 'skills'} <= sections or not roots:
         raise ValueError('a skills list must give its skill roots and its available skills')
     return {'roots': roots, 'skills': skills}
@@ -633,34 +648,51 @@ def compare_skills(lists, *, declared, workspace):
             'missing': [name for name in declared if name in absent], 'unreadable': unreadable}
 
 
+def _own_lists(lists, earlier):
+    """``lists`` less the copies of ``earlier``: each text of ``earlier`` excuses one equal text of ``lists``, as
+    many times as ``earlier`` holds it and no more."""
+    copies, own = Counter(earlier), []
+    for text in lists:
+        if copies[text]:
+            copies[text] -= 1
+        else:
+            own.append(text)
+    return own
+
+
 def _skills_check(settings, turn, children, *, read, resumed, finished, thread_id, workspace):
     """The skills error of a dispatched call, and what was compared for the threads its receipt names.
 
     The threads checked are the lead's, when the call has one, with the lists Codex wrote after its prefix
     (``None`` when its rollout was not ``read``), and each sub-agent the turn started, with the lists of its whole
     rollout (``None`` when it is not among the readable ``children``: its rollout cannot be read or was never
-    looked for). Without declared skills each list must be absent, a sub-agent's copy of a list in the lead's
-    prefix (one forked with the lead's history) excepted; what was not read is not checked. With declared skills
+    looked for). Without declared skills each list must be absent, except the copies of the lists in the lead's
+    prefix that a sub-agent recorded as started with the lead's history carries (``_own_lists``); a started
+    sub-agent whose rollout was not read is an error, the lead's unread rollout is not checked. With declared skills
     every list is compared (``compare_skills``), copies included, and an unreadable rollout or, in a ``finished``
     call, a thread it started without a list is an error too. Returns ``(error, lead, started)``: the error or
     ``None``, and the comparisons under declared skills of the lead (``None`` when not read) and of each started
     sub-agent read, by thread id.
     """
     declared = list(native_tools.declared_skills(settings))
-    threads = ([(thread_id, turn['skills_lists'] if read else None, not resumed, False)]
+    threads = ([(thread_id, turn['skills_lists'] if read else None, not resumed, False, False)]
                if thread_id is not None else [])
     for child in turn.get('children', ()):
         if child['started_in_call']:
             # Compared, not looked up: the turn records a sub-agent's id as written, which need not be text.
             own = next((own for own in children if own['thread_id'] == child['thread_id']), None)
-            threads.append((child['thread_id'], None if own is None else own['skills_lists'], True, True))
+            threads.append((child['thread_id'], None if own is None else own['skills_lists'], True, True,
+                            own is not None and own['forked_history']))
     findings, lead, started = [], None, {}
-    for thread, lists, fresh, is_child in threads:
+    for thread, lists, fresh, is_child, forked in threads:
         parts = []
-        if not declared:
+        if not declared and lists is None:
+            if is_child:
+                parts.append('rollout unreadable')
+        elif not declared:
             # A sub-agent forked with the lead's history carries a copy of its lists, perhaps from before roles
             # without skills were shown none; only a list of its own counts.
-            lists = [text for text in lists or () if not (is_child and text in turn.get('earlier_skills_lists', ()))]
+            lists = _own_lists(lists, turn.get('earlier_skills_lists', ()) if forked else ())
             if lists:
                 got = compare_skills(lists, declared=(), workspace=workspace)
                 if len(lists) > got['unreadable']:

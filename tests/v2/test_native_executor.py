@@ -868,15 +868,17 @@ class NativeExecutorTests(unittest.TestCase):
 
     def test_a_sub_agent_that_was_not_read_makes_a_viewing_call_invalid(self):
         # The turn started CHILD, whose rollout is not there: what it viewed cannot be checked.
+        # Nor can the skills list it was shown, which a role without skills must not have.
+        unread = 'Codex showed a skills list to a role without skills: ' + CHILD + ': rollout unreadable'
         receipt = self.execute(settings={**TERMINAL_AND_SUBAGENTS, 'view_image': True}, rollout=PARENT_WITH_CHILD)
         self.assertFalse(receipt['protocol_valid'])
         self.assertEqual(receipt['error'], "Codex's sub-agents could not be checked for images outside the folders "
-                                           'this role may read: 1 of 1')
+                                           'this role may read: 1 of 1; ' + unread)
         self.assertEqual((receipt['token_source'], receipt['child_threads']), ('unknown', []))
-        # Without image viewing the same call is valid; only its usage is unknown.
+        # Without image viewing the same call is invalid for its skills alone; its usage is unknown.
         receipt = self.execute(settings=TERMINAL_AND_SUBAGENTS, rollout=PARENT_WITH_CHILD)
-        self.assertTrue(receipt['protocol_valid'])
-        self.assertIsNone(receipt['error'])
+        self.assertFalse(receipt['protocol_valid'])
+        self.assertEqual(receipt['error'], unread)
         self.assertEqual(receipt['token_source'], 'unknown')
 
     def dispatch_refused_roles(self, *, arrange=None, alter=None):
