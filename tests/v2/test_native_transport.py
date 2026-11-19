@@ -4,6 +4,7 @@ The fake provider is a local Python process that writes the Codex event
 protocol; no model, network request or credential is used.
 """
 import base64
+import hashlib
 import itertools
 import json
 import os
@@ -20,9 +21,9 @@ from unittest.mock import patch
 
 from rsi_lab import native, transport
 from rsi_lab.journal import read_journal
-from tests.v2.native_fixtures import (LOCAL_SERVER_ONLY, PLAIN, R, ROLES, SEARCH, SUBAGENTS, TERMINAL,
-                                      TERMINAL_AND_SEARCH, TERMINAL_AND_SUBAGENTS, TOOL_SERVERS, VIEW_IMAGE,
-                                      WITH_ROLES, WITH_SKILLS, WITH_TOOL_SERVERS)
+from tests.v2.native_fixtures import (CHECK_PY, LOCAL_SERVER_ONLY, PLAIN, PLOT_CHECK, R, ROLES, SEARCH, SKILL_MD,
+                                      SUBAGENTS, TERMINAL, TERMINAL_AND_SEARCH, TERMINAL_AND_SUBAGENTS, TOOL_SERVERS,
+                                      VIEW_IMAGE, WITH_ROLES, WITH_SKILLS, WITH_TOOL_SERVERS)
 from tests.v2.test_journal_transport import THREAD, frames
 
 TODAY = ['codex', '--no-daemon', '--ask-for-approval', 'never', 'exec', '--sandbox', 'read-only', '-C', '/w',
@@ -613,6 +614,133 @@ class NativeTransportTests(unittest.TestCase):
             # A call without skills goes ahead in the same home.
             self.invoke(native=TERMINAL)
             self.assertEqual(len(self.commands), 2)
+
+    def stored(self, folder, *raws):
+        """``folder``'s ``objects`` made a run store's object folder holding each of ``raws`` under its SHA-256,
+        read-only as the store keeps them. Returns the object folder."""
+        objects = folder / 'objects'
+        objects.mkdir(parents=True)
+        for raw in raws:
+            path = objects / hashlib.sha256(raw).hexdigest()
+            path.write_bytes(raw)
+            path.chmod(0o444)
+        return objects
+
+    def stale_agents(self, workspace):
+        """``workspace`` made with a ``.agents`` left by an earlier call: ``stale.md`` and a skill ``old``."""
+        (workspace / '.agents' / 'skills' / 'old').mkdir(parents=True)
+        (workspace / '.agents' / 'stale.md').write_text('Stale.\n', encoding='utf-8')
+        (workspace / '.agents' / 'skills' / 'old' / 'SKILL.md').write_text('---\nname: old\n---\n', encoding='utf-8')
+
+    def files_under(self, folder):
+        """The relative paths of the files under ``folder``, sorted; no folder, no files."""
+        return sorted(str(path.relative_to(folder)) for path in folder.rglob('*') if path.is_file())
+
+    def test_skills_are_written_fresh_into_the_workspace(self):
+        objects = self.stored(self.root, SKILL_MD, CHECK_PY)
+        self.stale_agents(self.workspace)
+        transport.write_skills(self.workspace, {'plot-check': PLOT_CHECK}, objects)
+        agents = self.workspace / '.agents'
+        self.assertEqual(self.files_under(agents), ['skills/plot-check/SKILL.md', 'skills/plot-check/scripts/check.py'])
+        self.assertEqual((agents / 'skills/plot-check/SKILL.md').read_bytes(), SKILL_MD)
+        self.assertEqual((agents / 'skills/plot-check/scripts/check.py').read_bytes(), CHECK_PY)
+        # Open to their owner only: every folder 0o700, every file 0o600, whatever the blob's mode (0o444 here).
+        for path in [agents, *agents.rglob('*')]:
+            self.assertEqual(stat.S_IMODE(path.lstat().st_mode), 0o700 if path.is_dir() else 0o600, path)
+        # Nothing else in the workspace was touched, and a workspace not made yet is made.
+        self.assertEqual([path.name for path in self.workspace.iterdir()], ['.agents'])
+        fresh = self.root / 'agents' / 's2' / 'workspace'
+        transport.write_skills(fresh, {'plot-check': PLOT_CHECK}, objects)
+        self.assertEqual(self.files_under(fresh), ['.agents/skills/plot-check/SKILL.md',
+                                                   '.agents/skills/plot-check/scripts/check.py'])
+
+    def test_a_missing_changed_or_linked_blob_writes_nothing(self):
+        check = PLOT_CHECK['files']['scripts/check.py']
+
+        def missing(objects):
+            (objects / check).unlink()
+
+        def changed(objects):
+            (objects / check).chmod(0o600)
+            (objects / check).write_bytes(b'print("other bytes")\n')
+
+        def linked(objects):
+            # The link leads to the right bytes; the blob is still not the store's own file.
+            (objects / check).unlink()
+            (objects.parent / 'elsewhere.py').write_bytes(CHECK_PY)
+            (objects / check).symlink_to(objects.parent / 'elsewhere.py')
+
+        def a_folder(objects):
+            (objects / check).unlink()
+            (objects / check).mkdir()
+        cases = {'missing': (missing, 'is missing'), 'changed': (changed, 'holds other bytes than its name says'),
+                 'linked': (linked, 'is a symlink'), 'a folder': (a_folder, 'is not a regular file')}
+        for case, (alter, message) in cases.items():
+            with self.subTest(case=case):
+                place = self.root / case
+                objects = self.stored(place, SKILL_MD, CHECK_PY)
+                alter(objects)
+                workspace = place / 'workspace'
+                self.stale_agents(workspace)
+                with self.assertRaises(ValueError) as raised:
+                    transport.write_skills(workspace, {'plot-check': PLOT_CHECK}, objects)
+                self.assertEqual(str(raised.exception), 'The run store does not hold skill file '
+                                 'plot-check/scripts/check.py: objects/' + check + ' ' + message)
+                self.assertEqual(self.files_under(workspace), ['.agents/skills/old/SKILL.md', '.agents/stale.md'])
+                self.assertEqual((workspace / '.agents' / 'stale.md').read_text(encoding='utf-8'), 'Stale.\n')
+
+    def test_a_skill_name_path_or_hash_that_leaves_its_folder_writes_nothing(self):
+        objects = self.stored(self.root, SKILL_MD, CHECK_PY)
+        self.stale_agents(self.workspace)
+        before = self.files_under(self.root)
+        files = PLOT_CHECK['files']
+        cases = {'a name': {'../../plot-check': PLOT_CHECK},
+                 'a path': {'plot-check': {**PLOT_CHECK, 'files': {**files, '../../../../escape.py': files['SKILL.md']}}},
+                 'a hash': {'plot-check': {**PLOT_CHECK, 'files': {**files, 'scripts/check.py': '../' + 'a' * 61}}}}
+        for case, skills in cases.items():
+            with self.subTest(case=case):
+                with self.assertRaisesRegex(ValueError, 'skill'):
+                    transport.write_skills(self.workspace, skills, objects)
+                self.assertEqual(self.files_under(self.root), before)
+
+    def test_a_symlinked_agents_folder_is_replaced_not_followed(self):
+        objects = self.stored(self.root, SKILL_MD, CHECK_PY)
+        outside = self.root / 'outside'
+        outside.mkdir()
+        (outside / 'keep.txt').write_text('Kept.\n', encoding='utf-8')
+        self.workspace.mkdir(parents=True)
+        (self.workspace / '.agents').symlink_to(outside, target_is_directory=True)
+        transport.write_skills(self.workspace, {'plot-check': PLOT_CHECK}, objects)
+        self.assertEqual(self.files_under(outside), ['keep.txt'])
+        self.assertEqual((outside / 'keep.txt').read_text(encoding='utf-8'), 'Kept.\n')
+        agents = self.workspace / '.agents'
+        self.assertFalse(agents.is_symlink())
+        self.assertTrue(agents.is_dir())
+        self.assertEqual(self.files_under(agents), ['skills/plot-check/SKILL.md', 'skills/plot-check/scripts/check.py'])
+        # A file in its place, or a link inside it, goes the same way; what a link inside leads to stays.
+        agents_file = self.root / 'file' / 'workspace'
+        agents_file.mkdir(parents=True)
+        (agents_file / '.agents').write_text('Not a folder.\n', encoding='utf-8')
+        transport.write_skills(agents_file, {'plot-check': PLOT_CHECK}, objects)
+        self.assertEqual(self.files_under(agents_file / '.agents'), ['skills/plot-check/SKILL.md',
+                                                                     'skills/plot-check/scripts/check.py'])
+        linked_inside = self.root / 'inner' / 'workspace'
+        (linked_inside / '.agents' / 'skills').mkdir(parents=True)
+        (linked_inside / '.agents' / 'skills' / 'old').symlink_to(outside, target_is_directory=True)
+        transport.write_skills(linked_inside, {'plot-check': PLOT_CHECK}, objects)
+        self.assertEqual(self.files_under(outside), ['keep.txt'])
+        self.assertEqual(self.files_under(linked_inside / '.agents'), ['skills/plot-check/SKILL.md',
+                                                                       'skills/plot-check/scripts/check.py'])
+
+    def test_a_symlinked_workspace_is_refused_and_nothing_is_written_through_it(self):
+        objects = self.stored(self.root, SKILL_MD, CHECK_PY)
+        outside = self.root / 'outside'
+        self.stale_agents(outside)
+        self.workspace.parent.mkdir(parents=True)
+        self.workspace.symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, 'symlink'):
+            transport.write_skills(self.workspace, {'plot-check': PLOT_CHECK}, objects)
+        self.assertEqual(self.files_under(outside), ['.agents/skills/old/SKILL.md', '.agents/stale.md'])
 
     def archive(self, events, invocation=None, name='archive'):
         """A call folder written before journals: ``events.jsonl`` and, unless ``None``, ``invocation.json`` text."""

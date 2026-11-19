@@ -868,11 +868,22 @@ class CodexExecutor:
                 workspace = self.calls_root.parent / 'agents' / sid / 'workspace'
                 # Beside the workspace, inside the run root the terminal's commands are denied; Codex reads it.
                 roles_dir = self.calls_root.parent / 'agents' / sid / 'roles'
+                # The transport refuses these too, but a refusal raised there would leave the Effect unknown.
+                # Codex reads the tool servers' variables from the environment it inherits.
+                unset = native_tools.unset_variables(settings, os.environ)
+                if unset:
+                    raise ValueError('Native settings name environment variables that are not set: '
+                                     + ', '.join(unset))
+                skills = native_tools.declared_skills(settings)
+                if skills:
+                    # The Codex home the transport gives a session that names none.
+                    native_tools.check_skill_homes(native_tools.default_codex_home())
                 if settings['terminal'] is not None:
                     # The terminal cannot write these names: anything there would reach Codex as instructions
-                    # or configuration nobody admitted.
+                    # or configuration nobody admitted. With skills declared .agents is the kernel's own, and
+                    # replaced below.
                     found = [name for name in native_tools.WORKSPACE_INSTRUCTIONS
-                             if os.path.lexists(workspace / name)]
+                             if not (skills and name == '.agents') and os.path.lexists(workspace / name)]
                     if found:
                         raise ValueError('The workspace holds Codex instructions or configuration that the '
                                          'Controller did not put there: ' + ', '.join(found))
@@ -880,6 +891,8 @@ class CodexExecutor:
                     if os.path.lexists(workspace / '.tmp') and not (workspace / '.tmp').is_dir():
                         raise ValueError("The workspace's .tmp, where the terminal's temporary files go, "
                                          'is not a directory')
+                if skills:
+                    transport.write_skills(workspace, skills, self.calls_root.parent / 'objects')
                 if declared_roles:
                     # Written here so that what cannot be written refuses the call; the transport writes them
                     # again, from the same settings, just before Codex starts.

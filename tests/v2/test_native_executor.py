@@ -24,8 +24,9 @@ from rsi_lab import native, roles, transport
 from rsi_lab.session_context import read_native_snapshot
 from rsi_lab.store import digest
 from tests.v2.liveness_support import Scripted, none, open_run
-from tests.v2.native_fixtures import (PLAIN, PROFILE, R, ROLES, SEARCH, TERMINAL, TERMINAL_AND_SUBAGENTS, WITH_ROLES,
-                                      account, child_rollout, sub_agent_started, tool_call, turn_context, usage_row)
+from tests.v2.native_fixtures import (CHECK_PY, CHEM, PLAIN, PROFILE, R, ROLES, SEARCH, SKILL_MD, TERMINAL,
+                                      TERMINAL_AND_SUBAGENTS, WITH_ROLES, WITH_SKILLS, account, child_rollout, here,
+                                      sub_agent_started, tool_call, turn_context, usage_row)
 from tests.v2.test_session_context import THREAD, fixture
 
 CHILD = '33333333-3333-3333-3333-333333333333'
@@ -85,14 +86,28 @@ def config_form(settings):
 
 
 class NativeExecutorTests(unittest.TestCase):
+    def setUp(self):
+        # An empty home and Codex home, and no machine skills folder: the Runtime and the executor look for skills
+        # there, and nothing of this machine's own may be read.
+        places = Path(tempfile.mkdtemp(prefix='rsi-native-places-'))
+        self.addCleanup(shutil.rmtree, places, ignore_errors=True)
+        (places / 'home').mkdir()
+        self.codex_home = places / 'codex-home'
+        self.codex_home.mkdir()
+        for patcher in (patch.dict(os.environ, {'HOME': str(places / 'home'), 'CODEX_HOME': str(self.codex_home)}),
+                        patch.object(native, 'MACHINE_SKILLS', places / 'machine-skills')):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     def execute(self, *, settings, rollout=CONFINED_TURN, child=None, stream_usage=STREAM_USAGE, resumed=False,
                 packet_settings=SAME, transport_extra=None, stream_items=(), workspace_files=(), profile=None,
-                finished=True, answer=json.dumps(RESPONSE)):
+                finished=True, answer=json.dumps(RESPONSE), arrange=None):
         """Prepare a Lab turn under ``packet_settings`` (``settings`` unless given) and run it through the Controller
         with the executor, which sees ``settings`` in the Effect. Returns the executor's receipt; a ``ValueError``
         it raises is raised here. ``profile(run_root, codex_home, workspace)`` replaces the confined profile.
         ``answer`` is the text of the turn's last message. A call that is not ``finished`` was killed before its
-        answer and terminal event (``UNFINISHED``)."""
+        answer and terminal event (``UNFINISHED``). ``arrange(store)`` runs once the Effect is prepared, before
+        it is dispatched."""
         packet_settings = settings if packet_settings is SAME else packet_settings
         config = {'native_capabilities': {'lab': config_form(packet_settings)}} if packet_settings else {}
         store, controller, runtime = open_run(self, config=config)
@@ -128,6 +143,8 @@ class NativeExecutorTests(unittest.TestCase):
         for make in workspace_files:
             workspace.mkdir(parents=True, exist_ok=True)
             make(workspace)
+        if arrange is not None:
+            arrange(store)
         self.calls, receipts, raised = [], [], []
 
         def invoke(prompt, schema, folder, model, effort, timeout, **options):
@@ -445,6 +462,111 @@ class NativeExecutorTests(unittest.TestCase):
         receipt = self.execute(settings=SEARCH, workspace_files=[lambda w: (w / 'AGENTS.md').write_text('Notes')])
         self.assertEqual(receipt['status'], 'succeeded', receipt['error'])
         self.assertEqual(len(self.calls), 1)
+
+    def assert_refused(self, receipt, *phrases):
+        """The call was refused by the executor's preflight: never dispatched, its Effect settled as a definite
+        failure with its reservations released, and its error holding each of ``phrases``."""
+        self.assertEqual((receipt['status'], receipt['never_dispatched']), ('failed_definite', True))
+        self.assertTrue(receipt['error'].startswith('Persistent session preflight failed: '), receipt['error'])
+        for phrase in phrases:
+            self.assertIn(phrase, receipt['error'])
+        self.assertEqual(self.calls, [])
+        self.assertEqual(receipt['actual_costs'], {name: 0 for name in RESERVATION})
+        self.assertEqual(self.effect['status'], 'failed_definite')
+        for name in RESERVATION:
+            budget = self.store.get('r', 'budget', name)
+            self.assertEqual((budget['reserved'], budget['spent']), (0, 0), name)
+
+    def workspace(self):
+        """The workspace of the session of the last call ``execute`` made."""
+        return self.store.root / 'agents' / self.effect['metadata']['agent_session_id'] / 'workspace'
+
+    @staticmethod
+    def put_skill_files(store):
+        for raw in (SKILL_MD, CHECK_PY):
+            store.put_blob(raw)
+
+    @staticmethod
+    def agents_notes(workspace):
+        (workspace / '.agents').mkdir()
+        (workspace / '.agents' / 'notes.md').write_text('Notes left in .agents.', encoding='utf-8')
+
+    def files_in_workspace(self):
+        workspace = self.workspace()
+        return sorted(str(path.relative_to(workspace)) for path in workspace.rglob('*') if path.is_file())
+
+    def test_a_call_with_skills_writes_them_and_replaces_agents(self):
+        receipt = self.execute(settings=WITH_SKILLS, arrange=self.put_skill_files, workspace_files=[self.agents_notes])
+        self.assertEqual(receipt['status'], 'succeeded', receipt['error'])
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.calls[0]['native'], WITH_SKILLS)
+        self.assertEqual(Path(self.calls[0]['session']['workspace']), self.workspace())
+        self.assertEqual(self.files_in_workspace(), ['.agents/skills/plot-check/SKILL.md',
+                                                     '.agents/skills/plot-check/scripts/check.py'])
+        self.assertEqual((self.workspace() / '.agents/skills/plot-check/SKILL.md').read_bytes(), SKILL_MD)
+        self.assertEqual((self.workspace() / '.agents/skills/plot-check/scripts/check.py').read_bytes(), CHECK_PY)
+
+    def test_the_refusals_the_design_keeps(self):
+        # With skills declared, .agents is the kernel's own; .codex and the AGENTS files still refuse the call.
+        makers = {'.codex': lambda w: (w / '.codex').mkdir(),
+                  'AGENTS.md': lambda w: (w / 'AGENTS.md').write_text('Obey the file.')}
+        for name, make in makers.items():
+            with self.subTest(settings='skills', name=name):
+                receipt = self.execute(settings=WITH_SKILLS, arrange=self.put_skill_files, workspace_files=[make])
+                self.assert_refused(receipt, 'Codex instructions or configuration that the Controller did not put '
+                                    'there: ' + name)
+                self.assertFalse(os.path.lexists(self.workspace() / '.agents'))    # Refused before skills are written.
+        # Without skills, .agents refuses a terminal call as before.
+        with self.subTest(settings='terminal', name='.agents'):
+            receipt = self.execute(settings=TERMINAL, workspace_files=[self.agents_notes])
+            self.assert_refused(receipt, 'Codex instructions or configuration that the Controller did not put '
+                                'there: .agents')
+            self.assertEqual(self.files_in_workspace(), ['.agents/notes.md'])
+
+    def test_a_skills_call_whose_files_the_store_lacks_is_refused(self):
+        receipt = self.execute(settings=WITH_SKILLS, workspace_files=[self.agents_notes])
+        self.assert_refused(receipt, 'plot-check/SKILL.md')
+        self.assertEqual(self.files_in_workspace(), ['.agents/notes.md'])
+
+    def test_an_unset_variable_refuses_the_call_before_dispatch(self):          # Review Focus 4
+        settings = {**SEARCH, 'tool_servers': {'chem': here(CHEM)}}
+        for value in (None, ''):
+            with self.subTest(value=value), patch.dict(os.environ):
+                os.environ.pop('CHEM_API_KEY', None)
+                if value is not None:
+                    os.environ['CHEM_API_KEY'] = value
+                receipt = self.execute(settings=settings)
+                self.assert_refused(receipt, 'Native settings name environment variables that are not set: '
+                                    'CHEM_API_KEY')
+        with patch.dict(os.environ, {'CHEM_API_KEY': 'invented-secret-4f1c'}):
+            receipt = self.execute(settings=settings)
+        self.assertEqual(receipt['status'], 'succeeded', receipt['error'])
+        self.assertEqual(len(self.calls), 1)
+
+    def test_a_codex_home_with_skills_refuses_a_skills_call(self):
+        def skills_of_its_own(store):
+            # Made after the Runtime started, which would have refused to start in such a home.
+            self.put_skill_files(store)
+            (self.codex_home / 'skills' / 'x').mkdir(parents=True)
+        receipt = self.execute(settings=WITH_SKILLS, arrange=skills_of_its_own)
+        self.assert_refused(receipt, 'separate Codex home', str(self.codex_home / 'skills') + ' holds entries')
+        self.assertNotIn("'x'", receipt['error'])
+        self.assertFalse(os.path.lexists(self.workspace() / '.agents'))
+        # A call without skills goes ahead in the same home.
+        receipt = self.execute(settings=TERMINAL)
+        self.assertEqual(receipt['status'], 'succeeded', receipt['error'])
+
+    @unittest.skipIf(os.geteuid() == 0, 'root lists a folder whatever its mode')
+    def test_a_skills_folder_that_cannot_be_listed_refuses_a_skills_call(self):
+        folder = self.codex_home / 'skills'
+
+        def unreadable(store):
+            self.put_skill_files(store)
+            folder.mkdir(mode=0o000)
+            self.addCleanup(folder.chmod, 0o700)
+        receipt = self.execute(settings=WITH_SKILLS, arrange=unreadable)
+        self.assert_refused(receipt, 'Permission denied', str(folder))
+        self.assertFalse(os.path.lexists(self.workspace() / '.agents'))
 
     def test_executor_writes_role_files_and_names_them(self):
         # The real transport runs; a local process stands in for Codex, as in tests/v2/test_native_recovery.py.

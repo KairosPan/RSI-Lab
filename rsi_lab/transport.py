@@ -7,6 +7,7 @@ including failed attempts, and never automatically retries or switches models.
 """
 from __future__ import annotations
 
+import errno
 import json
 import hashlib
 import math
@@ -14,7 +15,9 @@ import os
 from pathlib import Path
 import re
 import selectors
+import shutil
 import signal
+import stat
 import subprocess
 import tempfile
 import time
@@ -527,6 +530,88 @@ def write_role_files(roles_dir, roles):
     # not end in .toml.
     for file_name, raw in texts.items():
         _replace_bytes(roles_dir / file_name, raw)
+
+
+def write_skills(workspace, skills, objects):
+    """Write a role's frozen skills afresh into ``<workspace>/.agents/skills``, where Codex lists them.
+
+    ``skills`` is ``native.declared_skills(settings)``; ``objects`` is the run
+    store's object folder, which holds each file's bytes as ``<sha256>``.
+    Every blob is read first and must be a regular file, not a symlink, whose
+    bytes hash to its name. Then ``<workspace>/.agents`` is removed whatever
+    it holds (a symlink or a file is unlinked, a directory removed without
+    following the symlinks in it) and each file is written to
+    ``.agents/skills/<name>/<relative path>``, folders with mode ``0o700`` and
+    files with ``0o600`` through ``_replace_bytes``. The executable bit is not
+    kept: a skill's scripts are run through their interpreter. A workspace not
+    made yet is made.
+
+    Refused with ``ValueError`` before anything is deleted or written: a blob
+    that is missing, is not a regular file or holds other bytes; a skill name,
+    file path or SHA-256 the settings would not hold (a path must not leave its
+    skill's folder); and a workspace that is a symlink.
+    """
+    workspace = Path(workspace)
+    contents = {}
+    for name, skill in skills.items():
+        if not isinstance(name, str) or not native_tools.SKILL_NAME.fullmatch(name):
+            raise ValueError('Invalid skill name: ' + repr(name))
+        contents[name] = {}
+        for path, sha256 in skill['files'].items():
+            # As native validates them: relative, no empty part, none beginning with '.'.
+            if not isinstance(path, str) or not all(part and not part.startswith('.') for part in path.split('/')):
+                raise ValueError('Invalid path of skill ' + name + ': ' + repr(path))
+            if not isinstance(sha256, str) or not native_tools.SHA256.fullmatch(sha256):
+                raise ValueError('Invalid SHA-256 of skill file ' + name + '/' + path + ': ' + repr(sha256))
+            contents[name][path] = _stored_skill_file(objects, sha256, name + '/' + path)
+    if workspace.is_symlink():
+        raise ValueError('Session workspace cannot be a symlink')
+    workspace.mkdir(parents=True, exist_ok=True)
+    agents = workspace / '.agents'
+    if agents.is_symlink() or (os.path.lexists(agents) and not agents.is_dir()):
+        agents.unlink()
+    elif agents.is_dir():
+        shutil.rmtree(agents)
+    agents.mkdir(mode=0o700)
+    (agents / 'skills').mkdir(mode=0o700)
+    for name, files in contents.items():
+        for path, raw in files.items():
+            # Each folder is made on its own: mkdir's parents would take the default mode, not 0o700.
+            folder = agents / 'skills'
+            for part in [name, *path.split('/')[:-1]]:
+                folder = folder / part
+                folder.mkdir(mode=0o700, exist_ok=True)
+            _replace_bytes(folder / path.rpartition('/')[2], raw)
+
+
+def _stored_skill_file(objects, sha256, label):
+    """The bytes of the run store's blob ``<objects>/<sha256>``, which holds the skill file ``label``.
+
+    Raises ``ValueError`` naming ``label`` unless the blob is a regular file,
+    not a symlink, whose bytes hash to its name. It is opened without following
+    a symlink and without waiting on a named pipe.
+    """
+    where = 'The run store does not hold skill file ' + label + ': objects/' + sha256
+    try:
+        fd = os.open(Path(objects) / sha256, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        raise ValueError(where + ' is missing') from None
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise ValueError(where + ' is a symlink') from None
+        raise
+    chunks = []
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError(where + ' is not a regular file')
+        while chunk := os.read(fd, 1 << 16):
+            chunks.append(chunk)
+    finally:
+        os.close(fd)
+    raw = b''.join(chunks)
+    if hashlib.sha256(raw).hexdigest() != sha256:
+        raise ValueError(where + ' holds other bytes than its name says')
+    return raw
 
 
 def _command(folder, model, effort, cwd, session, image_paths=(), native=None, run_root=None, roles_dir=None):

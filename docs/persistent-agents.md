@@ -277,6 +277,14 @@ Codex 按 YAML 读取 front matter，内核没有 YAML 解析器。运行配置�
 
 此后修改、增删甚至删除这个文件夹，都影响不到这次运行，运行用的是存下的副本。Runtime 只接受这种冻结后的形式：没有 `frozen` 的 `skills`（例如不经 `init`、直接交给 Controller 的运行配置）在启动时被拒绝，错误中写明 `must be frozen with the run`。运行配置里已经写了 `frozen` 时，`init` 仍从 `root` 重新读取，读到的必须与之完全相同，否则拒绝，错误中写明 `changed since it was frozen`。回执里的 `skills` 只记每个技能的名称和它的文件表（路径到 SHA-256 的对象）的 hash。
 
+每次调用之前，内核都按存下的副本把技能重新写进该会话的工作目录，写在 `.agents/skills/<name>/<相对路径>`，Codex 从这里列出它们：
+
+- 先从对象存储读出每个文件，`objects/<SHA-256>` 必须是普通文件（不是符号链接），内容的 SHA-256 等于它的名称。有一个不符合（例如对象存储里缺少它，或它的内容变了），调用被拒绝，什么也不发送，工作目录原样不动；错误写明是哪个技能的哪个文件。
+- 然后删除工作目录里原有的整个 `.agents`，不论其中是什么：它是符号链接或文件时只删除它本身，是目录时连同内容删除，不跟随其中的符号链接。上一次调用写下的技能也一并删除，所以 `.agents` 里只有这次写出的文件。
+- 最后写出各个文件：目录权限 `0o700`，文件 `0o600`。不保留可执行位，技能里的脚本要通过解释器运行，例如 `python3 scripts/check.py`。
+
+终端命令不能写 `.agents`：权限配置把工作目录里的 `.agents` 设为只读，所以模型改不了技能，只有内核写它。替换 `.agents` 只针对声明了技能的角色；没有声明技能的角色，工作目录里出现 `.agents` 时终端调用仍被拒绝，见[终端调用前后的检查](#终端调用前后的检查)。
+
 ### 独立的 Codex 主目录
 
 Codex 向模型列出的技能，不只来自会话工作目录里的 `.agents/skills`，还来自另外三个文件夹：调用所用 Codex 主目录（`CODEX_HOME`，默认 `~/.codex`）下的 `skills`、`$HOME/.agents/skills` 和本机的 `/etc/codex/skills`。日常使用的 `~/.codex/skills` 里通常放着主人自己的个人技能。声明了技能的角色必须只看到声明的技能，所以它只能在这三个文件夹都没有任何内容的地方运行。Codex 主目录的 `skills/.system` 不算在内：那是 Codex 自己安装的技能，这样的角色的命令带 `-c skills.bundled.enabled=false`，不列出它们（见[Codex 命令的变化](#codex-命令的变化)）。
@@ -401,7 +409,16 @@ rollout 读取器只在角色设置允许时接受工具记录和压缩记录，
 
 ### 终端调用前后的检查
 
-派发前，工作目录里已有 `.codex`、`.agents`、`AGENTS.md` 或 `AGENTS.override.md` 时，调用被拒绝，什么也不发送，Effect 结算为 `failed_definite`，回执标记 `never_dispatched`。工作目录里的 `.tmp`（终端命令的临时目录）存在却不是目录时，调用同样被拒绝，原因中写明 `.tmp`；删除它即可。调用结束后，rollout 中这一轮最后的 `turn_context` 必须表明它在受管理的受限权限配置下运行，禁止访问运行根目录和 Codex 配置目录，网络受限；否则调用无效，错误为 `Permission profile was not in force`。
+派发带会话的调用之前，执行器依次做下面几步。任何一步不通过，调用被拒绝，什么也不发送，Effect 结算为 `failed_definite`，预约的资源全部释放，回执标记 `never_dispatched`，错误以 `Persistent session preflight failed: ` 开头：
+
+1. 工具服务的 `env_from` 和 `token_from` 所指的环境变量都已设置且非空。否则错误按名称顺序列出它们：`Native settings name environment variables that are not set: <变量名>`。
+2. 声明了技能时，Codex 主目录（`CODEX_HOME`，没有设置时为 `~/.codex`）下的 `skills`、`$HOME/.agents/skills` 和 `/etc/codex/skills` 都没有条目，见[独立的 Codex 主目录](#独立的-codex-主目录)。其中某个文件夹列不出来（例如没有读取权限）同样拒绝。
+3. 开启终端时，工作目录里没有 `.codex`、`.agents`、`AGENTS.md` 和 `AGENTS.override.md`。声明了技能的角色不检查 `.agents`，下一步由内核替换它；`.codex` 和两个 `AGENTS` 文件仍然拒绝。工作目录里的 `.tmp`（终端命令的临时目录）存在却不是目录时，调用同样被拒绝，原因中写明 `.tmp`；删除它即可。
+4. 声明了技能时，把技能写进工作目录，见[技能](#技能)。
+
+传输在启动 Codex 之前再做一次前两项检查。
+
+调用结束后，rollout 中这一轮最后的 `turn_context` 必须表明它在受管理的受限权限配置下运行，禁止访问运行根目录和 Codex 配置目录，网络受限；否则调用无效，错误为 `Permission profile was not in force`。
 
 ### 进程
 
