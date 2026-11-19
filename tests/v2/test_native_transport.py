@@ -1317,6 +1317,41 @@ class NativeTransportTests(unittest.TestCase):
         self.assertEqual(signals, [])
         self.assertFalse(stopped)
 
+    def test_a_call_that_never_read_the_process_table_confirms_nothing_stopped(self):
+        # Codex ends on its own, and every look at the process table fails: nothing seen under it is confirmed.
+        with patch.object(transport, 'TRACK_SECONDS', .1), \
+                patch.object(transport, '_process_table', side_effect=OSError('ps unavailable')) as table:
+            result = self.invoke(native=TERMINAL)
+        self.assertEqual(result['execution_status'], 'succeeded', result['error'])
+        self.assertIs(result['descendants_stopped'], False)
+        self.assertGreaterEqual(table.call_count, 2)            # A sample during the call, and the last look.
+        self.assertIs(json.loads((self.folder / 'transport_result.json').read_text())['descendants_stopped'], False)
+        # Every sample failed but the last look at the end read the table: that read counts.
+        sweeping, real_sweep, real_table = [], transport._sweep, transport._process_table
+
+        def sweep(*arguments):
+            sweeping.append(True)
+            return real_sweep(*arguments)
+
+        def table_at_the_end():
+            if not sweeping:
+                raise OSError('ps unavailable')
+            return real_table()
+        with patch.object(transport, 'TRACK_SECONDS', .1), patch.object(transport, '_sweep', side_effect=sweep), \
+                patch.object(transport, '_process_table', side_effect=table_at_the_end):
+            result = self.invoke(native=TERMINAL, folder=self.root / 'calls' / 'read-at-the-end')
+        self.assertEqual((result['execution_status'], sweeping), ('succeeded', [True]))
+        self.assertIs(result['descendants_stopped'], True)
+
+    def test_a_sweep_with_nothing_tracked_needs_one_read_of_the_table(self):
+        # Nothing was tracked: a sample read the table, so nothing ran under the call; else the last look must.
+        stopped, signals = self.with_tables(lambda: transport._sweep({}, table_read=False), OSError('ps unavailable'))
+        self.assertEqual((stopped, signals), (False, []))
+        stopped, signals = self.with_tables(lambda: transport._sweep({}, table_read=False), self.ORPHANED)
+        self.assertEqual((stopped, signals), (True, []))
+        with patch.object(transport, '_process_table', side_effect=AssertionError('process table read')):
+            self.assertTrue(transport._sweep({}, table_read=True))
+
     def test_what_a_kill_or_a_sweep_finds_is_recorded_before_any_signal(self):
         recorded = []
 

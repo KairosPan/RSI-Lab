@@ -349,7 +349,7 @@ def _terminate(process, tracked=None, record=None):
     return _stop(tracked) and listed
 
 
-def _sweep(tracked, record=None):
+def _sweep(tracked, record=None, table_read=False):
     """Stop what still runs of ``tracked`` once a call has ended without a kill.
 
     A last sample follows the tracked processes that are still the same to
@@ -357,10 +357,18 @@ def _sweep(tracked, record=None):
     can be reused. Given ``record``, ``record(tracked)`` is called before any
     signal if the sample added a process; one that fails, however, does not
     hold back the stop. Returns what ``_stop`` returns,
-    ``False`` when the last sample cannot be read; ``True`` when nothing was
-    tracked.
+    ``False`` when the last sample cannot be read. When nothing was tracked,
+    ``True`` only if the process table was read at least once:
+    ``table_read`` says whether a sample during the call read it, and when
+    none did a last read is tried, which counts.
     """
     if not tracked:
+        if table_read:
+            return True
+        try:
+            _process_table()
+        except (OSError, ValueError):
+            return False     # No look at the table succeeded: nothing seen under the call is confirmed stopped.
         return True
     before = dict(tracked)
     try:
@@ -852,6 +860,8 @@ def _stream_process(process, prompt, journal, folder, timeout, stop, tracked=Non
     process; a sample that cannot be read is skipped. Given ``record`` too,
     ``record(tracked)`` is called whenever a sample adds a process; what it
     raises ends the stream, as a capture that cannot be written does.
+    Returns Codex's return code, whether the deadline elapsed, whether the
+    stream ended inside a frame, and whether any sample read the table.
     """
     selector = selectors.DefaultSelector()
     pending = memoryview(prompt.encode('utf-8'))
@@ -860,7 +870,7 @@ def _stream_process(process, prompt, journal, folder, timeout, stop, tracked=Non
                 for name in buffers}
     deadline = time.monotonic() + timeout
     next_sample = time.monotonic() if tracked is not None else math.inf
-    timed_out, drain_deadline = False, None
+    timed_out, drain_deadline, table_read = False, None, False
     try:
         for name in ('stdout', 'stderr'):
             pipe = getattr(process, name)
@@ -875,6 +885,7 @@ def _stream_process(process, prompt, journal, folder, timeout, stop, tracked=Non
                 before = dict(tracked)
                 try:
                     _track(tracked, _process_table(), process.pid)
+                    table_read = True
                 except (OSError, ValueError):
                     pass     # The next sample tries again.
                 if record is not None and tracked != before:
@@ -934,7 +945,7 @@ def _stream_process(process, prompt, journal, folder, timeout, stop, tracked=Non
                         journal.append(name, frame, kind=kind, provider_event_id=provider_id)
         if buffers['stdout']:
             journal.append('stdout', buffers['stdout'], kind='stream_incomplete')
-        return process.wait(timeout=5), timed_out, bool(buffers['stdout'])
+        return process.wait(timeout=5), timed_out, bool(buffers['stdout']), table_read
     finally:
         selector.close()
         for stream in captures.values():
@@ -977,9 +988,11 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
     write that fails during the call ends it as a journal write that fails
     does. A timeout or an interruption that kills Codex also stops what runs
     under it at the kill. A process that detaches and loses its parent
-    between two samples is not seen. Otherwise, a URL server alone included,
-    nothing is sampled or written, and a call Codex ends on its own reports
-    ``True``.
+    between two samples is not seen. Such a call reports ``True`` only when
+    the process table could be read: at the kill, or, when Codex ends on its
+    own, at a sample or at the last look (``_sweep``). Otherwise, a URL server
+    alone included, nothing is sampled or written, and a call Codex ends on
+    its own reports ``True``.
     """
     if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError('Prompt must be nonempty text')
@@ -1053,6 +1066,7 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
     journal_snapshot = None
     descendants_stopped = True
     tracked = {}                             # Every process seen under the call, as pid: start time.
+    table_read = False                       # Whether a sample during the call read the process table.
     tracking = _tracks(settings)
     # Written as samples add processes, before any signal: recovery stops what a dead Controller left running.
     record = (lambda tracked: write_tracked(folder, tracked)) if tracking else None
@@ -1100,8 +1114,8 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
             invocation.update(sent_image_manifest=image_manifest,
                               sent_image_manifest_sha256=image_digest)
         _write_json(folder / 'invocation.json', invocation)
-        returncode, timed_out, partial_tail = _stream_process(process, sent_prompt, journal, folder, timeout, stop,
-                                                              tracked if tracking else None, record)
+        returncode, timed_out, partial_tail, table_read = _stream_process(
+            process, sent_prompt, journal, folder, timeout, stop, tracked if tracking else None, record)
         captured = read_journal(folder / 'journal.jsonl')
         stdout = raw_stream(captured, 'stdout').decode('utf-8', errors='replace')
         raw, usage, usage_complete, errors = audited_events(folder)
@@ -1194,7 +1208,7 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
             # Codex ended without a kill, however the call ended: what was seen under it and still runs is stopped.
             descendants_stopped = False      # Recorded as such if _sweep is interrupted before it confirms.
             try:
-                descendants_stopped = _sweep(tracked, record)
+                descendants_stopped = _sweep(tracked, record, table_read)
             except BaseException as exc:     # The receipts below are written all the same; it is raised after them,
                 if interrupted is None:      # unless the call itself was interrupted first.
                     interrupted = exc
