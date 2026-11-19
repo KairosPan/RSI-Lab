@@ -3,9 +3,9 @@
 The rollout builders return complete records shaped as the live probe of
 2026-11-17 saw them, to follow the base rollout ``fixture`` of
 tests/v2/test_session_context.py, whose ``frame`` they use and re-export.
-Those of tool server calls and viewed images follow the record shapes Codex
-0.170.0 wrote in the spikes of the round-two design. No Codex or model
-process is run.
+Those of tool server calls, viewed images and skills lists follow the record
+shapes Codex 0.170.0 wrote in the spikes of the round-two design. No Codex or
+model process is run.
 """
 import base64
 import hashlib
@@ -136,6 +136,23 @@ def viewed_image(call_id, path, data_url, *, turn, thread=THREAD):
             + frame('response_item', {'type': 'custom_tool_call_output', 'call_id': call_id, 'output': [
                 {'type': 'input_text', 'text': 'Script completed\n'},
                 {'type': 'input_image', 'image_url': data_url, 'detail': 'original'}]}))
+
+
+def skills_list_text(roots, *skills):
+    """The text of the skills list Codex writes for a thread, in the record shape of the round-two design: a line of
+    prose under ``## Skills``, the ``roots`` as ``r0``, ``r1``, … in order, then one line per skill, each a ``(name,
+    description, file)`` tuple whose ``file`` is under a root label, such as ``r0/plot-check/SKILL.md``."""
+    return '\n'.join(['<skills_instructions>', '## Skills',
+                      'A skill is a set of local instructions in a SKILL.md file; open the file before using it.',
+                      '### Skill roots', *('- `r%d` = `%s`' % (number, root) for number, root in enumerate(roots)),
+                      '### Available skills', *('- %s: %s (file: %s)' % skill for skill in skills),
+                      '</skills_instructions>'])
+
+
+def skills_list(roots, *skills):
+    """The rollout record of a skills list (``skills_list_text``): a ``developer`` message holding it."""
+    return frame('response_item', {'type': 'message', 'role': 'developer', 'content': [
+        {'type': 'input_text', 'text': skills_list_text(roots, *skills)}]})
 
 
 def collab(call_id, name, output):

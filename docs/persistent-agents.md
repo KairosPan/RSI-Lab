@@ -285,6 +285,16 @@ Codex 按 YAML 读取 front matter，内核没有 YAML 解析器。运行配置�
 
 终端命令不能写 `.agents`：权限配置把工作目录里的 `.agents` 设为只读，所以模型改不了技能，只有内核写它。替换 `.agents` 只针对声明了技能的角色；没有声明技能的角色，工作目录里出现 `.agents` 时终端调用仍被拒绝，见[终端调用前后的检查](#终端调用前后的检查)。
 
+技能由 Codex 自己列给模型，内核在每次调用结束后检查它列出的正是声明的技能。Codex 为每个 thread 写一个技能列表：rollout 中的一条 `developer` 消息，正文以 `<skills_instructions>` 开头、以 `</skills_instructions>` 结尾。内核从 `### Skill roots` 一节读出各个根目录（``- `r0` = `<路径>` ``），从 `### Available skills` 一节读出每个技能（`- <名称>: <description> (file: r0/<名称>/SKILL.md)`，名称不含空白，最后一个 `(file: …)` 是它的文件）；以 `- ` 开头的行必须是这个样子，其余的行（说明文字、其他以 `#` 开头的小节）不读。读的地方是主调用 rollout 中这次调用新增的部分，以及这次调用派出的每个子 agent 自己的整个 rollout。早先派出、本轮只是再次联系的子 agent 不检查，它的列表在派出它的那次调用里检查过。
+
+- 声明了技能的角色：每个这样的列表都必须恰好列出声明的技能，每个都在该会话工作目录的 `.agents/skills` 之下（两边按解析后的路径比较，所以经由符号链接或带结尾斜杠的写法也算），文件是 `<名称>/SKILL.md`，同一名称只出现一次。只比较名称、根目录和文件，不比较 `description`：Codex 可能合并其中的空白。有多出的技能、缺少的技能、读不出的列表、读不出的 rollout（主调用的或这次派出的子 agent 的），或者调用正常结束、这次调用开始的 thread（主调用的新 thread 或派出的子 agent）却没有列表，调用都无效，错误为 `Codex showed skills other than the declared ones: <thread>: <n> unexpected from <文件夹>; missing <名称>; <k> lists unreadable; no list`，只出现适用的部分，读不出 rollout 时为 `rollout unreadable`；几个 thread 依次以 `; ` 接续，主调用在前。续接的 thread 只在技能变化时才得到一份新的完整列表，所以续接的调用没有列表不算错，有列表时同样比较。带着父调用历史派出的子 agent 还带有父调用列表的副本，这些副本也一样比较。
+- 没有声明技能的角色，包括全部关闭的角色：命令带 `-c skills.include_instructions=false`，Codex 不应写出任何列表。主调用新增的部分或这次派出的子 agent 里出现列表，调用无效，错误为 `Codex showed a skills list to a role without skills: <thread>: <n> skills from <文件夹>`，有读不出的列表时另加 `<k> lists unreadable`。带着父调用历史派出的子 agent，会带着父调用 rollout 中早先列表的副本，那可能是这项改动之前写下、列出主人个人技能的列表：子 agent 的列表与主调用此前部分中某个列表的正文完全相同时，视为这样的副本，不算它自己的。读不出的 rollout 在这里不检查，它的用量照常记为未知。
+- 两种情况都与 `Permission profile was not in force` 的处理相同：回执的 `protocol_valid` 为 `false`，错误并入 `error`，token 照常结算。执行器和恢复用同一段代码检查；从未发出的调用不检查。
+
+只有声明了技能的角色，回执才记录这项检查。在开始主调用 thread 的调用中，`native_activity` 有 `skills_shown`：Codex 为它列出的声明技能的名称，取自最后一个读得出的列表，读不出 rollout 时为 `null`；`child_threads` 中这次派出的每个子 agent 的那一项也有自己的 `skills_shown`。列表中有未声明的技能时，旁边另有 `skills_unexpected: {"count": <个数>, "folders": [<根目录>]}`，续接的 thread 也是这样记录。未声明的技能只按个数和所在的文件夹（Codex 写出的根目录原文）记录，它的名称不出现在回执或任何错误信息中；列表的正文也不进入回执。
+
+在这项改动之前开始的 thread 保留 Codex 当时给它的列表，其中可能有主人的个人技能。内核只检查调用新增的部分，所以续接这样的 thread 不会因为它前面已有的列表而无效，之后带着它的历史派出的子 agent 所带的副本也不算。
+
 ### 独立的 Codex 主目录
 
 Codex 向模型列出的技能，不只来自会话工作目录里的 `.agents/skills`，还来自另外三个文件夹：调用所用 Codex 主目录（`CODEX_HOME`，默认 `~/.codex`）下的 `skills`、`$HOME/.agents/skills` 和本机的 `/etc/codex/skills`。日常使用的 `~/.codex/skills` 里通常放着主人自己的个人技能。声明了技能的角色必须只看到声明的技能，所以它只能在这三个文件夹都没有任何内容的地方运行。Codex 主目录的 `skills/.system` 不算在内：那是 Codex 自己安装的技能，这样的角色的命令带 `-c skills.bundled.enabled=false`，不列出它们（见[Codex 命令的变化](#codex-命令的变化)）。

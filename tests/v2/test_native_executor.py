@@ -27,7 +27,8 @@ from tests.v2.liveness_support import Scripted, none, open_run
 from tests.v2.native_fixtures import (CHECK_PY, CHEM, MCP_RESULT, PLAIN, PNG, PROFILE, R, ROLES, SEARCH, SKILL_MD,
                                       TERMINAL, TERMINAL_AND_SUBAGENTS, TOOL_SERVERS, VIEW_IMAGE, WITH_ROLES,
                                       WITH_SKILLS, WITH_TOOL_SERVERS, account, child_rollout, here, mcp_call,
-                                      sub_agent_started, tool_call, turn_context, usage_row, viewed_image)
+                                      skills_list, sub_agent_started, tool_call, turn_context, usage_row,
+                                      viewed_image)
 from tests.v2.test_session_context import THREAD, fixture
 
 CHILD = '33333333-3333-3333-3333-333333333333'
@@ -39,6 +40,11 @@ RESPONSE = {'command': {'mode': 'lab', 'action': 'no_action', 'issue_id': None, 
                         'evidence_ids': [], 'payload': {'reason': 'Synthetic turn'}}}
 EXEC = 'text(await tools.exec_command({cmd: "ls"}))'
 SAME = object()
+# Lines of Codex's skills list: the skill WITH_SKILLS declares, under the workspace's skills folder, and one nobody
+# declared, under the owner's.
+DECLARED = ('plot-check', 'Checks a plot before it is reported.', 'r0/plot-check/SKILL.md')
+SECRET = ('secret-notes', 'Notes of the owner.', 'r1/secret-notes/SKILL.md')
+OWNERS = '/u/.agents/skills'
 # What transport.invoke returns for a call killed at its deadline before its terminal event.
 UNFINISHED = {'response': None, 'usage': None, 'usage_complete': False, 'protocol_valid': False,
               'execution_status': 'unknown', 'terminal_received': False, 'stream_complete': False, 'returncode': -9,
@@ -73,6 +79,15 @@ def ACCOUNTED_TURN(profile, cwd):
 
 def UNREADABLE(profile, cwd):
     return b'', b'{"type": "event_msg", "payload": \n'
+
+
+def listing(*skills):
+    """A rollout whose call writes Codex's skills list of ``skills``, with the workspace's skills folder as ``r0`` and
+    the owner's own as ``r1``, then a turn under ``profile``."""
+    def rollout(profile, cwd):
+        return b'', (skills_list([str(cwd / '.agents' / 'skills'), OWNERS], *skills)
+                     + turn_context('t1', profile, cwd=cwd) + usage_row(THREAD, 't1', 't1', 10, 1))
+    return rollout
 
 
 def SEARCHED_TWICE(profile, cwd):
@@ -535,8 +550,11 @@ class NativeExecutorTests(unittest.TestCase):
         return sorted(str(path.relative_to(workspace)) for path in workspace.rglob('*') if path.is_file())
 
     def test_a_call_with_skills_writes_them_and_replaces_agents(self):
-        receipt = self.execute(settings=WITH_SKILLS, arrange=self.put_skill_files, workspace_files=[self.agents_notes])
+        receipt = self.execute(settings=WITH_SKILLS, arrange=self.put_skill_files, workspace_files=[self.agents_notes],
+                               rollout=listing(DECLARED))
         self.assertEqual(receipt['status'], 'succeeded', receipt['error'])
+        self.assertTrue(receipt['protocol_valid'], receipt['error'])
+        self.assertEqual(receipt['native_activity']['skills_shown'], ['plot-check'])
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(self.calls[0]['native'], WITH_SKILLS)
         self.assertEqual(Path(self.calls[0]['session']['workspace']), self.workspace())
@@ -544,6 +562,39 @@ class NativeExecutorTests(unittest.TestCase):
                                                      '.agents/skills/plot-check/scripts/check.py'])
         self.assertEqual((self.workspace() / '.agents/skills/plot-check/SKILL.md').read_bytes(), SKILL_MD)
         self.assertEqual((self.workspace() / '.agents/skills/plot-check/scripts/check.py').read_bytes(), CHECK_PY)
+
+    def test_a_list_other_than_the_declared_one_makes_the_call_invalid(self):
+        receipt = self.execute(settings=WITH_SKILLS, arrange=self.put_skill_files, rollout=listing(DECLARED, SECRET))
+        self.assertEqual(receipt['status'], 'succeeded')
+        self.assertFalse(receipt['protocol_valid'])
+        self.assertEqual(receipt['error'], 'Codex showed skills other than the declared ones: ' + THREAD
+                         + ': 1 unexpected from ' + OWNERS)
+        self.assertEqual((receipt['token_source'], receipt['actual_costs']['tokens']), ('ledger', 11))
+        self.assertEqual(self.effect['actual_costs']['tokens'], 11)
+        self.assertEqual(receipt['native_activity']['skills_shown'], ['plot-check'])
+        self.assertEqual(receipt['native_activity']['skills_unexpected'], {'count': 1, 'folders': [OWNERS]})
+        self.assertNotIn('secret-notes', json.dumps(receipt))
+        # Joined with the other findings of the settlement.
+        receipt = self.execute(settings=WITH_SKILLS, arrange=self.put_skill_files, rollout=listing(DECLARED, SECRET),
+                               profile=lambda *places: None)
+        self.assertFalse(receipt['protocol_valid'])
+        self.assertEqual(receipt['error'], 'Permission profile was not in force; Codex showed skills other than the '
+                                           'declared ones: ' + THREAD + ': 1 unexpected from ' + OWNERS)
+        # A fresh thread with no list at all.
+        receipt = self.execute(settings=WITH_SKILLS, arrange=self.put_skill_files)
+        self.assertFalse(receipt['protocol_valid'])
+        self.assertEqual(receipt['error'], 'Codex showed skills other than the declared ones: ' + THREAD + ': no list')
+        # A role without skills is shown none, whether something else is on or everything is off.
+        for settings in (TERMINAL, None):
+            with self.subTest(settings=settings):
+                receipt = self.execute(settings=settings, rollout=listing(SECRET))
+                self.assertEqual(receipt['status'], 'succeeded')
+                self.assertFalse(receipt['protocol_valid'])
+                self.assertEqual(receipt['error'], 'Codex showed a skills list to a role without skills: ' + THREAD
+                                 + ': 1 skills from ' + OWNERS)
+                self.assertEqual(receipt['actual_costs']['tokens'], 11)
+                self.assertNotIn('secret-notes', json.dumps(receipt))
+                self.assertNotIn('skills_shown', json.dumps(receipt))
 
     def test_the_refusals_the_design_keeps(self):
         # With skills declared, .agents is the kernel's own; .codex and the AGENTS files still refuse the call.

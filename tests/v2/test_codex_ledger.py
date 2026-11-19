@@ -14,11 +14,12 @@ import tempfile
 import unittest
 import urllib.parse
 
-from rsi_lab import codex_ledger
+from rsi_lab import codex_ledger, native
 from rsi_lab.store import digest, encode
-from tests.v2.native_fixtures import (MCP_RESULT, PNG, PROFILE, TERMINAL, VIEW_IMAGE, account, child_rollout, collab,
-    compacted, frame, mcp_call, sub_agent_activity, sub_agent_meta, sub_agent_started, tool_call, turn_context,
-    usage_row, viewed_image, web_search)
+from tests.v2.native_fixtures import (MCP_RESULT, PNG, PROFILE, TERMINAL, TERMINAL_AND_SUBAGENTS, VIEW_IMAGE,
+    WITH_SKILLS, account, child_rollout, collab, compacted, frame, mcp_call, skills_list, skills_list_text,
+    sub_agent_activity, sub_agent_meta, sub_agent_started, tool_call, turn_context, usage_row, viewed_image,
+    web_search)
 from tests.v2.test_session_context import OTHER, THREAD, fixture
 
 CHILD = '33333333-3333-3333-3333-333333333333'
@@ -30,6 +31,14 @@ ARGS = json.dumps({'query': 'CCO'}, ensure_ascii=False, sort_keys=True)
 JPEG = 'data:image/jpeg;base64,' + base64.b64encode(b'\xff\xd8\xff' + bytes(3000)).decode()
 NO_IMAGES = {'paths': [], 'paths_omitted': 0, 'count': 0, 'bytes': 0}
 OUTSIDE = 'Codex showed images outside the folders this role may read: '
+# The one skill WITH_SKILLS declares, as a line of Codex's skills list under its first root.
+DECLARED = ('plot-check', 'Checks a plot before it is reported.', 'r0/plot-check/SKILL.md')
+# A skill nobody declared, in the owner's own folder: its name must never reach a receipt or an error.
+SECRET = ('secret-notes', 'Notes of the owner.', 'r1/secret-notes/SKILL.md')
+OWNERS = '/u/.agents/skills'
+NOT_DECLARED = 'Codex showed skills other than the declared ones: '
+NOT_SKILLED = 'Codex showed a skills list to a role without skills: '
+WITH_SKILLS_AND_SUBAGENTS = {**WITH_SKILLS, 'subagents': {'max_concurrent': 3}}
 
 
 def viewed_at(path, *, turn='t1', thread=THREAD):
@@ -245,7 +254,7 @@ class CodexLedgerTests(unittest.TestCase):
                                'requests': 1, 'input_tokens': 5, 'output_tokens': 1, 'cached_input_tokens': 0,
                                'role': None, 'forked_history': True, 'model': None, 'effort': None, 'searches': [],
                                'searches_omitted': 0, 'tool_server_calls': [], 'tool_server_calls_omitted': 0,
-                               'images_viewed': NO_IMAGES, 'image_view_paths': []})
+                               'images_viewed': NO_IMAGES, 'image_view_paths': [], 'skills_lists': []})
 
     def test_children_are_taken_from_every_sub_agent_activity_of_the_turn(self):
         # A sub-agent started in an earlier turn and addressed again in this one writes rows under this turn.
@@ -481,10 +490,11 @@ class CodexLedgerTests(unittest.TestCase):
                                                   'bytes': 68})
         self.assertEqual((child['tool_server_calls_omitted'], child['image_view_paths']), (0, ['file:///w/c1.png']))
 
-    def settle_call(self, records, settings, *, earlier=None, turn='t1', rows=True, **options):
+    def settle_call(self, records, settings, *, earlier=None, turn='t1', rows=True, finished=True, **options):
         """``settle_call`` of a session call whose turn adds ``records`` and, with ``rows``, one usage row of ``turn``
         to the base rollout; its folder holds an empty stream. ``earlier``, the records of a committed turn before
-        it, makes it a resumed call whose prefix ends with them."""
+        it, makes it a resumed call whose prefix ends with them. ``finished`` says whether the turn reached its
+        terminal event."""
         folder = self.root / 'call'
         folder.mkdir(exist_ok=True)
         (folder / 'events.jsonl').write_text('')
@@ -494,7 +504,7 @@ class CodexLedgerTests(unittest.TestCase):
             'context_manifest': {'native_prefix': {'prefix_bytes': len(first)}}}
         path = self.write(first + records + (usage_row(THREAD, turn, turn, 10, 1) if rows else b''))
         return codex_ledger.settle_call(folder, settings, session=session, codex_home=self.home, path=path,
-                                        thread_id=THREAD, stream_usage=None, run_root=self.root, finished=True,
+                                        thread_id=THREAD, stream_usage=None, run_root=self.root, finished=finished,
                                         **options)
 
     def test_every_viewed_image_must_lie_in_a_folder_the_role_may_read(self):
@@ -619,6 +629,266 @@ class CodexLedgerTests(unittest.TestCase):
                     got = self.settle_call(outside, settings, **options)
                     self.assertIsNone(got['images_error'])
                     self.assertNotIn('images_viewed', got['receipt']['native_activity'])
+
+    def ws_root(self):
+        """The workspace's skills folder as Codex writes it among the roots of a skills list."""
+        return str(self.cwd / '.agents' / 'skills')
+
+    def declared_list(self):
+        return skills_list([self.ws_root()], DECLARED)
+
+    def test_a_list_is_parsed(self):
+        text = skills_list_text([self.ws_root()], DECLARED, ('odd', 'Shows (file: x) inside.', 'r0/odd/SKILL.md'))
+        parsed = codex_ledger.parse_skills_list(text)
+        self.assertEqual(parsed['roots'], {'r0': self.ws_root()})
+        self.assertEqual(parsed['skills'][0], {'name': 'plot-check', 'description': 'Checks a plot before it is '
+                                               'reported.', 'root': 'r0', 'file': 'plot-check/SKILL.md'})
+        # The description is greedy: the last "(file: …)" is the skill's file.
+        self.assertEqual(parsed['skills'][1], {'name': 'odd', 'description': 'Shows (file: x) inside.', 'root': 'r0',
+                                               'file': 'odd/SKILL.md'})
+        # A list of no skills is readable; it lists none.
+        self.assertEqual(codex_ledger.parse_skills_list(skills_list_text([self.ws_root()]))['skills'], [])
+        for broken in (text.replace('### Skill roots', '### Roots'), text.replace('r0/odd', 'r1/odd'),
+                       text.replace('- odd: ', '- odd '), text.replace('</skills_instructions>', ''),
+                       text.replace('### Available skills', '### Skills found'), skills_list_text([], DECLARED),
+                       text.replace('- `r0` = ', '- r0 = '), text.replace('<skills_instructions>', '<skills>'),
+                       text.replace('### Available skills', '- `r0` = `/u/.codex/skills`\n### Available skills')):
+            with self.subTest(broken=broken), self.assertRaises(ValueError):
+                codex_ledger.parse_skills_list(broken)
+
+    def test_the_skills_lists_are_read_where_codex_wrote_them(self):
+        first, second = skills_list_text([self.ws_root()], DECLARED), skills_list_text([self.ws_root()])
+
+        def message(role, *texts):
+            return frame('response_item', {'type': 'message', 'role': role,
+                                            'content': [{'type': 'input_text', 'text': text} for text in texts]})
+        # Not lists: another role, a first input_text that does not begin the list, text that is not a string.
+        others = (message('user', first) + message('developer', 'Permissions.', first)
+                  + message('developer', ' ' + first)
+                  + frame('response_item', {'type': 'message', 'role': 'developer',
+                                            'content': [{'type': 'input_text', 'text': 7}]}))
+        prefix = fixture(self.cwd) + message('developer', first) + b'not a record\n' + usage_row(THREAD, 't1', 't1',
+                                                                                                10, 1)
+        raw = prefix + others + message('developer', second, 'More.') + usage_row(THREAD, 't2', 't2', 10, 1)
+        turn = codex_ledger.read_turn(self.write(raw), thread_id=THREAD, prefix_bytes=len(prefix))
+        self.assertEqual((turn['skills_lists'], turn['earlier_skills_lists']), ([second], [first]))
+        # A sub-agent's are those of its whole rollout, the forked copy of its parent's included.
+        self.write_child(CHILD_ROLLOUT + message('developer', first) + others + message('developer', second))
+        child = codex_ledger.read_child(self.home, CHILD, parent_thread_id=THREAD, root_turn_ids=['t1'])
+        self.assertEqual(child['skills_lists'], [first, second])
+
+    def test_a_list_as_declared_is_recorded(self):
+        got = codex_ledger.compare_skills([skills_list_text([self.ws_root()], DECLARED)], declared=['plot-check'],
+                                          workspace=str(self.cwd))
+        self.assertEqual(got, {'shown': ['plot-check'], 'unexpected': 0, 'folders': [], 'missing': [], 'unreadable': 0})
+        # Compared by name, root and file, never by description: Codex may collapse its whitespace.
+        got = codex_ledger.compare_skills([skills_list_text([self.ws_root()], ('plot-check', 'Checks  a plot.',
+                                                                              'r0/plot-check/SKILL.md'))],
+                                          declared=['plot-check'], workspace=self.cwd)
+        self.assertEqual((got['shown'], got['unexpected']), (['plot-check'], 0))
+        # Another file, a second line of the same name, an unreadable list: each is counted; shown is the last
+        # readable list's.
+        lists = [skills_list_text([self.ws_root()], ('plot-check', 'x', 'r0/plot-check/README.md')),
+                 skills_list_text([self.ws_root()], DECLARED, DECLARED), 'not a list']
+        self.assertEqual(codex_ledger.compare_skills(lists, declared=['plot-check'], workspace=self.cwd),
+                         {'shown': ['plot-check'], 'unexpected': 2, 'folders': [self.ws_root()],
+                          'missing': ['plot-check'], 'unreadable': 1})
+        # Without a workspace nothing lies in it.
+        self.assertEqual(codex_ledger.compare_skills(lists[1:2], declared=['plot-check'], workspace=None)['unexpected'],
+                         2)
+        # With the call settled, the receipt records what was shown on the thread the call started.
+        got = self.settle_call(self.declared_list(), WITH_SKILLS, workspace=self.cwd)
+        self.assertIsNone(got['skills_error'])
+        activity = got['receipt']['native_activity']
+        self.assertEqual(activity['skills_shown'], ['plot-check'])
+        self.assertNotIn('skills_unexpected', activity)
+        self.assertNotIn('skills_lists', json.dumps(got['receipt']))
+
+    def test_an_extra_skill_is_counted_with_its_folder_never_named(self):
+        got = self.settle_call(skills_list([self.ws_root(), OWNERS], DECLARED, SECRET), WITH_SKILLS,
+                               workspace=self.cwd)
+        self.assertEqual(got['skills_error'], NOT_DECLARED + THREAD + ': 1 unexpected from ' + OWNERS)
+        self.assertNotIn('secret-notes', json.dumps(got['receipt']))
+        activity = got['receipt']['native_activity']
+        self.assertEqual(activity['skills_unexpected'], {'count': 1, 'folders': [OWNERS]})
+        self.assertEqual(activity['skills_shown'], ['plot-check'])
+        # Two folders, each named once.
+        got = self.settle_call(skills_list([self.ws_root(), OWNERS, '/opt/machine/skills'], DECLARED, SECRET,
+                                           ('more-notes', 'x', 'r1/more-notes/SKILL.md'),
+                                           ('machine-notes', 'x', 'r2/machine-notes/SKILL.md')),
+                               WITH_SKILLS, workspace=self.cwd)
+        self.assertEqual(got['skills_error'], NOT_DECLARED + THREAD + ': 3 unexpected from ' + OWNERS
+                         + ', /opt/machine/skills')
+        self.assertEqual(got['receipt']['native_activity']['skills_unexpected'],
+                         {'count': 3, 'folders': [OWNERS, '/opt/machine/skills']})
+
+    def test_a_missing_or_unreadable_list_or_none_at_all_invalidates(self):
+        broken = self.declared_list().replace(b'### Skill roots', b'### Roots')
+        cases = {'a list without plot-check': (skills_list([self.ws_root()]), 'missing plot-check', []),
+                 'a list that cannot be read': (broken, '1 lists unreadable', []),
+                 'no list': (b'', 'no list', []),
+                 'an extra skill and a missing one': (skills_list([self.ws_root(), OWNERS], SECRET),
+                                                      '1 unexpected from ' + OWNERS + '; missing plot-check', []),
+                 'a rollout that cannot be read': (b'{"type": "event_msg", "payload": \n', 'rollout unreadable',
+                                                   None)}
+        for case, (records, part, shown) in cases.items():
+            with self.subTest(case=case):
+                got = self.settle_call(records, WITH_SKILLS, workspace=self.cwd)
+                self.assertEqual(got['skills_error'], NOT_DECLARED + THREAD + ': ' + part)
+                self.assertEqual(got['receipt']['native_activity']['skills_shown'], shown)
+                # A role without skills is shown nothing: what was not read is not its error.
+                self.assertEqual(self.settle_call(records, TERMINAL, workspace=self.cwd)['skills_error'],
+                                 None if case in ('no list', 'a rollout that cannot be read') else NOT_SKILLED + THREAD
+                                 + ': ' + {'a list without plot-check': '0 skills',
+                                           'a list that cannot be read': '1 lists unreadable',
+                                           'an extra skill and a missing one': '1 skills from ' + OWNERS}[case])
+        # A call that did not finish may have stopped before Codex wrote the list.
+        got = self.settle_call(b'', WITH_SKILLS, workspace=self.cwd, finished=False)
+        self.assertIsNone(got['skills_error'])
+        self.assertEqual(got['receipt']['native_activity']['skills_shown'], [])
+        # A call that was never dispatched showed nothing.
+        self.assertIsNone(self.settle_call(b'', WITH_SKILLS, workspace=self.cwd, dispatched=False)['skills_error'])
+
+    def test_a_list_for_a_role_without_skills_invalidates(self):
+        two = skills_list(['/u/.codex/skills', OWNERS], ('personal-notes', 'x', 'r0/personal-notes/SKILL.md'),
+                          SECRET)
+        for settings in (TERMINAL, native.OFF):
+            with self.subTest(settings=settings):
+                got = self.settle_call(two, settings, workspace=self.cwd)
+                self.assertEqual(got['skills_error'], NOT_SKILLED + THREAD + ': 2 skills from /u/.codex/skills, '
+                                 + OWNERS)
+                self.assertNotIn('notes', got['skills_error'])
+                self.assertNotIn('notes', json.dumps(got['receipt']))
+                self.assertNotIn('skills_shown', json.dumps(got['receipt']))
+                self.assertNotIn('skills_unexpected', json.dumps(got['receipt']))
+                # With no list, nothing is reported, and the receipt is as before.
+                got = self.settle_call(b'', settings, workspace=self.cwd)
+                self.assertIsNone(got['skills_error'])
+                self.assertEqual(set(got['receipt']), {'token_source', 'token_reason', 'stream_usage', 'ledger',
+                                                       'account_snapshot'} | ({'native_capabilities',
+                                                       'native_activity', 'child_threads'} if settings == TERMINAL
+                                                                              else set()))
+
+    def test_a_resumed_thread_that_got_a_second_list(self):
+        earlier = self.declared_list() + usage_row(THREAD, 't1', 't1', 10, 1)
+        cases = {'the declared list again': (self.declared_list(), None, False),
+                 'a list adding an undeclared skill': (skills_list([self.ws_root(), OWNERS], DECLARED, SECRET),
+                                                       NOT_DECLARED + THREAD + ': 1 unexpected from ' + OWNERS, True),
+                 'a list missing the declared skill': (skills_list([self.ws_root()]),
+                                                       NOT_DECLARED + THREAD + ': missing plot-check', False),
+                 'no list, as when its skills did not change': (b'', None, False)}
+        for case, (records, error, unexpected) in cases.items():
+            with self.subTest(case=case):
+                got = self.settle_call(records, WITH_SKILLS, earlier=earlier, turn='t2', workspace=self.cwd)
+                self.assertEqual(got['skills_error'], error)
+                activity = got['receipt']['native_activity']
+                self.assertNotIn('skills_shown', activity)
+                self.assertEqual(activity.get('skills_unexpected'),
+                                 {'count': 1, 'folders': [OWNERS]} if unexpected else None)
+                self.assertNotIn('secret-notes', json.dumps(got['receipt']))
+
+    def test_a_sub_agent_thread_is_checked(self):
+        started = self.declared_list() + sub_agent_started(CHILD, '/root/a')
+        cases = {'its own list as declared': (self.declared_list(), None, ['plot-check']),
+                 'no list': (b'', NOT_DECLARED + CHILD + ': no list', []),
+                 'a list adding an undeclared skill': (skills_list([self.ws_root(), OWNERS], DECLARED, SECRET),
+                                                       NOT_DECLARED + CHILD + ': 1 unexpected from ' + OWNERS,
+                                                       ['plot-check'])}
+        for case, (own, error, shown) in cases.items():
+            with self.subTest(case=case):
+                self.reset_home(); self.write_child(CHILD_ROLLOUT + own)
+                got = self.settle_call(started, WITH_SKILLS_AND_SUBAGENTS, workspace=self.cwd)
+                self.assertEqual(got['skills_error'], error)
+                [entry] = got['receipt']['child_threads']
+                self.assertEqual(entry['skills_shown'], shown)
+                self.assertEqual(entry.get('skills_unexpected'),
+                                 {'count': 1, 'folders': [OWNERS]} if error and 'unexpected' in error else None)
+                self.assertNotIn('skills_lists', entry)
+                self.assertNotIn('secret-notes', json.dumps(got['receipt']))
+                # The lead's own list is checked and recorded beside it.
+                self.assertEqual(got['receipt']['native_activity']['skills_shown'], ['plot-check'])
+        # The sub-agent's rollout cannot be read, or the turn added no usage rows and it was never looked for.
+        for rows in (True, False):
+            with self.subTest(rows=rows):
+                self.reset_home()
+                got = self.settle_call(started, WITH_SKILLS_AND_SUBAGENTS, rows=rows, workspace=self.cwd)
+                self.assertEqual(got['skills_error'], NOT_DECLARED + CHILD + ': rollout unreadable')
+        # A sub-agent named by an id that is not text cannot be read.
+        unnamed = frame('event_msg', {'type': 'item_completed', 'item': {
+            'type': 'SubAgentActivity', 'kind': 'started', 'agent_thread_id': ['x'], 'agent_path': '/root/b'}})
+        got = self.settle_call(self.declared_list() + unnamed, WITH_SKILLS_AND_SUBAGENTS, workspace=self.cwd)
+        self.assertEqual(got['skills_error'], NOT_DECLARED + "['x']: rollout unreadable")
+        self.assertIsNone(self.settle_call(unnamed, TERMINAL_AND_SUBAGENTS, workspace=self.cwd)['skills_error'])
+        # Both threads at fault are named, the lead first.
+        self.reset_home(); self.write_child()
+        got = self.settle_call(sub_agent_started(CHILD, '/root/a'), WITH_SKILLS_AND_SUBAGENTS, workspace=self.cwd)
+        self.assertEqual(got['skills_error'], NOT_DECLARED + THREAD + ': no list; ' + CHILD + ': no list')
+        # A sub-agent only addressed again: its list was checked by the call that started it.
+        self.reset_home()
+        self.write_child(child_rollout(CHILD, THREAD, [('c1', 't1', 5, 1), ('c2', 't2', 7, 3)]))
+        got = self.settle_call(sub_agent_activity(CHILD, '/root/a', 'interacted'), WITH_SKILLS_AND_SUBAGENTS,
+                               earlier=started + usage_row(THREAD, 't1', 't1', 10, 1), turn='t2', workspace=self.cwd)
+        self.assertIsNone(got['skills_error'])
+        [entry] = got['receipt']['child_threads']
+        self.assertNotIn('skills_shown', entry)
+
+    def test_a_forked_copy_of_an_old_lead_list_is_not_the_sub_agents_own(self):     # Review Focus 1
+        # The lead's thread was started before roles without skills were shown none: its prefix holds the owner's
+        # personal skills, and a sub-agent forked with its history carries a copy.
+        old = skills_list(['/u/.codex/skills'], ('personal-notes', 'Notes of the owner.', 'r0/personal-notes/SKILL.md'))
+        earlier = old + usage_row(THREAD, 't1', 't1', 10, 1)
+
+        def forked(*records):
+            history = frame('session_meta', {'id': THREAD, 'cwd': str(self.cwd)}) + old
+            return (sub_agent_meta(CHILD, THREAD, forked=True) + history + b''.join(records)
+                    + usage_row(CHILD, 'c2', 't2', 5, 1, session=THREAD))
+        other = skills_list(['/u/.codex/skills'], ('personal-notes', 'Notes of the owner, edited.',
+                                                   'r0/personal-notes/SKILL.md'))
+        cases = {'the copy alone': (forked(), None),
+                 'the copy and a list of its own': (forked(other), NOT_SKILLED + CHILD + ': 1 skills from '
+                                                    '/u/.codex/skills'),
+                 'another list instead': (sub_agent_meta(CHILD, THREAD, forked=True) + other
+                                          + usage_row(CHILD, 'c2', 't2', 5, 1, session=THREAD),
+                                          NOT_SKILLED + CHILD + ': 1 skills from /u/.codex/skills')}
+        for case, (rollout, error) in cases.items():
+            with self.subTest(case=case):
+                self.reset_home(); self.write_child(rollout)
+                got = self.settle_call(sub_agent_started(CHILD, '/root/a'), TERMINAL_AND_SUBAGENTS, earlier=earlier,
+                                       turn='t2', workspace=self.cwd)
+                self.assertEqual(got['skills_error'], error)
+                self.assertNotIn('personal-notes', json.dumps(got['receipt']))
+        # Under a role with skills every list is compared, copies included.
+        self.reset_home(); self.write_child(forked(self.declared_list()))
+        got = self.settle_call(sub_agent_started(CHILD, '/root/a'), WITH_SKILLS_AND_SUBAGENTS, earlier=earlier,
+                               turn='t2', workspace=self.cwd)
+        self.assertEqual(got['skills_error'], NOT_DECLARED + CHILD + ': 1 unexpected from /u/.codex/skills; '
+                                                                     'missing plot-check')
+        self.assertEqual(got['receipt']['child_threads'][0]['skills_shown'], ['plot-check'])
+
+    def test_root_spellings_and_extra_lines(self):                                   # Review Focus 2
+        link = self.root / 'link'
+        link.symlink_to(self.cwd)
+        texts = {'through a symlink to the workspace': skills_list_text([str(link / '.agents' / 'skills')], DECLARED),
+                 'resolved': skills_list_text([str(self.cwd.resolve() / '.agents' / 'skills')], DECLARED),
+                 'with a trailing slash': skills_list_text([self.ws_root() + '/'], DECLARED),
+                 'a prose line inside Available skills': skills_list_text([self.ws_root()], DECLARED).replace(
+                     '### Available skills\n', '### Available skills\nUse them when relevant.\n'),
+                 'the lines of a later section': skills_list_text([self.ws_root()], DECLARED).replace(
+                     '\n</skills_instructions>', '\n### How to use skills\n- Discovery: open the file named above.'
+                     '\n- Scope: one skill at a time.\n</skills_instructions>'),
+                 'a root no skill is listed under': skills_list_text([self.ws_root(), OWNERS], DECLARED)}
+        for case, text in texts.items():
+            with self.subTest(case=case):
+                self.assertEqual(codex_ledger.compare_skills([text], declared=['plot-check'], workspace=self.cwd),
+                                 {'shown': ['plot-check'], 'unexpected': 0, 'folders': [], 'missing': [],
+                                  'unreadable': 0})
+        # The workspace's .codex/skills is not its .agents/skills; neither is a relative root.
+        for root in (str(self.cwd / '.codex' / 'skills'), 'workspace/.agents/skills'):
+            with self.subTest(root=root):
+                self.assertEqual(codex_ledger.compare_skills([skills_list_text([root], DECLARED)],
+                                                             declared=['plot-check'], workspace=self.cwd),
+                                 {'shown': [], 'unexpected': 1, 'folders': [root], 'missing': ['plot-check'],
+                                  'unreadable': 0})
 
 
 if __name__ == '__main__':

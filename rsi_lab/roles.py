@@ -991,10 +991,10 @@ class CodexExecutor:
                 result['protocol_valid'] = False
                 result['error'] = 'Native session continuation is unverifiable: ' + str(
                     context.get('native_session_error') or 'missing native session snapshot')
-        if charge['profile_error'] or charge['images_error']:
+        if charge['profile_error'] or charge['images_error'] or charge['skills_error']:
             result['protocol_valid'] = False
             result['error'] = '; '.join(filter(None, (charge['profile_error'], charge['images_error'],
-                                                      result.get('error'))))
+                                                      charge['skills_error'], result.get('error'))))
         return {'status': 'succeeded' if success else 'failed_definite' if execution == 'failed_definite' else 'unknown', 'actual_costs': costs,
                 'response': result.get('response'), 'usage': usage,
                 'usage_complete': result.get('usage_complete', False) and charge['usage_known'],

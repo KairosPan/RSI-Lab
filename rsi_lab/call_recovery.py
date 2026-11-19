@@ -270,7 +270,8 @@ def recover_codex_receipt(effect, packet_bytes, calls_root, *, interruption_atte
         finished=len(terminals) == 1, workspace=workspace)
     if charge['tokens'] is not None:
         costs['tokens'] = charge['tokens']
-    findings = [finding for finding in (charge['profile_error'], charge['images_error']) if finding]
+    findings = [finding for finding in (charge['profile_error'], charge['images_error'], charge['skills_error'])
+                if finding]
     if findings:
         protocol_valid = False
     messages = findings + errors
