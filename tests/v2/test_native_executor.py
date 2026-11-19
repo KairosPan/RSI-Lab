@@ -814,15 +814,18 @@ class NativeExecutorTests(unittest.TestCase):
         def viewed(name):
             return {'paths': ['file://' + str(self.workspace() / name)], 'paths_omitted': 0, 'count': 1, 'bytes': 68}
         records = ('tool_server_calls', 'tool_server_calls_omitted', 'images_viewed')
+        # The viewed images are there, in the workspace.
+        images = [lambda workspace: [(workspace / name).write_bytes(b'') for name in ('plot.png', 'fit.png')]]
         cases = {'tool servers': ({'settings': {**SEARCH, 'tool_servers': servers}, 'rollout': lead(call=True)},
                                   records[:2]),
-                 'image viewing': ({'settings': VIEW_IMAGE, 'rollout': lead(image=True)}, records[2:]),
+                 'image viewing': ({'settings': VIEW_IMAGE, 'rollout': lead(image=True), 'workspace_files': images},
+                                   records[2:]),
                  'neither': ({'settings': TERMINAL_AND_SUBAGENTS, 'rollout': PARENT_WITH_CHILD, 'child': CHILD_ROWS},
                              ()),
                  'both, with a sub-agent': ({'settings': {**TERMINAL_AND_SUBAGENTS, 'view_image': True,
                                                           'tool_servers': servers},
                                              'rollout': lead(child=True, call=True, image=True), 'child': CHILD_ROWS,
-                                             'child_records': child_records}, records)}
+                                             'child_records': child_records, 'workspace_files': images}, records)}
         for case, (arguments_of_call, recorded) in cases.items():
             with self.subTest(case=case), patch.dict(os.environ, {'CHEM_API_KEY': 'invented-secret-4f1c'}):
                 receipt = self.execute(**arguments_of_call)
@@ -863,7 +866,8 @@ class NativeExecutorTests(unittest.TestCase):
         self.assertFalse(receipt['protocol_valid'])
         self.assertEqual(receipt['error'], 'Permission profile was not in force; Codex showed images outside the '
                                            'folders this role may read: 1 of 1')
-        receipt = self.execute(settings=VIEW_IMAGE, rollout=viewing(lambda cwd: cwd / 'plot.png'))
+        receipt = self.execute(settings=VIEW_IMAGE, rollout=viewing(lambda cwd: cwd / 'plot.png'),
+                               workspace_files=[lambda workspace: (workspace / 'plot.png').write_bytes(b'')])
         self.assertTrue(receipt['protocol_valid'])
         self.assertIsNone(receipt['error'])
 

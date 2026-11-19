@@ -531,13 +531,37 @@ def _profile_in_force(profile, *, run_root, codex_home):
 def _resolved(path):
     """``path`` resolved now, symbolic links followed, else ``None``.
 
-    A part that does not exist is kept as written, so a plot deleted after it was viewed still lies where it was. Any
-    other failure to look at a part gives ``None``: a folder that cannot be searched, which would otherwise hide a
-    link inside it, a loop of links, a part that is not a folder. Python releases without ``os.path.ALLOW_MISSING``
-    resolve strictly, so there a part that does not exist gives ``None`` too.
+    The deepest of ``path`` and its ancestors that resolves strictly is resolved; the parts below it are then kept
+    as written, so a plot deleted after it was viewed, with its folder, still lies where it was. They are kept only
+    when the first of them is truly absent, not even a dangling link, whose target cannot be told, and none of them
+    is ``.``, ``..`` or empty; a trailing slash names the folder itself. Any other failure to look at a part gives
+    ``None``: a folder that cannot be searched, which would otherwise hide a link inside it, a loop of links, a part
+    that is not a folder. It uses nothing a Python release the kernel runs on may lack, such as
+    ``os.path.ALLOW_MISSING``.
     """
     try:
-        return Path(os.path.realpath(path, strict=getattr(os.path, 'ALLOW_MISSING', True)))
+        head, tail = os.fspath(path), []
+        head = head.rstrip('/') or head
+        while True:
+            try:
+                resolved = Path(head).resolve(strict=True)
+                break
+            except FileNotFoundError:
+                parent, name = os.path.split(head)
+                if parent == head:
+                    return None
+                tail.append(name)
+                head = parent
+        if not tail:
+            return resolved
+        tail.reverse()
+        if any(part in ('', '.', '..') for part in tail):
+            return None
+        try:
+            os.lstat(resolved / tail[0])
+        except FileNotFoundError:
+            return resolved.joinpath(*tail)
+        return None          # It is there after all, such as a dangling link: where it leads cannot be told.
     except (OSError, ValueError, RuntimeError):
         return None
 

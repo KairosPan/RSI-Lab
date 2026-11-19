@@ -278,6 +278,7 @@ class NativeRecoveryTests(unittest.TestCase):
         outside = 'Codex showed images outside the folders this role may read: 1 of 1'
         for where, error in ((self.workspace / 'plot.png', None), (self.root / 'plot.png', outside)):
             with self.subTest(where=where):
+                where.write_bytes(b'')  # The viewed image is there.
                 self.write_call(settings, turn=self.this_turn() + viewed_image('exec-2222', str(where), PNG,
                                                                                 turn='t2'))
                 receipt = self.recover(settings)

@@ -11,7 +11,9 @@ import os
 from pathlib import Path
 import shutil
 import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest import mock
 import urllib.parse
 
 from rsi_lab import codex_ledger, native
@@ -526,6 +528,10 @@ class CodexLedgerTests(unittest.TestCase):
         readable.mkdir(); elsewhere.mkdir()
         (elsewhere / 'secret.png').write_bytes(b'')
         (self.cwd / 'link.png').symlink_to(elsewhere / 'secret.png')
+        # The images inside are there: only the test of a deleted plot depends on how a missing one is placed.
+        (readable / 'figures').mkdir()
+        for image in (self.cwd / 'plot.png', self.cwd / 'my plot.png', readable / 'figures' / 'a.png'):
+            image.write_bytes(b'')
         settings = {**VIEW_IMAGE, 'terminal': {'readable_roots': [str(readable)]}}
         inside = file_url(self.cwd / 'plot.png')
         cases = {'in the workspace': ([inside], None),
@@ -560,6 +566,7 @@ class CodexLedgerTests(unittest.TestCase):
     def test_a_sub_agents_viewed_images_are_checked_too(self):
         settings = {**VIEW_IMAGE, 'subagents': {'max_concurrent': 3}}
         outside = file_url(self.root / 'elsewhere' / 'secret.png')
+        (self.cwd / 'plot.png').write_bytes(b''); (self.cwd / 'fit.png').write_bytes(b'')
         # The sub-agent's earlier turn c0 is not this call's and is not checked.
         self.write_child(child_rollout(CHILD, THREAD, [('c0', 't0', 3, 1), ('c1', 't1', 5, 1)])
                          + viewed_at(outside, turn='c0', thread=CHILD)
@@ -586,6 +593,39 @@ class CodexLedgerTests(unittest.TestCase):
         # A plot deleted after it was viewed, with its folder, still lies where it was.
         got = self.settle_call(viewed_at(file_url(self.cwd / 'plots' / 'gone.png')), VIEW_IMAGE, workspace=self.cwd)
         self.assertIsNone(got['images_error'])
+
+    def test_viewed_images_are_placed_alike_on_every_python_release(self):
+        # The resolver uses nothing a Python release may lack, such as os.path.ALLOW_MISSING, absent before 3.13.4 and
+        # its backports (Python 3.9's realpath takes no strict argument at all). Here codex_ledger sees an os module
+        # without it, as on such a release; the standard library's own modules are left as they are.
+        path = SimpleNamespace(**{name: value for name, value in vars(os.path).items() if name != 'ALLOW_MISSING'})
+        without = SimpleNamespace(**{**vars(os), 'path': path})
+        with mock.patch.object(codex_ledger, 'os', without):
+            self.place_viewed_images()
+
+    def place_viewed_images(self):
+        """Check where ``_images_outside`` places a viewed image, against links and missing parts in the workspace."""
+        elsewhere = self.root / 'elsewhere'
+        elsewhere.mkdir()
+        (elsewhere / 'secret.png').write_bytes(b'')
+        (self.cwd / 'plot.png').write_bytes(b'')
+        links = {'link_in': self.cwd / 'plot.png', 'link_out': elsewhere / 'secret.png',
+                 'dangling_in': self.cwd / 'gone.png', 'dangling_out': elsewhere / 'gone.png',
+                 'folder_out': elsewhere, 'dangling_folder': elsewhere / 'none', 'loop': self.cwd / 'loop'}
+        for name, target in links.items():
+            (self.cwd / name).symlink_to(target)
+        inside = ['plot.png', 'link_in', 'gone.png', 'plots/gone.png', 'plots/', 'folder_out/../workspace/plot.png']
+        outside = ['link_out', 'dangling_out', 'folder_out/secret.png', 'folder_out/gone.png', 'nothere/../link_out',
+                   'nothere/../../elsewhere/secret.png', 'plot.png/x', 'plot.png/../link_out', 'loop',
+                   'dangling_folder/x.png', 'a\x00.png',
+                   # The one change from a resolver that keeps a missing part as written: a dangling link is not
+                   # missing, and where it would lead is not where the role read.
+                   'dangling_in']
+        for names, count in ((inside, 0), (outside, 1)):
+            for name in names:
+                with self.subTest(name=name):
+                    self.assertEqual(codex_ledger._images_outside([str(self.cwd) + '/' + name], workspace=self.cwd,
+                                                                  roots=()), count)
 
     def test_a_sub_agent_addressed_again_has_its_images_recorded_and_checked(self):
         settings = {**VIEW_IMAGE, 'subagents': {'max_concurrent': 3}}
