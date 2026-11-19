@@ -248,14 +248,14 @@ description: Checks a plot before it is reported.
 Open the plot and check its axes and units.
 ```
 
-front matter 中以 `name:` 或 `description:` 开头、冒号后紧跟空格、制表符或行尾的行，按 `key: value` 读取：值去掉首尾空白，两端是一对相同的引号时再去掉这对引号（所以 `description: "Checks: axes."` 读作 `Checks: axes.`）。每个键只能出现一次，并且只能写在一行内：紧跟其后的缩进行（YAML 会把它接到值上）被拒绝。其余各行不读取。`name` 必须等于子文件夹的名称。`description` 是一行 1 到 300 个字符、不全是空白，不能以 `|` 或 `>` 开头（YAML 的多行写法）。
+front matter 中以 `name:` 或 `description:` 开头、冒号后紧跟空格、制表符或行尾的行，按 `key: value` 读取（行以换行符或回车加换行符结束）：值去掉首尾的空格和制表符，只去掉这两种，与 YAML 相同，两端是一对相同的引号时再去掉这对引号（所以 `description: "Checks: axes."` 读作 `Checks: axes.`）。每个键只能出现一次，并且只能写在一行内：紧跟其后的缩进行（YAML 会把它接到值上）被拒绝。其余各行不读取。`name` 必须等于子文件夹的名称。`description` 是一行 1 到 300 个字符、不全是空白，不能以 `|` 或 `>` 开头（YAML 的多行写法），并且全部是可打印字符：控制字符、不换行空格等不可打印的空白，以及 U+0085、U+2028、U+2029 这些 YAML 可能当作换行的字符，一律拒绝。
 
-Codex 按 YAML 读取 front matter，内核没有 YAML 解析器。运行配置在 `init` 之后不能更改，而 Codex 列出的技能与声明的不符时调用无效，所以凡是 YAML 可能读成别的样子的写法，`init` 一律拒绝：
+Codex 按 YAML 读取 front matter，内核没有 YAML 解析器。运行配置在 `init` 之后不能更改，而 Codex 列出的技能与声明的不符时调用无效，所以下面这些已知 YAML 会读成别的样子的写法，`init` 拒绝：
 
 - 不加引号的值：含 `: ` 或 ` #`（YAML 的键分隔与注释），以 `:` 结尾，以 `,[]{}#&*!|>'"%@` 或反引号之一开头，以 `-`、`?` 或 `:` 加空格开头，或者 YAML 会读成 null、布尔值或数字（例如 `null`、`true`、`42`；名为 `null` 的技能也因此要写 `name: "null"`）。这样的值加上引号即可，例如 `description: "Checks: axes."`。
 - 加了引号的值：双引号里不能有 `\` 或 `"`，单引号里不能有 `'`，YAML 会把它们读作转义。换一种引号，或改写这段文字。
 
-内核不读取的那些 front matter 行仍然可能不是合法的 YAML，这时 Codex 读不出这个技能；每次调用之后的检查会报告这种情况。
+这份清单不能保证覆盖 YAML 的每一种读法。除此之外 Codex 读到的若与内核不同，读出了另一个名称，或者读不出这个技能（例如内核不读取的那些 front matter 行不是合法的 YAML），每次调用之后的检查会报告，见下文；只是 `description` 读得不同不会被发现，那项检查不比较 `description`。
 
 限制：
 

@@ -665,7 +665,10 @@ class SkillSettingsTests(unittest.TestCase):
             '"Checks \\ axes"', '"Checks \\"x\\" axes"', '"Checks "x" axes"', "'It''s a check'",  # escapes in quotes
             '42', '1.5e3', '0x1F', '.inf', 'true', 'False', 'null', '~',                      # not text
             'Checks a plot\n  before it is reported.',                                        # continued on a line
-            'Checks a plot\n\n\tbefore it is reported.']
+            'Checks a plot\n\n\tbefore it is reported.',
+            # Not trimmed by YAML, or read by it as a line break: characters that cannot be printed.
+            '\u00a0Checks a plot.', 'Checks a plot.\u00a0', '"\u00a0Checks a plot."', 'Checks\u0085 a plot.',
+            'Checks\u2028 a plot.', 'Checks\u2029 a plot.', 'Checks\x07 a plot.', 'Checks a plot.\x0b']
         for index, description in enumerate(descriptions):
             root = skill_folder(self.tmp / ('case-%02d' % index))
             (root / 'plot-check' / 'SKILL.md').write_bytes(skill_text('plot-check', description))
@@ -688,11 +691,16 @@ class SkillSettingsTests(unittest.TestCase):
         add_skill(root, 'null', skill_text('"null"'))
         add_skill(root, 'with-metadata', b'---\nname: with-metadata\ndescription: Checks a plot.\nmetadata:\n'
                                          b'  short-description: "Plots: checked"\n\nlicense: MIT\n---\nUse it.\n')
+        # Lines that end as on Windows, and spaces and tabs around a value, which YAML trims.
+        add_skill(root, 'crlf', b'---\r\nname: crlf\r\ndescription: Checks a plot.\r\n---\r\nUse it.\r\n')
+        add_skill(root, 'padded', b'---\nname: \t padded \t\ndescription: \t Checks a plot. \t\n---\nUse it.\n')
         frozen = self.lab_skills(str(root))['frozen']
         for index, (description, read) in enumerate(expected.items()):
             self.assertEqual(frozen['s%02d' % index]['description'], read or description)
         self.assertEqual(frozen['null']['description'], PLOT_CHECK['description'])
         self.assertEqual(frozen['with-metadata']['description'], 'Checks a plot.')
+        self.assertEqual((frozen['crlf']['description'], frozen['padded']['description']),
+                         ('Checks a plot.', 'Checks a plot.'))
 
     def test_the_frozen_form_is_checked_without_the_filesystem(self):
         self.assertEqual(native.validate(WITH_SKILLS), WITH_SKILLS)          # The root need not exist.
@@ -717,6 +725,8 @@ class SkillSettingsTests(unittest.TestCase):
                with_skill(extra=1), with_skill(description=''), with_skill(description='a\nb'),
                with_skill(description='> folded'), with_skill(description='| literal'),
                with_skill(description='d' * 301), with_skill(description=7),
+               with_skill(description='\u00a0Checks a plot.'), with_skill(description='Checks\u0085 a plot.'),
+               with_skill(description='Checks\x1b a plot.'),
                with_skill(files={}), with_skill(files=[]), with_skill(files={'scripts/check.py': sha(CHECK_PY)}),
                with_files(**{'f%02d' % i: sha(b'x') for i in range(15)}),
                with_files(**{'examples/x/SKILL.md': sha(b'x')}),

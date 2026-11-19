@@ -92,8 +92,8 @@ MAX_SKILLS = 16
 MAX_SKILL_FILES = 16
 MAX_SKILL_BYTES = 262144
 SKILL_FILE = 'SKILL.md'
-SKILL_DESCRIPTION_RULE = ('one line of 1 to ' + str(MAX_DESCRIPTION) + ' characters, not blank and not beginning '
-                          'with | or >')
+SKILL_DESCRIPTION_RULE = ('one line of 1 to ' + str(MAX_DESCRIPTION) + ' printable characters, not blank and not '
+                          'beginning with | or >')
 # What begins the skills list Codex writes into a thread (codex_ledger.SKILLS_LIST_START). A text part holding it is
 # taken for a list, so a sub-agent role's text may not hold it.
 SKILLS_LIST_TAG = '<skills_instructions>'
@@ -1006,8 +1006,9 @@ def _skill_names(names, where):
 
 def _is_skill_description(text):
     """Whether ``text`` is a skill's description: a description ``_is_description`` accepts that does not begin
-    with ``|`` or ``>``, which in YAML begin block text."""
-    return _is_description(text) and text[0] not in '|>'
+    with ``|`` or ``>``, which in YAML begin block text, and is all printable characters. That refuses control
+    characters, a no-break space and U+0085, U+2028 and U+2029, which YAML may read as a line break."""
+    return _is_description(text) and text[0] not in '|>' and text.isprintable()
 
 
 def _is_skill_path(path):
@@ -1087,14 +1088,17 @@ def _front_matter(raw, name, where):
     """The description the front matter of a skill's ``SKILL.md`` gives, checked; its ``name`` must be ``name``.
 
     The file begins with a line ``---`` and its front matter ends at the next.
-    A ``name`` or ``description`` line begins with the key and a colon followed
-    by a space, a tab or the end of the line; ``_yaml_text`` reads its value.
-    Each may be given once, on one line: an indented line after it, which YAML
-    would join to the value, is refused. Other lines are not read.
+    Lines end with a line feed, or with a carriage return and a line feed,
+    as YAML reads them. A ``name`` or ``description`` line begins with the
+    key and a colon followed by a space, a tab or the end of the line; its
+    value, with the spaces and tabs around it removed and nothing else, is
+    read by ``_yaml_text``. Each may be given once, on one line: an indented
+    line after it, which YAML would join to the value, is refused. Other
+    lines are not read.
     """
     where += '.' + SKILL_FILE
     try:
-        lines = raw.decode('utf-8').split('\n')
+        lines = [line[:-1] if line.endswith('\r') else line for line in raw.decode('utf-8').split('\n')]
     except UnicodeDecodeError:
         raise ValueError(where + ' must be UTF-8 text') from None
     ends = [index for index, line in enumerate(lines) if line.strip() == '---']
@@ -1114,7 +1118,8 @@ def _front_matter(raw, name, where):
             continue
         if key in values:
             raise ValueError(where + ' front matter gives ' + key + ' more than once')
-        values[key] = _yaml_text(key, value.strip(), where)
+        # YAML trims spaces and tabs alone: another space, such as a no-break one, stays in the value it begins.
+        values[key] = _yaml_text(key, value.strip(' \t'), where)
     if values.get('name') != name:
         raise ValueError(where + ' front matter must give the name ' + name + ', the name of its folder')
     if not _is_skill_description(values.get('description')):
@@ -1123,7 +1128,8 @@ def _front_matter(raw, name, where):
 
 
 def _yaml_text(key, value, where):
-    """The text YAML reads from ``value``, the stripped value of a front matter line ``key: value``.
+    """The text YAML reads from ``value``, the value of a front matter line ``key: value`` without the spaces and
+    tabs around it.
 
     One pair of matching surrounding quotes is removed. What YAML could read
     otherwise is refused: inside double quotes a backslash or a double quote,
