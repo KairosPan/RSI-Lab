@@ -323,7 +323,8 @@ class MetaAgent:
         orchestration = task.get('constraints',{}).get('orchestration')
         lab_settings = lab_settings_enabled(orchestration)
         admission = task.get('constraints',{}).get('research_loop',{}).get('recommendation_admission')
-        native_settings = native_tools.validate(task.get('constraints', {}).get('native_capabilities'))
+        # The task carries the role's native settings in request form (native.request_form).
+        native_settings = native_tools.validate_request(task.get('constraints', {}).get('native_capabilities'))
         native_on = native_settings != native_tools.OFF
         response_schema(mode,research_features=features,final_review_only=final_review_only,research_policy=policy,
                         lab_settings=lab_settings, recommendation_admission=admission,
@@ -831,7 +832,11 @@ class CodexExecutor:
             packet_policy = normalize_research_policy(data['task'].get('constraints',{}).get('research_policy'))
         except (ValueError, TypeError, KeyError, IndexError) as exc:
             raise ValueError('Model packet must contain its exact research task and policy') from exc
-        if data['task'].get('constraints', {}).get('native_capabilities') != metadata.get('native_capabilities'):
+        # The packet carries the request form of the Effect's settings, and none when everything is off.
+        constraints = data['task'].get('constraints', {})
+        request_native = native_tools.request_form(settings) if native_on else None
+        if (('native_capabilities' in constraints) != native_on
+                or constraints.get('native_capabilities') != request_native):
             raise ValueError('Unsupported exact model request envelope')
         if packet_policy != normalize_research_policy(metadata.get('research_policy')):
             raise ValueError('Model packet policy differs from the admitted effect policy')

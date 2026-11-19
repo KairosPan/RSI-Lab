@@ -20,13 +20,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from rsi_lab import native, roles, transport
+from rsi_lab import input_view, native, packets, roles, transport
 from rsi_lab.session_context import read_native_snapshot
 from rsi_lab.store import digest
 from tests.v2.liveness_support import Scripted, none, open_run
 from tests.v2.native_fixtures import (CHECK_PY, CHEM, PLAIN, PROFILE, R, ROLES, SEARCH, SKILL_MD, TERMINAL,
-                                      TERMINAL_AND_SUBAGENTS, WITH_ROLES, WITH_SKILLS, account, child_rollout, here,
-                                      sub_agent_started, tool_call, turn_context, usage_row)
+                                      TERMINAL_AND_SUBAGENTS, TOOL_SERVERS, WITH_ROLES, WITH_SKILLS, WITH_TOOL_SERVERS,
+                                      account, child_rollout, here, sub_agent_started, tool_call, turn_context,
+                                      usage_row)
 from tests.v2.test_session_context import THREAD, fixture
 
 CHILD = '33333333-3333-3333-3333-333333333333'
@@ -85,6 +86,20 @@ def config_form(settings):
     return {name: False if value is None else value for name, value in settings.items()}
 
 
+def carrying(value):
+    """An ``alter`` for ``NativeExecutorTests.execute``: the packet rebuilt as the packet builder builds it, with
+    ``value`` as its task's ``constraints.native_capabilities``, and the Effect bound to the rebuilt packet."""
+    def alter(dispatching, raw):
+        request = json.loads(raw)
+        head, rendered = request['prompt'].rsplit('INPUT_DATA_JSON:\n', 1)
+        data = input_view.decode(rendered, request['input_view_mode'])
+        data['task']['constraints']['native_capabilities'] = value
+        request['prompt'] = head + 'INPUT_DATA_JSON:\n' + input_view.render(data, request['input_view_mode'])
+        raw = packets.encoded(request)
+        return {**dispatching, 'packet_sha256': digest(raw)}, raw
+    return alter
+
+
 class NativeExecutorTests(unittest.TestCase):
     def setUp(self):
         # An empty home and Codex home, and no machine skills folder: the Runtime and the executor look for skills
@@ -101,13 +116,13 @@ class NativeExecutorTests(unittest.TestCase):
 
     def execute(self, *, settings, rollout=CONFINED_TURN, child=None, stream_usage=STREAM_USAGE, resumed=False,
                 packet_settings=SAME, transport_extra=None, stream_items=(), workspace_files=(), profile=None,
-                finished=True, answer=json.dumps(RESPONSE), arrange=None):
+                finished=True, answer=json.dumps(RESPONSE), arrange=None, alter=None):
         """Prepare a Lab turn under ``packet_settings`` (``settings`` unless given) and run it through the Controller
         with the executor, which sees ``settings`` in the Effect. Returns the executor's receipt; a ``ValueError``
         it raises is raised here. ``profile(run_root, codex_home, workspace)`` replaces the confined profile.
         ``answer`` is the text of the turn's last message. A call that is not ``finished`` was killed before its
         answer and terminal event (``UNFINISHED``). ``arrange(store)`` runs once the Effect is prepared, before
-        it is dispatched."""
+        it is dispatched. ``alter(dispatching, raw)`` returns the Effect and packet the executor is handed."""
         packet_settings = settings if packet_settings is SAME else packet_settings
         config = {'native_capabilities': {'lab': config_form(packet_settings)}} if packet_settings else {}
         store, controller, runtime = open_run(self, config=config)
@@ -183,6 +198,8 @@ class NativeExecutorTests(unittest.TestCase):
                             if key != 'native_capabilities'}
                 dispatching = {**dispatching, 'metadata': {**metadata, **(
                     {'native_capabilities': settings} if settings is not None else {})}}
+            if alter is not None:
+                dispatching, raw = alter(dispatching, raw)
             try:
                 receipts.append(roles.CodexExecutor(store.root / 'calls')(dispatching, raw))
             except ValueError as exc:
@@ -239,6 +256,25 @@ class NativeExecutorTests(unittest.TestCase):
     def test_packet_and_effect_settings_must_agree(self):
         with self.assertRaisesRegex(ValueError, 'Unsupported exact model request envelope'):
             self.execute(settings=TERMINAL, packet_settings=SEARCH)
+
+    def test_the_executor_compares_the_request_form(self):
+        full = {**WITH_TOOL_SERVERS, 'tool_servers': {**TOOL_SERVERS, 'chem': here(CHEM)}}
+        # A packet carrying the Effect's full settings instead of their request form is refused.
+        with self.assertRaisesRegex(ValueError, 'Unsupported exact model request envelope'):
+            self.execute(settings=full, alter=carrying(full))
+        self.assertEqual(self.calls, [])
+        # The packet as the Runtime prepared it, with the request form, is sent with the Effect's full settings.
+        with patch.dict(os.environ, {'CHEM_API_KEY': 'invented-secret-4f1c', 'PAPERS_TOKEN': 'invented-token-7d2a'}):
+            receipt = self.execute(settings=full)
+        self.assertEqual(receipt['status'], 'succeeded', receipt['error'])
+        self.assertEqual(self.calls[0]['native'], full)
+        self.assertEqual(receipt['native_capabilities'], native.receipt_form(full))
+        # carrying rebuilds that packet byte for byte, so the refusal above is the settings', not the rebuilding's.
+        raw = self.store.read_blob(self.effect['packet_ref'])
+        self.assertEqual(carrying(native.request_form(full))(self.effect, raw)[1], raw)
+        # With everything off the packet may not name native settings at all.
+        with self.assertRaisesRegex(ValueError, 'Unsupported exact model request envelope'):
+            self.execute(settings=None, alter=carrying(None))
 
     def test_surviving_descendants_block_quiescence(self):
         self.assertFalse(self.execute(settings=TERMINAL, transport_extra={'descendants_stopped': False})['native_writer_quiesced'])

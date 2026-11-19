@@ -39,6 +39,11 @@ in name order, each skill's description and its files' SHA-256 in path order.
 Only the frozen form is accepted, so later changes to the folder never reach
 the run.
 
+The model request carries a role's settings in request form
+(``request_form``), the normal form with each tool server reduced to its
+description and ``skills`` to the list of skill names; the Effect keeps the
+normal form. Without tool servers and skills the two forms are equal.
+
 A run without the block, and a role absent from it, has everything off.
 """
 from __future__ import annotations
@@ -141,6 +146,38 @@ def validate(settings):
     skills root must be absolute, but the filesystem is not consulted.
     """
     return dict(OFF) if settings is None else _shape(settings, 'native_capabilities')
+
+
+def request_form(settings):
+    """One role's settings as its model request carries them, where the model reads them.
+
+    A checked copy of the normal form in which each tool server holds only its
+    ``description`` and ``skills`` is the list of the declared skills' names,
+    in name order: Codex lists each skill's description itself. A server's
+    command, arguments, ``env`` values, URL, headers and variable names, and the
+    skills' root and file hashes, stay with the full settings in the Effect.
+    Settings without tool servers or skills come back equal to their normal
+    form, key for key and in the same order.
+    """
+    settings = validate(settings)
+    if 'tool_servers' in settings:
+        settings['tool_servers'] = {name: {'description': server['description']}
+                                    for name, server in settings['tool_servers'].items()}
+    if 'skills' in settings:
+        settings['skills'] = sorted(declared_skills(settings))
+    return settings
+
+
+def validate_request(value):
+    """A checked copy of one request form (``request_form``); ``None`` is everything off.
+
+    The shape is the normal form's but for ``tool_servers``, whose servers
+    each hold only a ``description``, and ``skills``, a list of distinct skill
+    names, returned in name order. As in the normal form, ``view_image`` and
+    ``skills`` are accepted only with the terminal on. The full form of
+    settings with tool servers or skills is refused.
+    """
+    return dict(OFF) if value is None else _shape(value, 'native_capabilities', request=True)
 
 
 def freeze_skills(block, put=None):
@@ -263,14 +300,17 @@ def declared_skills(settings):
     return settings['skills']['frozen'] if 'skills' in settings else {}
 
 
-def instruction(settings):
+def instruction(request):
     """The paragraph that tells a role which native tools it has and what they may be used for.
 
-    Empty when everything is off. The terminal's sentence names its readable roots. When sub-agent
-    roles are declared, one sentence names each with its description and a last one says that any other
-    helper is started with agent_type default.
+    Made from the request form (``request_form``), what the role is sent. Empty when everything is off.
+    The terminal's sentence names its readable roots; with image viewing a sentence after it says where
+    images can be viewed and that a picture viewed is a lead. When sub-agent roles are declared, one
+    sentence names each with its description and a last one says that any other helper is started with
+    agent_type default. With tool servers a last sentence names each with its description, says how
+    their tools are named and that what they return is a lead. Skills are not named: Codex lists them.
     """
-    settings = validate(settings)
+    settings = validate_request(request)
     if settings == OFF:
         return ''
     tools = []
@@ -278,9 +318,14 @@ def instruction(settings):
         tools.append('web search')
     if settings['terminal'] is not None:
         tools.append('a terminal with file editing in your working directory')
+    if 'view_image' in settings:
+        tools.append('viewing image files')
     if settings['subagents'] is not None:
         tools.append('up to ' + str(settings['subagents']['max_concurrent']) + ' sub-agents at a time')
-    text =('Native tools are enabled for this session: ' + ', '.join(tools) + '. Use them to explore, compute, '
+    servers = tool_servers(settings)
+    if servers:
+        tools.append('tool servers')
+    text = ('Native tools are enabled for this session: ' + ', '.join(tools) + '. Use them to explore, compute, '
             'check and look things up. Anything learned through them is an unverified lead, not evidence. Evidence '
             'IDs cited in a command must be ones delivered in THIS request; to make something citable, request it '
             'through a registered capability. Running something yourself is not a registered capability run and '
@@ -290,11 +335,18 @@ def instruction(settings):
         text += ('The terminal has no network access and can read only your working directory'
                  + (' and these directories: ' + ', '.join(roots) if roots else '')
                  + '. Files there are scratch and may not survive; record what matters in working_memory_delta. ')
+    if 'view_image' in settings:
+        text += ('You can view image files in your working directory and in the directories the terminal can read; '
+                 'a picture you view is an unverified lead, not evidence. ')
     roles = declared_roles(settings)
     if roles:
         text += ('Sub-agent roles declared for this session, started with agent_type: '
                  + '; '.join(name + ' (' + role['description'] + ')' for name, role in roles.items())
                  + '. Start any other helper with agent_type default. ')
+    if servers:
+        text += ('Tool servers for this session, called as tools named mcp__<server>__<tool>: '
+                 + '; '.join(name + ' (' + server['description'] + ')' for name, server in servers.items())
+                 + '. What a tool server returns is an unverified lead, not evidence. ')
     return text
 
 
@@ -629,7 +681,8 @@ def _switch(where, value, default):
     return {**default, **value}
 
 
-def _shape(settings, where):
+def _shape(settings, where, *, request=False):
+    """A checked copy of ``settings`` in normal form, or with ``request`` in request form (``request_form``)."""
     if type(settings) is not dict or not set(OFF) <= set(settings) <= set(OFF) | set(OPTIONAL_KEYS):
         raise ValueError(where + ' must hold web_search, terminal and subagents, and may hold '
                          + _listing(OPTIONAL_KEYS))
@@ -660,11 +713,12 @@ def _shape(settings, where):
             raise ValueError(where + '.view_image is accepted only for a role whose terminal is on')
         shaped['view_image'] = True
     if 'tool_servers' in settings:
-        shaped['tool_servers'] = _tool_servers(settings['tool_servers'], where + '.tool_servers')
+        shaped['tool_servers'] = (_server_descriptions if request else _tool_servers)(settings['tool_servers'],
+                                                                                      where + '.tool_servers')
     if 'skills' in settings:
         if terminal is None:
             raise ValueError(where + '.skills is accepted only for a role whose terminal is on')
-        shaped['skills'] = _skills(settings['skills'], where + '.skills')
+        shaped['skills'] = (_skill_names if request else _skills)(settings['skills'], where + '.skills')
     return shaped
 
 
@@ -682,19 +736,13 @@ def _is_description(text):
 def _tool_servers(servers, where):
     """Declared tool servers in normal form: a new object in name order, each server a new object.
 
-    Refuses no server or more than ``MAX_TOOL_SERVERS``, a name that
-    ``SERVER_NAME`` does not match in full or that begins with ``codex``, a
-    server that does not hold exactly one of ``command`` and ``url``, and a
-    description ``_is_description`` refuses. ``_local_server`` and
-    ``_url_server`` check each kind's own keys, ``_timeout`` the timeout.
+    Refuses what ``_named_servers`` refuses, a server that does not hold
+    exactly one of ``command`` and ``url``, and a description
+    ``_is_description`` refuses. ``_local_server`` and ``_url_server`` check
+    each kind's own keys, ``_timeout`` the timeout.
     """
-    if type(servers) is not dict or not 1 <= len(servers) <= MAX_TOOL_SERVERS:
-        raise ValueError(where + ' must be an object of 1 to ' + str(MAX_TOOL_SERVERS) + ' servers')
     shaped = {}
-    for name, server in servers.items():
-        if type(name) is not str or not SERVER_NAME.fullmatch(name) or name.startswith('codex'):
-            raise ValueError(where + ' names must match ' + SERVER_NAME.pattern + ' and may not begin with codex: '
-                             + repr(name))
+    for name, server in _named_servers(servers, where):
         server_where = where + '.' + name
         if type(server) is not dict or ('command' in server) == ('url' in server):
             raise ValueError(server_where + ' must hold exactly one of command and url')
@@ -704,6 +752,34 @@ def _tool_servers(servers, where):
         own = _local_server(server, server_where) if 'command' in server else _url_server(server, server_where)
         shaped[name] = {'description': server['description'], **own, **_timeout(server, server_where)}
     return {name: shaped[name] for name in sorted(shaped)}
+
+
+def _named_servers(servers, where):
+    """Each ``(name, server)`` of declared tool servers, its name checked before it is given.
+
+    Refuses anything but an object of 1 to ``MAX_TOOL_SERVERS`` servers, and a
+    name that ``SERVER_NAME`` does not match in full or that begins with ``codex``.
+    """
+    if type(servers) is not dict or not 1 <= len(servers) <= MAX_TOOL_SERVERS:
+        raise ValueError(where + ' must be an object of 1 to ' + str(MAX_TOOL_SERVERS) + ' servers')
+    for name, server in servers.items():
+        if type(name) is not str or not SERVER_NAME.fullmatch(name) or name.startswith('codex'):
+            raise ValueError(where + ' names must match ' + SERVER_NAME.pattern + ' and may not begin with codex: '
+                             + repr(name))
+        yield name, server
+
+
+def _server_descriptions(servers, where):
+    """Tool servers in request form: a new object in name order, each server ``{'description': str}``.
+
+    Names are checked as ``_tool_servers`` checks them; a server that holds
+    anything but a description ``_is_description`` accepts is refused.
+    """
+    for name, server in _named_servers(servers, where):
+        if type(server) is not dict or set(server) != {'description'} or not _is_description(server['description']):
+            raise ValueError(where + '.' + name + ' must hold only description, one line of 1 to '
+                             + str(MAX_DESCRIPTION) + ' characters, not blank')
+    return {name: {'description': servers[name]['description']} for name in sorted(servers)}
 
 
 def _local_server(server, where):
@@ -891,6 +967,17 @@ def _skills(skills, where):
             'frozen': {name: {'description': frozen[name]['description'],
                               'files': {path: frozen[name]['files'][path] for path in sorted(frozen[name]['files'])}}
                        for name in sorted(frozen)}}
+
+
+def _skill_names(names, where):
+    """Skills in request form: a new list, in name order, of 1 to ``MAX_SKILLS`` distinct names ``SKILL_NAME``
+    matches in full."""
+    if (type(names) is not list or not 1 <= len(names) <= MAX_SKILLS
+            or not all(type(name) is str and SKILL_NAME.fullmatch(name) for name in names)
+            or len(set(names)) != len(names)):
+        raise ValueError(where + ' must be a list of 1 to ' + str(MAX_SKILLS) + ' distinct names matching '
+                         + SKILL_NAME.pattern)
+    return sorted(names)
 
 
 def _is_skill_description(text):

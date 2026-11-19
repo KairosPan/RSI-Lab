@@ -5,17 +5,22 @@ turn is scripted, with a synthetic rollout built from tests/v2/native_fixtures.p
 No model, network request or credential is used.
 """
 import json
+import os
 import shutil
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from rsi_lab import input_view, native, roles, transport
 from rsi_lab.packets import PacketBuilder
 from rsi_lab.session_context import read_native_snapshot
 from rsi_lab.store import digest
 from tests.v2.liveness_support import RES as RESERVATION, Scripted, none, open_run
-from tests.v2.native_fixtures import PLAIN, ROLES, SEARCH, SUBAGENTS, WITH_ROLES, tool_call
+from tests.v2.native_fixtures import (CHEM, PAPERS, PLAIN, PLOT_CHECK, ROLES, SEARCH, SUBAGENTS, TERMINAL,
+                                      TOOL_SERVERS, URL_SERVER_ONLY, VIEW_IMAGE, WITH_ROLES, WITH_SKILLS,
+                                      WITH_TOOL_SERVERS, here, tool_call)
 from tests.v2.test_literature_runtime import adapter as literature_adapter
 from tests.v2.test_session_context import THREAD, fixture
 
@@ -58,6 +63,67 @@ class InstructionTests(unittest.TestCase):
         self.assertTrue(terminal.startswith('Native tools are enabled for this session: a terminal with file editing '
                                             'in your working directory. Use them'))
         self.assertIn('can read only your working directory. Files there are scratch', terminal)
+
+    def test_the_two_prompt_additions(self):
+        text = native.instruction(native.request_form({**VIEW_IMAGE, 'tool_servers': TOOL_SERVERS}))
+        self.assertTrue(text.startswith('Native tools are enabled for this session: a terminal with file editing in your '
+                                        'working directory, viewing image files, tool servers. Use them'))
+        self.assertTrue(text.endswith(
+            'record what matters in working_memory_delta. You can view image files in your working directory and in the '
+            'directories the terminal can read; a picture you view is an unverified lead, not evidence. Tool servers for '
+            'this session, called as tools named mcp__<server>__<tool>: chem (Fingerprints and similarity for SMILES.); '
+            'papers (Full text of open-access papers.). What a tool server returns is an unverified lead, not evidence. '))
+        self.assertTrue(native.instruction(native.request_form(URL_SERVER_ONLY)).startswith(
+            'Native tools are enabled for this session: tool servers. Use them'))
+        self.assertNotIn('plot-check', native.instruction(native.request_form(WITH_SKILLS)))
+        # Sub-agents come between image viewing and tool servers in the list, and their sentence before the servers'.
+        team = native.instruction(native.request_form({**VIEW_IMAGE, 'subagents': {'max_concurrent': 3, 'roles': ROLES},
+                                                       'tool_servers': {'papers': PAPERS}}))
+        self.assertIn('viewing image files, up to 3 sub-agents at a time, tool servers. Use them', team)
+        self.assertIn('Start any other helper with agent_type default. Tool servers for this session', team)
+
+    def test_the_paragraph_takes_the_request_form(self):
+        with self.assertRaises(ValueError):
+            native.instruction(WITH_TOOL_SERVERS)
+
+
+class RequestFormTests(unittest.TestCase):
+    def test_the_request_carries_the_short_form(self):
+        self.assertEqual(native.request_form(WITH_TOOL_SERVERS), {**SEARCH, 'tool_servers': {
+            'chem': {'description': CHEM['description']}, 'papers': {'description': PAPERS['description']}}})
+        self.assertEqual(native.request_form(WITH_SKILLS), {**TERMINAL, 'skills': ['plot-check']})
+        for settings in (SEARCH, TERMINAL, PLAIN, WITH_ROLES, VIEW_IMAGE):
+            self.assertEqual(native.request_form(settings), settings)
+            self.assertEqual(native.validate_request(settings), settings)
+            # The same keys in the same order, so the request's bytes are those it had before the request form.
+            self.assertEqual(json.dumps(native.request_form(settings)), json.dumps(native.validate(settings)))
+        with self.assertRaises(ValueError):
+            native.validate_request(WITH_TOOL_SERVERS)                          # the full form is not a request form
+
+    def test_a_request_form_is_checked(self):
+        short = native.request_form({**WITH_SKILLS, 'view_image': True, 'tool_servers': TOOL_SERVERS})
+        self.assertEqual(native.validate_request(short), short)
+        self.assertEqual(native.validate_request(None), native.OFF)
+        self.assertEqual(native.validate_request({**short, 'skills': ['plot-check', 'axes']})['skills'],
+                         ['axes', 'plot-check'])
+        refused = {'the full skills': WITH_SKILLS,
+                   'a server with more than its description': {**SEARCH, 'tool_servers': {
+                       'papers': {'description': PAPERS['description'], 'url': PAPERS['url']}}},
+                   'a server without a description': {**SEARCH, 'tool_servers': {'papers': {}}},
+                   'a server named like Codex': {**SEARCH, 'tool_servers': {'codex_x': {'description': 'X.'}}},
+                   'no server': {**SEARCH, 'tool_servers': {}},
+                   'a skill named twice': {**TERMINAL, 'skills': ['plot-check', 'plot-check']},
+                   'a name that is not a skill name': {**TERMINAL, 'skills': ['Plot check']},
+                   'no skill': {**TERMINAL, 'skills': []},
+                   'skills without the terminal': {**SEARCH, 'skills': ['plot-check']},
+                   'image viewing without the terminal': {**SEARCH, 'view_image': True},
+                   'an unknown key': {**SEARCH, 'skill_names': ['plot-check']}}
+        for case, value in refused.items():
+            with self.subTest(case=case), self.assertRaises(ValueError):
+                native.validate_request(value)
+        # Nor is the request form a normal form.
+        with self.assertRaises(ValueError):
+            native.validate(native.request_form(WITH_TOOL_SERVERS))
 
 
 class NativeRequestTests(unittest.TestCase):
@@ -152,6 +218,49 @@ class NativeRequestTests(unittest.TestCase):
         self.assertEqual(task_of(request)['constraints']['native_capabilities'], WITH_ROLES)
         self.assertEqual(effect['metadata']['native_capabilities'], WITH_ROLES)
         self.assertIn(native.instruction(WITH_ROLES), request['prompt'])
+
+    def test_full_settings_go_to_the_effect_and_the_short_form_to_the_request(self):
+        # An empty home and Codex home, and no machine skills folder: the Runtime looks for skills there before it
+        # starts a run with skills, and nothing of this machine's own may be read.
+        places = Path(tempfile.mkdtemp(prefix='rsi-native-places-'))
+        self.addCleanup(shutil.rmtree, places, ignore_errors=True)
+        for folder in ('home', 'codex-home'):
+            (places / folder).mkdir()
+        homes = {'HOME': str(places / 'home'), 'CODEX_HOME': str(places / 'codex-home')}
+        for patcher in (patch.dict(os.environ, homes), patch.object(native, 'MACHINE_SKILLS', places / 'machine-skills')):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        runtime = self.runtime({'native_capabilities': {'lab': {
+            'terminal': True, 'view_image': True, 'tool_servers': {'chem': here(CHEM)},
+            'skills': WITH_SKILLS['skills']}}})
+        full = {**VIEW_IMAGE, 'tool_servers': {'chem': here(CHEM)}, 'skills': WITH_SKILLS['skills']}
+        self.assertEqual(native.validate(runtime.native['lab']), full)
+        effect = runtime.prepare_meta(self.lab_work(runtime), RESERVATION)
+        packet = self.packet(runtime, effect)
+        request = json.loads(packet)
+        self.assertEqual(effect['metadata']['native_capabilities'], full)
+        short = native.request_form(full)
+        self.assertEqual(short, {**VIEW_IMAGE, 'tool_servers': {'chem': {'description': CHEM['description']}},
+                                 'skills': ['plot-check']})
+        self.assertEqual(task_of(request)['constraints']['native_capabilities'], short)
+        self.assertIn(native.instruction(short), request['prompt'])
+        # The server's command, arguments and env values, and the skills' file hashes, are not sent to the model.
+        for kept in ('CHEM_MODE', sys.executable, 'chem_server', 'CHEM_API_KEY', '/data/research-skills',
+                     PLOT_CHECK['files']['SKILL.md'], PLOT_CHECK['files']['scripts/check.py']):
+            self.assertNotIn(kept.encode(), packet)
+            self.assertNotIn(kept, request['prompt'])
+
+    def test_requests_of_runs_without_the_new_keys_are_unchanged(self):           # Review Focus 3
+        # BASE_PLAIN_* above pin the bytes; here the Effect and the request carry the same settings.
+        for config, settings in (({'web_search': True}, SEARCH), ({'terminal': True}, TERMINAL),
+                                 ({'subagents': {'max_concurrent': 3, 'roles': ROLES}}, WITH_ROLES)):
+            with self.subTest(settings=settings):
+                runtime = self.runtime({'native_capabilities': {'lab': config}})
+                effect = runtime.prepare_meta(self.lab_work(runtime), RESERVATION)
+                request = json.loads(self.packet(runtime, effect))
+                self.assertEqual(effect['metadata']['native_capabilities'], settings)
+                self.assertEqual(task_of(request)['constraints']['native_capabilities'], settings)
+                self.assertIn(native.instruction(settings), request['prompt'])
 
     def test_the_reported_request_is_the_native_one_prepare_sends(self):
         runtime = self.runtime({'native_capabilities': {'lab': {'web_search': True}}})
