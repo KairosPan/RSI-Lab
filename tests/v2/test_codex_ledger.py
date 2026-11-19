@@ -7,6 +7,7 @@ import base64
 import hashlib
 import itertools
 import json
+import os
 from pathlib import Path
 import shutil
 import tempfile
@@ -480,14 +481,19 @@ class CodexLedgerTests(unittest.TestCase):
                                                   'bytes': 68})
         self.assertEqual((child['tool_server_calls_omitted'], child['image_view_paths']), (0, ['file:///w/c1.png']))
 
-    def settle_call(self, records, settings, **options):
-        """``settle_call`` of a fresh session call whose turn adds ``records`` and one usage row to the base rollout;
-        its folder holds an empty stream."""
+    def settle_call(self, records, settings, *, earlier=None, turn='t1', rows=True, **options):
+        """``settle_call`` of a session call whose turn adds ``records`` and, with ``rows``, one usage row of ``turn``
+        to the base rollout; its folder holds an empty stream. ``earlier``, the records of a committed turn before
+        it, makes it a resumed call whose prefix ends with them."""
         folder = self.root / 'call'
         folder.mkdir(exist_ok=True)
         (folder / 'events.jsonl').write_text('')
-        path = self.write(fixture(self.cwd) + records + usage_row(THREAD, 't1', 't1', 10, 1))
-        return codex_ledger.settle_call(folder, settings, session={'id': 'session'}, codex_home=self.home, path=path,
+        first = fixture(self.cwd) + (earlier or b'')
+        session = {'id': 'session'} if earlier is None else {
+            'id': 'session', 'provider_thread_id': THREAD,
+            'context_manifest': {'native_prefix': {'prefix_bytes': len(first)}}}
+        path = self.write(first + records + (usage_row(THREAD, turn, turn, 10, 1) if rows else b''))
+        return codex_ledger.settle_call(folder, settings, session=session, codex_home=self.home, path=path,
                                         thread_id=THREAD, stream_usage=None, run_root=self.root, finished=True,
                                         **options)
 
@@ -541,6 +547,69 @@ class CodexLedgerTests(unittest.TestCase):
         [entry] = got['receipt']['child_threads']
         self.assertEqual(entry['images_viewed']['paths'], [file_url(self.cwd / 'plot.png'), outside])
         self.assertNotIn('image_view_paths', entry)
+
+    @unittest.skipIf(os.geteuid() == 0, 'root searches a folder whatever its mode')
+    def test_a_path_that_cannot_be_looked_at_lies_outside_and_a_deleted_one_where_it_was(self):
+        elsewhere, locked = self.root / 'elsewhere', self.cwd / 'locked'
+        elsewhere.mkdir(); locked.mkdir()
+        (elsewhere / 'secret.png').write_bytes(b'')
+        (locked / 'link.png').symlink_to(elsewhere / 'secret.png')
+        locked.chmod(0o000)
+        self.addCleanup(locked.chmod, 0o700)
+        # Resolved without looking into the folder, the link would seem to lie in the workspace.
+        got = self.settle_call(viewed_at(file_url(locked / 'link.png')), VIEW_IMAGE, workspace=self.cwd)
+        self.assertEqual(got['images_error'], OUTSIDE + '1 of 1')
+        # A plot deleted after it was viewed, with its folder, still lies where it was.
+        got = self.settle_call(viewed_at(file_url(self.cwd / 'plots' / 'gone.png')), VIEW_IMAGE, workspace=self.cwd)
+        self.assertIsNone(got['images_error'])
+
+    def test_a_sub_agent_addressed_again_has_its_images_recorded_and_checked(self):
+        settings = {**VIEW_IMAGE, 'subagents': {'max_concurrent': 3}}
+        outside = str(self.root / 'elsewhere' / 'secret.png')
+        # Started in the session's earlier turn t1, addressed again in this call's turn t2. What it viewed in t1 was
+        # checked with that call.
+        self.write_child(child_rollout(CHILD, THREAD, [('c1', 't1', 5, 1), ('c2', 't2', 7, 3)])
+                         + turn_context('c1') + viewed_image('exec-v1', str(self.root / 'old.png'), PNG, turn='c1',
+                                                             thread=CHILD)
+                         + turn_context('c2') + viewed_image('exec-v2', outside, PNG, turn='c2', thread=CHILD))
+        got = self.settle_call(sub_agent_activity(CHILD, '/root/a', 'interacted'), settings, workspace=self.cwd,
+                               earlier=sub_agent_started(CHILD, '/root/a') + usage_row(THREAD, 't1', 't1', 10, 1),
+                               turn='t2')
+        [entry] = got['receipt']['child_threads']
+        self.assertFalse(entry['started_in_call'])
+        self.assertEqual(entry['images_viewed'], {'paths': ['file://' + outside], 'paths_omitted': 0, 'count': 1,
+                                                  'bytes': 68})
+        self.assertEqual(got['images_error'], OUTSIDE + '1 of 1')
+
+    def test_a_sub_agent_that_was_not_read_makes_a_viewing_call_invalid(self):
+        settings = {**VIEW_IMAGE, 'subagents': {'max_concurrent': 3}}
+        without = {**TERMINAL, 'subagents': {'max_concurrent': 3}}
+        unchecked = "Codex's sub-agents could not be checked for images outside the folders this role may read: "
+        one = sub_agent_started(CHILD, '/root/a')
+        outside = viewed_at(file_url(self.root / 'elsewhere' / 'secret.png'))
+        # Each case: the turn's records, whether it added usage rows, whether CHILD's rollout exists (EARLIER_CHILD
+        # never has one), and how many of the sub-agents named were not read.
+        cases = {'its rollout cannot be read': (one, True, False, '1 of 1'),
+                 'the turn added no usage rows, so none was looked for': (one, False, True, '1 of 1'),
+                 'one of two cannot be read': (one + sub_agent_started(EARLIER_CHILD, '/root/b'), True, True,
+                                               '1 of 2')}
+        for case, (records, rows, readable, counts) in cases.items():
+            with self.subTest(case=case):
+                self.reset_home()
+                if readable:
+                    self.write_child()
+                got = self.settle_call(records, settings, rows=rows, workspace=self.cwd)
+                self.assertEqual(got['images_error'], unchecked + counts)
+                # After the images seen outside, when there are some.
+                got = self.settle_call(records + outside, settings, rows=rows, workspace=self.cwd)
+                self.assertEqual(got['images_error'], OUTSIDE + '1 of 1; ' + unchecked + counts)
+                # The same call of a role without image viewing gets no images_error.
+                self.assertIsNone(self.settle_call(records + outside, without, rows=rows,
+                                                   workspace=self.cwd)['images_error'])
+        # Every sub-agent the turn names was read: nothing is reported.
+        self.reset_home(); self.write_child()
+        self.assertIsNone(self.settle_call(sub_agent_started(CHILD, '/root/a'), settings,
+                                           workspace=self.cwd)['images_error'])
 
     def test_a_role_without_image_viewing_gets_no_images_error(self):
         outside = viewed_at(file_url(self.root / 'elsewhere' / 'secret.png'))

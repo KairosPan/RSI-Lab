@@ -44,6 +44,8 @@ IMAGE_RECORDS = ('images_viewed',)
 # lie in. No receipt records it.
 IMAGE_PATHS = 'image_view_paths'
 IMAGES_OUTSIDE = 'Codex showed images outside the folders this role may read: {outside} of {viewed}'
+SUB_AGENTS_UNCHECKED = ("Codex's sub-agents could not be checked for images outside the folders this role may read: "
+                        '{unchecked} of {named}')
 
 
 class LedgerUnavailable(ValueError):
@@ -462,9 +464,15 @@ def _profile_in_force(profile, *, run_root, codex_home):
 
 
 def _resolved(path):
-    """``path`` resolved, symbolic links followed, else ``None`` when it cannot be."""
+    """``path`` resolved now, symbolic links followed, else ``None``.
+
+    A part that does not exist is kept as written, so a plot deleted after it was viewed still lies where it was. Any
+    other failure to look at a part gives ``None``: a folder that cannot be searched, which would otherwise hide a
+    link inside it, a loop of links, a part that is not a folder. Python releases without ``os.path.ALLOW_MISSING``
+    resolve strictly, so there a part that does not exist gives ``None`` too.
+    """
     try:
-        return Path(path).resolve()
+        return Path(os.path.realpath(path, strict=getattr(os.path, 'ALLOW_MISSING', True)))
     except (OSError, ValueError, RuntimeError):
         return None
 
@@ -492,8 +500,11 @@ def _image_file(path):
 def _images_outside(paths, *, workspace, roots):
     """How many of the viewed images at ``paths`` lie outside the ``workspace`` and the readable ``roots``.
 
-    Both sides are compared resolved, so a symbolic link in the workspace to a file elsewhere lies outside. Without
-    a ``workspace`` every image lies outside; a path that names no local file (``_image_file``) does too.
+    Both sides are compared resolved (``_resolved``) as they are when the call is settled, not when the image was
+    viewed, so a symbolic link in the workspace to a file elsewhere lies outside. Paths are compared as spelled after
+    resolution: one written in another letter case than the workspace lies outside, even on a filesystem that ignores
+    case. Without a ``workspace`` every image lies outside; a path that names no local file (``_image_file``) does too.
+    Codex's permission profile is what keeps a role from reading elsewhere; this only reports what it sees afterwards.
     """
     places = [] if workspace is None else [place for place in map(_resolved, (workspace, *roots)) if place is not None]
     files = [_image_file(path) for path in paths]
@@ -517,8 +528,12 @@ def settle_call(folder, settings, *, session, codex_home, path, thread_id, strea
     did not run under the managed offline profile that denies ``run_root`` and ``codex_home``; else ``None``.
     ``images_error`` is ``None`` unless image viewing is on. With it on, every image the call viewed, the turn's and
     each readable sub-agent's (every ``ImageView`` path counted for ``images_viewed``, beyond those listed too), must
-    lie in the session's ``workspace`` or one of the terminal's readable roots, compared resolved
-    (``_images_outside``); when any does not, it is ``IMAGES_OUTSIDE`` with how many of how many, never a path.
+    lie in the session's ``workspace`` or one of the terminal's readable roots, compared resolved as they are now
+    (``_images_outside``); when any does not, it is ``IMAGES_OUTSIDE`` with how many of how many, never a path. And
+    every sub-agent the turn names must have been read: one whose rollout could not be read, or that was never looked
+    for because the turn added no usage rows, adds ``SUB_AGENTS_UNCHECKED`` with how many of the named were not read,
+    after ``'; '`` when both apply. A turn whose own rollout cannot be read names none; with the terminal on, which
+    image viewing needs, its ``profile_error`` already makes the call invalid.
     ``receipt`` holds ``token_source``, ``token_reason`` (only when unknown), ``stream_usage`` and ``ledger`` for every
     call. ``ledger`` adds up the usage rows read, the turn's and its readable children's (``requests`` and the
     counters, a lower bound when the usage is unknown), and names the turns whose rows those are (``turn_ids``, the
@@ -562,7 +577,12 @@ def settle_call(folder, settings, *, session, codex_home, path, thread_id, strea
         paths = [*turn.get(IMAGE_PATHS, ()), *(path for child in spent['children'] for path in child[IMAGE_PATHS])]
         roots = (settings['terminal'] or {}).get('readable_roots', ())       # Image viewing needs the terminal.
         outside = _images_outside(paths, workspace=workspace, roots=roots)
-        images_error = IMAGES_OUTSIDE.format(outside=outside, viewed=len(paths)) if outside else None
+        # A sub-agent the turn names whose rollout was not read, or was never looked for, viewed what nobody checked.
+        named, read = turn.get('children', []), [child['thread_id'] for child in spent['children']]
+        unchecked = sum(child['thread_id'] not in read for child in named)
+        images_error = '; '.join(
+            ([IMAGES_OUTSIDE.format(outside=outside, viewed=len(paths))] if outside else [])
+            + ([SUB_AGENTS_UNCHECKED.format(unchecked=unchecked, named=len(named))] if unchecked else [])) or None
     return {'tokens': spent['tokens'], 'usage_known': spent['source'] != 'unknown',
             'profile_error': None if confined else 'Permission profile was not in force',
             'images_error': images_error, 'receipt': receipt}

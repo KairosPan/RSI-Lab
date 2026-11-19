@@ -744,6 +744,7 @@ class NativeExecutorTests(unittest.TestCase):
                 receipt = self.execute(**arguments_of_call)
                 self.assertEqual((receipt['status'], receipt['error']), ('succeeded', None))
                 self.assertTrue(receipt['protocol_valid'])
+                self.assertNotIn('invented-secret-4f1c', json.dumps(receipt, ensure_ascii=False))
                 activity = receipt['native_activity']
                 self.assertEqual({name for name in records if name in activity}, set(recorded))
                 if 'tool_server_calls' in recorded:
@@ -781,6 +782,19 @@ class NativeExecutorTests(unittest.TestCase):
         receipt = self.execute(settings=VIEW_IMAGE, rollout=viewing(lambda cwd: cwd / 'plot.png'))
         self.assertTrue(receipt['protocol_valid'])
         self.assertIsNone(receipt['error'])
+
+    def test_a_sub_agent_that_was_not_read_makes_a_viewing_call_invalid(self):
+        # The turn started CHILD, whose rollout is not there: what it viewed cannot be checked.
+        receipt = self.execute(settings={**TERMINAL_AND_SUBAGENTS, 'view_image': True}, rollout=PARENT_WITH_CHILD)
+        self.assertFalse(receipt['protocol_valid'])
+        self.assertEqual(receipt['error'], "Codex's sub-agents could not be checked for images outside the folders "
+                                           'this role may read: 1 of 1')
+        self.assertEqual((receipt['token_source'], receipt['child_threads']), ('unknown', []))
+        # Without image viewing the same call is valid; only its usage is unknown.
+        receipt = self.execute(settings=TERMINAL_AND_SUBAGENTS, rollout=PARENT_WITH_CHILD)
+        self.assertTrue(receipt['protocol_valid'])
+        self.assertIsNone(receipt['error'])
+        self.assertEqual(receipt['token_source'], 'unknown')
 
     def dispatch_refused_roles(self, *, arrange=None, alter=None):
         """Dispatch a Lab call whose Effect declares ``ROLES`` through the Controller, the executor and the real
