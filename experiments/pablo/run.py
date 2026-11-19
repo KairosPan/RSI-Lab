@@ -25,6 +25,7 @@ sys.path.insert(0, str(REPO))
 
 import host_support as legacy_host
 import continuation
+from rsi_lab import native
 from rsi_lab.controller import Controller
 from rsi_lab.plans import register_task_plan
 from rsi_lab.runtime import Runtime
@@ -504,6 +505,9 @@ def prepare(args):
             authorized_source_contracts=source_contracts(sources), frozen_sources=sources)
         if team_settings:
             config.update(copy.deepcopy(team_settings), research_policy=research_policy(team=True))
+            # Each skills folder is read again and its files go into the run store; one that changed since
+            # native_block froze it is refused.
+            config['native_capabilities'] = native.freeze_skills(config['native_capabilities'], store.put_blob)
         Controller(store).initialize(args.run_id, budgets=budgets, max_external=1, config=config)
         plan = legacy_host.task_plan(root, args.run_id, initial_ref, args.new_evaluations, goal)
         plan['protocol']['parameters'].update(initial_count=count, global_observation_ordinal_offset=count,

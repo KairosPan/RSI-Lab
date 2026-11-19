@@ -46,11 +46,15 @@ GOAL = (
     'must dispatch Challenge and run its proposal as a challenge batch. '
     'Start Challenge with fork_turns none and pass it the eligible anchors, candidate constraints and observed '
     'results it needs.')
-# How the not-blind statement names each role whose web search is on, in the kernel's role order.
+# How the not-blind statement names each role whose web search is on or that declares a tool server, in the
+# kernel's role order.
 ROLE_NAMES = {'lab': 'the Lab', 'meta': 'Meta', 'literature': 'Literature'}
 NOT_BLIND_TEMPLATE = ('Web search is on for {}: the hidden objective is protected by instruction only, '
                       'and this run is not a blind run.')
 NOT_BLIND = NOT_BLIND_TEMPLATE.format(ROLE_NAMES['lab'])
+# A tool server can reach anything, whether Codex starts it from a command or reaches it by URL.
+TOOL_SERVERS_TEMPLATE = ('Tool servers are on for {}: the hidden objective is protected by instruction only, '
+                         'and this run is not a blind run.')
 # Bounds of the search under a readable root.
 MAX_DEPTH = 6
 MAX_FOLDERS = 20000
@@ -69,8 +73,13 @@ def native_block(block, *, protected):
     any role's ``subagents.roles`` names ``local`` or ``challenge`` (the host
     declares those for the Lab with its own text, and the names are reserved
     for every role), anything the kernel would refuse, and any role's readable
-    root for which ``exposes_objective`` gives a reason. The file's other
-    settings and roles are kept; the given block is not changed.
+    root or skills folder for which ``exposes_objective`` gives a reason. The
+    file's other settings and roles are kept; the given block is not changed.
+
+    A role's skills folder is read and frozen as the kernel freezes it
+    (``native.freeze_skills``), without storing anything: the run's store does
+    not exist yet. The host stores the files when it creates the store, and
+    refuses a folder that changed since.
     """
     if type(block) is not dict:
         raise ValueError('The native capabilities file must hold a JSON object')
@@ -93,7 +102,16 @@ def native_block(block, *, protected):
     # The default is written out so that the frozen run does not follow a later change of the kernel's default.
     current = {'max_concurrent': native.DEFAULT_MAX_CONCURRENT} if subagents is True else copy.deepcopy(subagents)
     result['lab']['subagents'] = {**current, 'roles': {**copy.deepcopy(own), **copy.deepcopy(ROLES)}}
-    _check_roots(native.capabilities({'native_capabilities': result}), protected)
+    result = native.freeze_skills(result)
+    by_role = native.capabilities({'native_capabilities': result})
+    _check_roots(by_role, protected)
+    # Every call gets the skills written into its workspace, where the terminal reads them. The folder is checked
+    # here alone: the run holds the copy frozen now, which later changes to the folder do not reach.
+    for role, entry in by_role.items():
+        if 'skills' in entry:
+            reason = exposes_objective(entry['skills']['root'], protected)
+            if reason is not None:
+                raise ValueError('native_capabilities.' + role + '.skills.root: ' + reason)
     return result
 
 
@@ -167,17 +185,23 @@ def exposes_objective(root, protected):
 
 
 def not_blind(block):
-    """The plain statement a run with web search on for any role carries, or None.
+    """The plain statement a run with web search on or a tool server declared for any role carries, or None.
 
-    The block is read as the kernel reads it, so the statement cannot disagree
-    with what the kernel switches on. The roles are named in the order lab,
-    meta, literature; for the Lab alone the sentence is ``NOT_BLIND``.
+    The web-search sentence (``NOT_BLIND_TEMPLATE``) names the roles whose web
+    search is on; the tool-server sentence (``TOOL_SERVERS_TEMPLATE``) those
+    that declare a tool server, local or by URL. With both, the web-search
+    sentence comes first and one space joins them. The block is read as the
+    kernel reads it, so the statement cannot disagree with what the kernel
+    switches on; a skills folder in it must already be frozen (``native_block``
+    returns it so). The roles are named in the order lab, meta, literature; for
+    web search on the Lab alone the sentence is ``NOT_BLIND``.
     """
     settings = native.capabilities({'native_capabilities': block})
-    names = [ROLE_NAMES[role] for role in native.ROLES if settings[role]['web_search']]
-    if not names:
-        return None
-    return NOT_BLIND_TEMPLATE.format(names[0] if len(names) == 1 else ', '.join(names[:-1]) + ' and ' + names[-1])
+    searching = [role for role in native.ROLES if settings[role]['web_search']]
+    serving = [role for role in native.ROLES if native.tool_servers(settings[role])]
+    sentences = [template.format(_role_names(roles))
+                 for template, roles in ((NOT_BLIND_TEMPLATE, searching), (TOOL_SERVERS_TEMPLATE, serving)) if roles]
+    return ' '.join(sentences) or None
 
 
 def preparation(block, *, protected, backstop=harness.LED_DEFAULT_CONFIG['challenge_backstop_batches'],
@@ -216,6 +240,13 @@ def session_native(by_role, role):
     """
     settings = native.validate(by_role[role])
     return None if settings == native.OFF else settings
+
+
+def _role_names(roles):
+    """The roles as a not-blind sentence names them, such as ``the Lab``, ``the Lab and Meta`` or
+    ``the Lab, Meta and Literature``."""
+    names = [ROLE_NAMES[role] for role in roles]
+    return names[0] if len(names) == 1 else ', '.join(names[:-1]) + ' and ' + names[-1]
 
 
 def _check_roots(by_role, protected):
