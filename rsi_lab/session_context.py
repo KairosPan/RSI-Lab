@@ -33,6 +33,9 @@ RESPONSE_KINDS = {'message', 'reasoning'}
 OUTER_KINDS = {'session_meta', 'turn_context', 'response_item', 'event_msg',
                'world_state', 'token_usage_record'}
 TOOL_OUTPUT_KINDS = {'custom_tool_call_output', 'function_call_output'}
+# From Codex 0.170.0 the tool definitions of a thread are written into its rollout as a developer item,
+# again whenever they change. It is counted in the history bytes like any record and grants nothing.
+TOOL_DEFINITION_KIND = 'additional_tools'
 
 
 class ContextUnavailable(ValueError):
@@ -209,6 +212,9 @@ def snapshot_from_bytes(raw, *, expected_thread_id, expected_cwd, expected_prefi
                 # Images reach a model only as Controller attachments, never inside a message between agents.
                 elif item_kind == 'agent_message' and not _imageless(payload.get('content')):
                     unsupported.append({'record': number, 'kind': 'unsupported_agent_message_content'})
+            elif item_kind == TOOL_DEFINITION_KIND:
+                if payload.get('role') != 'developer' or not isinstance(payload.get('tools'), list):
+                    unsupported.append({'record': number, 'kind': 'unsupported_tool_definitions'})
             elif item_kind not in RESPONSE_KINDS:
                 unsupported.append({'record': number, 'kind': item_kind})
             elif item_kind == 'message':

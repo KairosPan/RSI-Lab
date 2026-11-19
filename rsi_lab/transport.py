@@ -29,8 +29,13 @@ import base64
 DISABLED_FEATURES = (
     "shell_tool", "unified_exec", "apps", "plugins", "browser_use", "computer_use",
     "multi_agent", "multi_agent_v2", "image_generation", "skill_search", "hooks",
-    "view_image", "goals", "sleep_tool",
+    "view_image", "goals", "sleep_tool", "skill_mcp_dependency_install",
 )
+# The Codex CLI versions this kernel's command, stream audit and rollout reader were checked against with real
+# calls. Codex changes what its flags do between versions (0.170.0 stopped honouring the multi_agent features
+# as an off switch), so a call is not sent on any other version. RSI_LAB_ALLOW_CODEX_VERSION names one more
+# version its owner accepts unchecked.
+SUPPORTED_CODEX_VERSIONS = ("0.170.0",)
 ARTIFACTS = frozenset({"invocation.json", "prompt.txt", "schema.json", "events.jsonl",
                        "stderr.log", "response.json", "raw_response.txt", "usage.json", "transport_result.json", "journal.jsonl",
                        "images", "images.json"})
@@ -417,6 +422,40 @@ def stream_activity(folder):
             'omitted': omitted}
 
 
+def codex_version():
+    """The version the installed Codex CLI reports, such as ``'0.170.0'``; ``None`` when it cannot be asked.
+
+    Asked afresh each time, since the CLI is replaced by its own updates. A CLI that does not answer within
+    30 seconds is killed and counts as one that cannot be asked.
+    """
+    try:
+        process = _POPEN(['codex', '--version'], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                         stderr=subprocess.DEVNULL, text=True)
+    except OSError:
+        return None
+    try:
+        out, _ = process.communicate(timeout=30)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.communicate()
+        return None
+    match = re.fullmatch(r'codex-cli (\d+\.\d+\.\d+\S*)', (out or '').strip())
+    return match.group(1) if process.returncode == 0 and match else None
+
+
+def check_codex_version(version):
+    """Refuse, with ``ValueError``, a Codex CLI version the kernel was not checked against.
+
+    ``None`` (no CLI to ask) passes: starting Codex then fails on its own.
+    """
+    allowed = set(SUPPORTED_CODEX_VERSIONS) | {os.environ.get('RSI_LAB_ALLOW_CODEX_VERSION')}
+    if version is not None and version not in allowed:
+        raise ValueError('Codex CLI ' + version + ' is not a version this kernel was checked against ('
+                         + ', '.join(SUPPORTED_CODEX_VERSIONS) + '). Its flags may mean something else there. '
+                         'Install a checked version, or set RSI_LAB_ALLOW_CODEX_VERSION=' + version
+                         + ' to accept it unchecked.')
+
+
 def _session_options(session):
     if session is None:
         return None
@@ -507,6 +546,9 @@ def _command(folder, model, effort, cwd, session, image_paths=(), native=None, r
                     '-c', f'model_reasoning_effort={json.dumps(effort)}',
                     '-c', ('web_search="live"' if settings['web_search'] else 'web_search="disabled"'),
                     '-c', 'suppress_unstable_features_warning=true'])
+    if settings['subagents'] is None:
+        # From Codex 0.170.0 this, not the multi_agent features, is what takes the sub-agent tools away.
+        command.extend(['-c', 'agents.enabled=false'])
     for value in parts['config']:
         command.extend(['-c', value])
     if session is None:
@@ -696,6 +738,8 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
     if declared_roles and roles_dir is None:
         raise ValueError('Declared sub-agent roles need roles_dir, the folder of their role files')
     binding = _session_options(session)
+    version = codex_version()
+    check_codex_version(version)
     if declared_roles:
         write_role_files(roles_dir, declared_roles)
         roles_dir = str(Path(roles_dir).resolve())
@@ -739,7 +783,7 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
 
     invocation = {'backend': 'codex', 'model': model, 'effort': effort,
                   'timeout_seconds': timeout, 'started_at_unix': time.time(), 'dispatched': False,
-                  'session': binding}
+                  'session': binding, 'codex_version': version}
     if native_on:
         invocation['native'] = settings
     if images:
@@ -907,7 +951,7 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
                   'workspace': binding['workspace'] if binding else None,
                   'journal': journal_snapshot, 'dispatched': invocation['dispatched'],
                   'native_session_ref': native_session_ref, 'native_session_sha256': native_session_sha256,
-                  'native_session_error': native_session_error}
+                  'native_session_error': native_session_error, 'codex_version': version}
         if images and invocation['dispatched']:
             result.update(sent_image_manifest=image_manifest, sent_image_manifest_sha256=image_digest)
         if native_on:
