@@ -1,4 +1,4 @@
-"""Per-role switches for Codex's own tools: web search, a confined terminal and sub-agents.
+"""Per-role switches for Codex's own tools: web search, a confined terminal, sub-agents, image viewing and tool servers.
 
 A run config may carry ``native_capabilities`` keyed by role. Each role's entry
 is read into one settings object in normal form::
@@ -6,11 +6,27 @@ is read into one settings object in normal form::
     {'web_search': bool,
      'terminal': None | {'readable_roots': [absolute directory, ...]},
      'subagents': None | {'max_concurrent': 1..8,
-                          'roles': {name: {'description': str, 'instructions': str}, ...}}}
+                          'roles': {name: {'description': str, 'instructions': str}, ...}},
+     'view_image': True,
+     'tool_servers': {name: {'description': str, 'command': absolute path, 'args': [str, ...],
+                             'env': {variable: str, ...}, 'env_from': [variable, ...],
+                             'tool_timeout_seconds': 1..3600}
+                          | {'description': str, 'url': str, 'headers': {header: str, ...},
+                             'token_from': variable, 'tool_timeout_seconds': 1..3600}, ...}}
 
 ``roles`` holds the named sub-agent roles declared to Codex for this role's
 sessions, in name order. It is present only when at least one is declared, so
 settings without them keep the form they had before sub-agent roles existed.
+
+``view_image`` and ``tool_servers`` are optional in the same way. ``view_image``
+is present only when true, which needs the terminal; ``tool_servers`` only when
+at least one server is declared. Servers are in name order, ``env`` and
+``headers`` in key order, and ``args`` and ``env_from`` keep the given order.
+Codex starts a local server from ``command``, which is stored as given and never
+resolved, and reaches a URL server at ``url``. ``token_from`` and
+``tool_timeout_seconds`` are present only when given. ``env_from`` and
+``token_from`` name environment variables whose values are read at call time;
+the settings hold only the names.
 
 A run without the block, and a role absent from it, has everything off.
 """
@@ -21,6 +37,7 @@ import json
 import os
 from pathlib import Path
 import re
+import urllib.parse
 
 
 ROLES = ('lab', 'meta', 'literature')
@@ -37,6 +54,19 @@ AGENTS_TABLE_KEYS = ('max_depth', 'default_subagent_model', 'default_subagent_re
 ROLE_NAME = re.compile('[a-z][a-z0-9_-]{0,31}')
 MAX_DESCRIPTION = 300
 MAX_INSTRUCTIONS = 8000
+# Keys a role's settings may hold beside those of OFF, each only while it is switched on.
+OPTIONAL_KEYS = ('view_image', 'tool_servers', 'skills')
+# Tool servers: at most MAX_TOOL_SERVERS per role, none named like Codex's own (beginning with codex).
+SERVER_NAME = re.compile('[a-z][a-z0-9_]{0,31}')
+MAX_TOOL_SERVERS = 8
+MAX_TOOL_TIMEOUT = 3600
+LOCAL_SERVER_KEYS = ('description', 'command', 'args', 'env', 'env_from', 'tool_timeout_seconds')
+URL_SERVER_KEYS = ('description', 'url', 'headers', 'token_from', 'tool_timeout_seconds')
+ENV_NAME = re.compile('[A-Za-z_][A-Za-z0-9_]{0,127}')
+# The hosts a URL server may be reached at over plain http, spelled as urlsplit gives a hostname.
+LOOPBACK_HOSTS = ('localhost', '127.0.0.1', '::1')
+HEADER_NAME = re.compile("[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}")
+MAX_HEADER_VALUE = 1024
 # Shared temporary folders the terminal's commands may neither read nor write;
 # each is denied when it exists as a directory on this machine.
 SHARED_TEMP_FOLDERS = ('/tmp', '/private/tmp', '/var/tmp', '/private/var/tmp')
@@ -53,8 +83,11 @@ def capabilities(config):
     """One normal-form settings object per role from the run config.
 
     ``terminal`` and ``subagents`` may be ``false``, ``true`` or an object; a
-    missing key is off. Readable roots must be absolute existing directories
-    and are stored resolved, each once. Anything else raises ``ValueError``.
+    missing key is off, as are ``view_image`` false and an empty
+    ``tool_servers`` object. Readable roots must be absolute existing
+    directories and are stored resolved, each once. A local tool server's
+    command must be an existing executable file and is stored as given.
+    Anything else raises ``ValueError``.
     """
     block = config.get('native_capabilities', {})
     if type(block) is not dict or set(block) - set(ROLES):
@@ -65,8 +98,8 @@ def capabilities(config):
 def validate(settings):
     """A checked copy of one normal-form settings object; ``None`` is everything off.
 
-    Only the shape is checked: readable roots must be absolute, but the
-    filesystem is not consulted.
+    Only the shape is checked: readable roots and tool server commands must be
+    absolute, but the filesystem is not consulted.
     """
     return dict(OFF) if settings is None else _shape(settings, 'native_capabilities')
 
@@ -79,6 +112,35 @@ def any_on(settings):
 def declared_roles(settings):
     """The declared sub-agent roles of normal-form settings by name; empty when none or sub-agents are off."""
     return (settings['subagents'] or {}).get('roles', {})
+
+
+def tool_servers(settings):
+    """The tool servers of normal-form settings by name; empty when none are declared."""
+    return settings.get('tool_servers', {})
+
+
+def local_servers(settings):
+    """The names of the tool servers of normal-form settings that Codex starts from a command, in name order."""
+    return [name for name, server in tool_servers(settings).items() if 'command' in server]
+
+
+def secret_variables(settings):
+    """The environment variables named by the tool servers' ``env_from`` and ``token_from``, sorted, each once.
+
+    The settings hold only these names; their values are read from the
+    environment when a call is made.
+    """
+    names = set()
+    for server in tool_servers(settings).values():
+        names.update(server.get('env_from', ()))
+        if 'token_from' in server:
+            names.add(server['token_from'])
+    return sorted(names)
+
+
+def unset_variables(settings, environ):
+    """Those of ``secret_variables(settings)`` that are unset or empty in ``environ``, sorted."""
+    return [name for name in secret_variables(settings) if not environ.get(name)]
 
 
 def instruction(settings):
@@ -225,8 +287,9 @@ def receipt_form(settings):
 
     A checked copy in which each declared sub-agent role holds its
     ``description`` and ``instructions_sha256``, the SHA-256 of its UTF-8
-    instructions, instead of the instructions. Settings without roles come back
-    equal to their normal form.
+    instructions, instead of the instructions, and each local tool server holds
+    ``env_names``, the names of its ``env`` in key order, instead of ``env``.
+    Settings without roles or local servers come back equal to their normal form.
     """
     settings = validate(settings)
     roles = declared_roles(settings)
@@ -235,6 +298,10 @@ def receipt_form(settings):
             name: {'description': role['description'],
                    'instructions_sha256': hashlib.sha256(role['instructions'].encode('utf-8')).hexdigest()}
             for name, role in roles.items()}
+    # validate gave each server a new object, so the settings given are not changed.
+    for name in local_servers(settings):
+        server = settings['tool_servers'][name]
+        server['env_names'] = list(server.pop('env'))
     return settings
 
 
@@ -305,13 +372,22 @@ def _inside(path, folder):
 
 def _role(role, entry):
     where = 'native_capabilities.' + role
-    if type(entry) is not dict or set(entry) - set(OFF):
-        raise ValueError(where + ' may only set web_search, terminal and subagents')
+    if type(entry) is not dict or set(entry) - set(OFF) - set(OPTIONAL_KEYS):
+        raise ValueError(where + ' may only set ' + _listing(tuple(OFF) + OPTIONAL_KEYS))
+    if type(entry.get('view_image', False)) is not bool:
+        raise ValueError(where + '.view_image must be true or false')
+    # An optional key that is off is left out, so the settings keep the form they had before it existed.
+    optional = {key: entry[key] for key in OPTIONAL_KEYS if key in entry}
+    if optional.get('view_image') is False:
+        del optional['view_image']
+    if optional.get('tool_servers') == {}:
+        del optional['tool_servers']
     settings = _shape({
         'web_search': entry.get('web_search', False),
         'terminal': _switch(where + '.terminal', entry.get('terminal', False), {'readable_roots': []}),
         'subagents': _switch(where + '.subagents', entry.get('subagents', False),
-                             {'max_concurrent': DEFAULT_MAX_CONCURRENT})}, where)
+                             {'max_concurrent': DEFAULT_MAX_CONCURRENT}),
+        **optional}, where)
     if settings['terminal'] is not None:
         roots = settings['terminal']['readable_roots']
         for root in roots:
@@ -319,6 +395,12 @@ def _role(role, entry):
                 raise ValueError(where + '.terminal.readable_roots entries must be existing directories: ' + root)
         # Resolved spellings of one directory collapse to its first place in the list.
         settings['terminal']['readable_roots'] = list(dict.fromkeys(str(Path(root).resolve()) for root in roots))
+    # A command is checked as given and stored so: a virtual environment's interpreter is a symlink that must stay one.
+    for name in local_servers(settings):
+        command = settings['tool_servers'][name]['command']
+        if not (os.path.isfile(command) and os.access(command, os.X_OK)):
+            raise ValueError(where + '.tool_servers.' + name + '.command must be an existing executable file: '
+                             + command)
     return settings
 
 
@@ -334,8 +416,9 @@ def _switch(where, value, default):
 
 
 def _shape(settings, where):
-    if type(settings) is not dict or set(settings) != set(OFF):
-        raise ValueError(where + ' must hold exactly web_search, terminal and subagents')
+    if type(settings) is not dict or not set(OFF) <= set(settings) <= set(OFF) | set(OPTIONAL_KEYS):
+        raise ValueError(where + ' must hold web_search, terminal and subagents, and may hold '
+                         + _listing(OPTIONAL_KEYS))
     web_search, terminal, subagents = settings['web_search'], settings['terminal'], settings['subagents']
     if type(web_search) is not bool:
         raise ValueError(where + '.web_search must be true or false')
@@ -354,7 +437,153 @@ def _shape(settings, where):
                              + str(MAX_CONCURRENT) + ', and roles')
         roles = _roles(subagents.get('roles', {}), where + '.subagents.roles')
         subagents = {'max_concurrent': subagents['max_concurrent'], **({'roles': roles} if roles else {})}
-    return {'web_search': web_search, 'terminal': terminal, 'subagents': subagents}
+    shaped = {'web_search': web_search, 'terminal': terminal, 'subagents': subagents}
+    # Each optional key is held only in its normal form, which is never off.
+    if 'view_image' in settings:
+        if settings['view_image'] is not True:
+            raise ValueError(where + '.view_image may only be true when present')
+        if terminal is None:
+            raise ValueError(where + '.view_image is accepted only for a role whose terminal is on')
+        shaped['view_image'] = True
+    if 'tool_servers' in settings:
+        shaped['tool_servers'] = _tool_servers(settings['tool_servers'], where + '.tool_servers')
+    if 'skills' in settings:
+        raise ValueError(where + '.skills is not supported yet')
+    return shaped
+
+
+def _listing(names):
+    """``names`` as an English list: 'a, b and c'."""
+    return ', '.join(names[:-1]) + ' and ' + names[-1]
+
+
+def _is_description(text):
+    """Whether ``text`` is a description: one line of 1 to ``MAX_DESCRIPTION`` characters, not blank."""
+    return (type(text) is str and len(text) <= MAX_DESCRIPTION and bool(text.strip())
+            and '\n' not in text and '\r' not in text)
+
+
+def _tool_servers(servers, where):
+    """Declared tool servers in normal form: a new object in name order, each server a new object.
+
+    Refuses no server or more than ``MAX_TOOL_SERVERS``, a name that
+    ``SERVER_NAME`` does not match in full or that begins with ``codex``, a
+    server that does not hold exactly one of ``command`` and ``url``, and a
+    description ``_is_description`` refuses. ``_local_server`` and
+    ``_url_server`` check each kind's own keys, ``_timeout`` the timeout.
+    """
+    if type(servers) is not dict or not 1 <= len(servers) <= MAX_TOOL_SERVERS:
+        raise ValueError(where + ' must be an object of 1 to ' + str(MAX_TOOL_SERVERS) + ' servers')
+    shaped = {}
+    for name, server in servers.items():
+        if type(name) is not str or not SERVER_NAME.fullmatch(name) or name.startswith('codex'):
+            raise ValueError(where + ' names must match ' + SERVER_NAME.pattern + ' and may not begin with codex: '
+                             + repr(name))
+        server_where = where + '.' + name
+        if type(server) is not dict or ('command' in server) == ('url' in server):
+            raise ValueError(server_where + ' must hold exactly one of command and url')
+        if not _is_description(server.get('description')):
+            raise ValueError(server_where + '.description must be one line of 1 to ' + str(MAX_DESCRIPTION)
+                             + ' characters, not blank')
+        own = _local_server(server, server_where) if 'command' in server else _url_server(server, server_where)
+        shaped[name] = {'description': server['description'], **own, **_timeout(server, server_where)}
+    return {name: shaped[name] for name in sorted(shaped)}
+
+
+def _local_server(server, where):
+    """A local server's ``command``, ``args``, ``env`` and ``env_from`` in normal form.
+
+    ``command`` is an absolute path, not consulted here; ``args`` a list of
+    strings; ``env`` an object of strings keyed by names ``ENV_NAME`` matches;
+    ``env_from`` a list of distinct such names, none also in ``env``.
+    """
+    if set(server) - set(LOCAL_SERVER_KEYS):
+        raise ValueError(where + ' with a command may only hold ' + _listing(LOCAL_SERVER_KEYS))
+    command, args = server['command'], server.get('args', [])
+    env, env_from = server.get('env', {}), server.get('env_from', [])
+    if type(command) is not str or not os.path.isabs(command):
+        raise ValueError(where + '.command must be an absolute path')
+    if type(args) is not list or any(type(arg) is not str for arg in args):
+        raise ValueError(where + '.args must be a list of strings')
+    if type(env) is not dict or any(not _is_variable(key) or type(value) is not str for key, value in env.items()):
+        raise ValueError(where + '.env must be an object of strings keyed by names matching ' + ENV_NAME.pattern)
+    if (type(env_from) is not list or not all(_is_variable(variable) for variable in env_from)
+            or len(set(env_from)) != len(env_from)):
+        raise ValueError(where + '.env_from must be a list of distinct names matching ' + ENV_NAME.pattern)
+    both = sorted(set(env) & set(env_from))
+    if both:
+        raise ValueError(where + ' may not name a variable in both env and env_from: ' + ', '.join(both))
+    return {'command': command, 'args': list(args), 'env': {key: env[key] for key in sorted(env)},
+            'env_from': list(env_from)}
+
+
+def _url_server(server, where):
+    """A URL server's ``url``, ``headers`` and, when given, ``token_from`` in normal form.
+
+    ``url`` is one ``_is_server_url`` accepts; ``headers`` an object whose names
+    ``HEADER_NAME`` matches, ``Authorization`` in any case refused, and whose
+    values are 1 to ``MAX_HEADER_VALUE`` printable ASCII characters;
+    ``token_from`` a name ``ENV_NAME`` matches.
+    """
+    if set(server) - set(URL_SERVER_KEYS):
+        raise ValueError(where + ' with a url may only hold ' + _listing(URL_SERVER_KEYS))
+    url, headers = server['url'], server.get('headers', {})
+    if not _is_server_url(url):
+        raise ValueError(where + '.url must be https:// with a host, or http:// on localhost, 127.0.0.1 or [::1], '
+                         'with no user name or password')
+    if type(headers) is not dict:
+        raise ValueError(where + '.headers must be an object')
+    for name, value in headers.items():
+        if type(name) is not str or not HEADER_NAME.fullmatch(name):
+            raise ValueError(where + '.headers names must match ' + HEADER_NAME.pattern + ': ' + repr(name))
+        if name.lower() == 'authorization':
+            raise ValueError(where + '.headers may not hold Authorization; name the variable of a bearer token '
+                             'in token_from')
+        if type(value) is not str or not 1 <= len(value) <= MAX_HEADER_VALUE or not all(
+                ' ' <= character <= '~' for character in value):
+            raise ValueError(where + '.headers.' + name + ' must be 1 to ' + str(MAX_HEADER_VALUE)
+                             + ' printable ASCII characters')
+    if 'token_from' in server and not _is_variable(server['token_from']):
+        raise ValueError(where + '.token_from must be a name matching ' + ENV_NAME.pattern)
+    return {'url': url, 'headers': {name: headers[name] for name in sorted(headers)},
+            **({'token_from': server['token_from']} if 'token_from' in server else {})}
+
+
+def _is_server_url(url):
+    """Whether a URL server may be reached at ``url``: ``https`` with a host, or ``http`` with a host in
+    ``LOOPBACK_HOSTS``, with no user name or password.
+
+    urlsplit drops tabs and line breaks before it parses, so a URL holding them,
+    a space or another unprintable character is refused rather than checked in
+    a form other than the one stored.
+    """
+    if type(url) is not str or not url.isprintable() or ' ' in url:
+        return False
+    try:
+        parts = urllib.parse.urlsplit(url)
+        parts.port                                  # Raises ValueError on a port that is not a number in range.
+    except ValueError:
+        return False
+    if parts.username is not None or parts.password is not None:
+        return False
+    return bool(parts.hostname) and (parts.scheme == 'https'
+                                     or (parts.scheme == 'http' and parts.hostname in LOOPBACK_HOSTS))
+
+
+def _is_variable(name):
+    """Whether ``name`` is an environment variable name ``ENV_NAME`` matches in full."""
+    return type(name) is str and ENV_NAME.fullmatch(name) is not None
+
+
+def _timeout(server, where):
+    """``tool_timeout_seconds`` as the server gives it, an integer from 1 to ``MAX_TOOL_TIMEOUT``; empty when it
+    gives none."""
+    if 'tool_timeout_seconds' not in server:
+        return {}
+    seconds = server['tool_timeout_seconds']
+    if type(seconds) is not int or not 1 <= seconds <= MAX_TOOL_TIMEOUT:
+        raise ValueError(where + '.tool_timeout_seconds must be an integer from 1 to ' + str(MAX_TOOL_TIMEOUT))
+    return {'tool_timeout_seconds': seconds}
 
 
 def _roles(roles, where):
@@ -375,8 +604,7 @@ def _roles(roles, where):
         if type(role) is not dict or set(role) != {'description', 'instructions'}:
             raise ValueError(where + '.' + name + ' must hold exactly description and instructions')
         description, instructions = role['description'], role['instructions']
-        if (type(description) is not str or len(description) > MAX_DESCRIPTION or not description.strip()
-                or '\n' in description or '\r' in description):
+        if not _is_description(description):
             raise ValueError(where + '.' + name + '.description must be one line of 1 to '
                              + str(MAX_DESCRIPTION) + ' characters, not blank')
         if type(instructions) is not str or len(instructions) > MAX_INSTRUCTIONS or not instructions.strip():

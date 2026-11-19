@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -16,7 +17,8 @@ from rsi_lab.controller import Controller
 from rsi_lab.runtime import Runtime
 from rsi_lab.store import Store
 from tests.v2.liveness_support import BUDGETS
-from tests.v2.native_fixtures import PLAIN, R, ROLES, WITH_ROLES
+from tests.v2.native_fixtures import (CHEM, PAPERS, PLAIN, R, ROLES, SEARCH, TERMINAL, URL_SERVER_ONLY, VIEW_IMAGE,
+                                      WITH_ROLES, WITH_TOOL_SERVERS, here)
 
 INVALID = {'lab': {'shell': True}}
 EXAMPLE = Path(__file__).resolve().parents[2] / 'examples' / 'native-capabilities-run.json'
@@ -352,6 +354,90 @@ class RoleSettingsTests(unittest.TestCase):
                           'instructions_sha256': hashlib.sha256(b'Refine.').hexdigest()})
         self.assertEqual(native.receipt_form(PLAIN), PLAIN)
         self.assertEqual(WITH_ROLES['subagents']['roles'], ROLES)   # The settings given are not changed.
+
+
+def lab_from(entry):
+    """The Lab's settings from a run config whose Lab block is ``entry``."""
+    return native.capabilities({'native_capabilities': {'lab': entry}})['lab']
+
+
+class ToolServerSettingsTests(unittest.TestCase):
+    """Tool servers and image viewing: their normal form, their limits, the secret names and the receipt form."""
+
+    def test_servers_reach_the_normal_form_in_name_order(self):
+        got = lab_from({'web_search': True, 'tool_servers': {'papers': PAPERS, 'chem': here(CHEM)}})
+        self.assertEqual(got, {**SEARCH, 'tool_servers': {'chem': here(CHEM), 'papers': PAPERS}})
+        self.assertEqual(list(got['tool_servers']), ['chem', 'papers'])
+        self.assertEqual(lab_from({'tool_servers': {'a': {'description': 'd', 'command': sys.executable}}})
+                         ['tool_servers']['a'],
+                         {'description': 'd', 'command': sys.executable, 'args': [], 'env': {}, 'env_from': []})
+        self.assertEqual(lab_from({'tool_servers': {'b': {'description': 'd', 'url': 'http://[::1]:8080/mcp'}}})
+                         ['tool_servers']['b'],
+                         {'description': 'd', 'url': 'http://[::1]:8080/mcp', 'headers': {}})
+
+    def test_keys_that_are_off_leave_the_settings_as_today(self):                  # Review Focus 3
+        for extra in ({}, {'view_image': False}, {'tool_servers': {}}):
+            self.assertEqual(lab_from({'terminal': True, **extra}), TERMINAL)
+        for settings in (SEARCH, TERMINAL, PLAIN, WITH_ROLES):
+            self.assertEqual(native.validate(settings), settings)
+        for settings in (SEARCH, TERMINAL, PLAIN):
+            self.assertEqual(native.receipt_form(settings), settings)
+
+    def test_image_viewing_needs_the_terminal(self):
+        self.assertEqual(lab_from({'terminal': True, 'view_image': True}), VIEW_IMAGE)
+        for entry in ({'view_image': True}, {'web_search': True, 'view_image': True},
+                      {'terminal': True, 'view_image': 1}):
+            with self.subTest(entry=entry), self.assertRaisesRegex(ValueError, '^native_capabilities.lab.view_image'):
+                lab_from(entry)
+
+    def test_bad_servers_are_refused(self):
+        ok, url = {'description': 'd', 'command': sys.executable}, {'description': 'd', 'url': PAPERS['url']}
+        bad = [{'Chem': ok}, {'codex_x': ok}, {'1x': ok}, {'a' * 33: ok}, {'s%d' % i: ok for i in range(9)}, ['chem'],
+               {'x': {**ok, 'url': PAPERS['url']}}, {'x': {'description': 'd'}}, {'x': {**ok, 'command': 'python'}},
+               {'x': {**ok, 'command': '/nonexistent/server'}}, {'x': {**ok, 'args': '-m x'}},
+               {'x': {**ok, 'env': {'A': 1}}},
+               {'x': {**ok, 'env': {'1A': 'v'}}}, {'x': {**ok, 'env_from': ['A', 'A']}},
+               {'x': {**ok, 'env': {'A': 'v'}, 'env_from': ['A']}}, {'x': {**ok, 'headers': {}}},
+               {'x': {**url, 'env': {}}},
+               {'x': {**ok, 'description': ''}}, {'x': {**ok, 'description': 'a\nb'}},
+               {'x': {**ok, 'description': 'd' * 301}},
+               {'x': {**ok, 'tool_timeout_seconds': 0}}, {'x': {**ok, 'tool_timeout_seconds': 3601}},
+               {'x': {**ok, 'tool_timeout_seconds': True}}, {'x': {**url, 'url': 'http://papers.example.org/mcp'}},
+               {'x': {**url, 'url': 'ftp://localhost/mcp'}},
+               {'x': {**url, 'url': 'https://user:pw@papers.example.org/mcp'}},
+               {'x': {**url, 'url': 'https:///mcp'}}, {'x': {**url, 'headers': {'Authorization': 'Bearer t'}}},
+               {'x': {**url, 'headers': {'authorization': 't'}}}, {'x': {**url, 'headers': {'X-A': 'a\nb'}}},
+               {'x': {**url, 'token_from': 'not a name'}}]
+        for servers in bad:
+            with self.subTest(servers=servers), self.assertRaisesRegex(ValueError,
+                                                                      '^native_capabilities.lab.tool_servers'):
+                lab_from({'tool_servers': servers})
+
+    def test_loopback_http_and_the_limits_are_accepted(self):
+        for host in ('localhost', '127.0.0.1', '[::1]'):
+            lab_from({'tool_servers': {'x': {'description': 'd', 'url': 'http://' + host + ':8080/mcp'}}})
+        lab_from({'tool_servers': {'s%d' % i: {'description': 'd' * 300, 'command': sys.executable,
+                                               'tool_timeout_seconds': 3600} for i in range(8)}})
+
+    def test_validate_checks_the_shape_only(self):
+        self.assertEqual(native.validate(WITH_TOOL_SERVERS), WITH_TOOL_SERVERS)       # the command need not exist
+        self.assertEqual(native.validate(VIEW_IMAGE), VIEW_IMAGE)
+        self.assertTrue(native.any_on(URL_SERVER_ONLY))
+        with self.assertRaises(ValueError):
+            native.validate({**SEARCH, 'view_image': True})
+
+    def test_secret_names_and_local_servers(self):
+        self.assertEqual((native.tool_servers(SEARCH), native.local_servers(WITH_TOOL_SERVERS)), ({}, ['chem']))
+        self.assertEqual(native.secret_variables(WITH_TOOL_SERVERS), ['CHEM_API_KEY', 'PAPERS_TOKEN'])
+        self.assertEqual(native.unset_variables(WITH_TOOL_SERVERS, {'CHEM_API_KEY': 'x', 'PAPERS_TOKEN': ''}),
+                         ['PAPERS_TOKEN'])
+
+    def test_receipt_form_keeps_env_names_not_values(self):
+        got = native.receipt_form(WITH_TOOL_SERVERS)['tool_servers']
+        self.assertEqual(got['chem'], {'description': CHEM['description'], 'command': CHEM['command'],
+                                       'args': CHEM['args'], 'env_names': ['CHEM_MODE'], 'env_from': ['CHEM_API_KEY'],
+                                       'tool_timeout_seconds': 300})
+        self.assertEqual(got['papers'], PAPERS)
 
 
 if __name__ == '__main__':

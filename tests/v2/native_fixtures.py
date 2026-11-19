@@ -5,6 +5,8 @@ The rollout builders return complete records shaped as the live probe of
 tests/v2/test_session_context.py, whose ``frame`` they use and re-export.
 No Codex or model process is run.
 """
+import sys
+
 from tests.v2.test_session_context import frame
 
 SEARCH = {'web_search': True, 'terminal': None, 'subagents': None}
@@ -21,6 +23,24 @@ ROLES = {'challenge': {'description': 'Argues against the "leading" series.',
          'local': R}
 PLAIN = {'web_search': False, 'terminal': None, 'subagents': {'max_concurrent': 3}}
 WITH_ROLES = {'web_search': False, 'terminal': None, 'subagents': {'max_concurrent': 3, 'roles': ROLES}}
+
+# Tool servers in normal form: one started locally, one reached by URL. Every path, URL and variable name is invented;
+# the command need not exist for validate, and here() swaps in this interpreter for what goes through capabilities.
+CHEM = {'description': 'Fingerprints and similarity for SMILES.', 'command': '/opt/tools/bin/python',
+        'args': ['-m', 'chem_server'], 'env': {'CHEM_MODE': 'fast'}, 'env_from': ['CHEM_API_KEY'],
+        'tool_timeout_seconds': 300}
+PAPERS = {'description': 'Full text of open-access papers.', 'url': 'https://papers.example.org/mcp',
+          'headers': {'X-Client': 'rsi-lab'}, 'token_from': 'PAPERS_TOKEN'}
+TOOL_SERVERS = {'chem': CHEM, 'papers': PAPERS}
+WITH_TOOL_SERVERS = {**SEARCH, 'tool_servers': TOOL_SERVERS}
+LOCAL_SERVER_ONLY = {'web_search': False, 'terminal': None, 'subagents': None, 'tool_servers': {'chem': CHEM}}
+URL_SERVER_ONLY = {'web_search': False, 'terminal': None, 'subagents': None, 'tool_servers': {'papers': PAPERS}}
+VIEW_IMAGE = {**TERMINAL, 'view_image': True}
+
+
+def here(server):
+    """A local tool server whose command is this interpreter, an executable file ``capabilities`` accepts."""
+    return {**server, 'command': sys.executable}
 
 
 def PROFILE(run_root, codex_home, workspace):

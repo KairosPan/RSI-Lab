@@ -183,6 +183,46 @@ Scientific Memory 的领域身份及经验解释继续通过 `scientific_identit
 
 终端的网络关闭不等于读到的内容出不去。同一角色开着网页搜索时，它读得到的任何内容（工作目录、可读目录、请求本身）都可能被写进搜索词发到外部，例如网页诱导它这样做时；关闭终端网络挡不住这条通道。所以不要把含有凭证的目录（例如主目录、`~/.ssh` 或云服务的配置目录）或私有评测数据列为可读目录。
 
+### 工具服务与查看图片
+
+每个角色还可以声明两项可选设置：`tool_servers`，Codex 在调用中可以使用的工具服务（MCP 服务器）；`view_image`，让模型查看图片文件。不写、`view_image` 为 `false` 或 `tool_servers` 为空对象时，这一项不进入保存的设置，设置与没有这两项之前完全相同。
+
+```json
+"native_capabilities": {
+  "lab": {
+    "terminal": true,
+    "view_image": true,
+    "tool_servers": {
+      "chem": {"description": "Fingerprints and similarity for SMILES.",
+               "command": "/opt/tools/bin/python", "args": ["-m", "chem_server"],
+               "env": {"CHEM_MODE": "fast"}, "env_from": ["CHEM_API_KEY"],
+               "tool_timeout_seconds": 300},
+      "papers": {"description": "Full text of open-access papers.",
+                 "url": "https://papers.example.org/mcp",
+                 "token_from": "PAPERS_TOKEN",
+                 "headers": {"X-Client": "rsi-lab"}}
+    }
+  }
+}
+```
+
+工具服务有两种，每个只能是其中一种：
+
+- 本地服务写 `command`，由 Codex 在调用时启动。`command` 是可执行文件的绝对路径，`init` 和每次 Runtime 启动时都检查它存在、是普通文件且可执行；按写的原样保存，不解析符号链接（虚拟环境里的解释器就是符号链接，必须保持原样）。`args` 是字符串列表，`env` 是不保密的固定环境变量值，`env_from` 列出变量名，其值在调用时取自 Controller 所在进程的环境。同一个变量不能既在 `env` 又在 `env_from` 中。
+- URL 服务写 `url`，由 Codex 连接。`url` 以 `https://` 开头并带主机名；只有主机是 `localhost`、`127.0.0.1` 或 `[::1]` 时可以用 `http://`；不能带用户名或密码。`token_from` 可选，指定一个环境变量，Codex 把它的值作为 bearer token 发送。`headers` 是不保密的固定请求头，名称最多 64 个 HTTP token 字符，值为 1 到 1,024 个可打印 ASCII 字符；不能有 `Authorization`（不分大小写），token 用 `token_from` 给出。
+
+两种共同的规则：名称匹配 `[a-z][a-z0-9_]{0,31}` 且不以 `codex` 开头，每个角色最多 8 个；`description` 是一行 1 到 300 个字符、不全是空白；`tool_timeout_seconds` 可选，1 到 3,600 秒，没有默认值；变量名匹配 `[A-Za-z_][A-Za-z0-9_]{0,127}`。
+
+`env_from` 和 `token_from` 只保存变量名：运行配置、Effect、请求包、调用记录、回执和命令行里都没有它们的值。回执里本地服务的 `env` 换成 `env_names`，只记变量名。调用时这样的变量没有设置或为空，调用被拒绝，Codex 不会启动。
+
+通过工具服务得到的结果和其他原生工具一样，只是线索，不是证据。
+
+Codex 每次调用工具服务都会把 thread 与会话的身份、模型和 Codex 版本发给它；会话的工作目录位于 git 仓库内时（运行根目录在仓库内就是这样），还会发送该仓库的本地路径、远程仓库的 URL 和最近一次提交。内核关不掉这一点。服务属于别人时，把运行根目录放在任何 git 仓库之外。
+
+URL 服务和网页搜索一样是一条出口：终端没有网络，但角色读得到的任何内容都可以写进工具调用的参数，离开本机。所以声明了 URL 服务的角色，同样不能读得到私有数据和凭证，见上一节。
+
+`view_image` 只有在该角色开启终端时才能为 `true`，否则配置被拒绝。查看图片只能读终端命令读得到的地方，即工作目录和可读目录；看到的图片同样只是线索。
+
 ### Codex 命令的变化
 
 某个角色全部关闭时，命令比引入原生工具之前多两处，见下面的“Codex 版本”：`-c agents.enabled=false` 和 `--disable skill_mcp_dependency_install`。开启后：
