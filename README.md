@@ -27,7 +27,7 @@ Lab 现在也可通过 `request_literature` 委托具有独立持久会话的 Li
 
 普通 Lab 轮次按外部知识缺口、当前已交付原文、所属子任务与剩余额度自主决定是否委托，任务不必明确要求检索。启用新版文献工具包时，每轮记录可审计的 `literature_decision`；已有充分原文或只需本地观测的任务直接推进。旧版领域检索接口保留原协议。机制与真实正反例、持续 200 次评分验证见[自主决策报告](docs/literature-autonomy-validation.md)。
 
-[系统设计 v2.1](docs/system-design.html) 是完整目标规格。科学记忆的完整语义支持验证、全自动工程修复发布，以及可逐请求拦截 Codex 内部工具/压缩/重试的 runtime 尚未全部实现。运行配置没有 `native_capabilities` 时，CLI 后端禁用 Codex 原生工具；有这个块时，按角色开启网页搜索、受限终端和子 agent，由 Codex 在一轮内自行调用，调用结束后记录，并按 Codex 自己的用量记录计费，不逐次经过 Controller 准入。开启子 agent 时还可以声明具名角色（`subagents.roles`），每次调用前写成 Codex 的角色文件；回执的 `child_threads` 记下每个子 agent 的角色、是否带着父调用的历史开始、模型与 effort，以及它在本轮的搜索词和用量。示例配置见 [native-capabilities-run.json](examples/native-capabilities-run.json)，说明见[持久 Agent 使用说明](docs/persistent-agents.md#codex-原生工具)。容量检查覆盖可观察的会话历史与本轮输入，不声称已认证完整 provider 输入或取得模型全部内部推理。
+[系统设计 v2.1](docs/system-design.html) 是完整目标规格。科学记忆的完整语义支持验证、全自动工程修复发布，以及可逐请求拦截 Codex 内部工具/压缩/重试的 runtime 尚未全部实现。运行配置没有 `native_capabilities` 时，CLI 后端禁用 Codex 原生工具；有这个块时，按角色开启网页搜索、受限终端和子 agent，由 Codex 在一轮内自行调用，调用结束后记录，并按 Codex 自己的用量记录计费，不逐次经过 Controller 准入。开启子 agent 时还可以声明具名角色（`subagents.roles`），每次调用前写成 Codex 的角色文件；回执的 `child_threads` 记下每个子 agent 的角色、是否带着父调用的历史开始、模型与 effort，以及它在本轮的搜索词和用量。每个角色还可以声明工具服务（由 Codex 在本地启动或按 URL 连接的 MCP 服务器）、查看图片和一个冻结的技能文件夹；本地工具服务的进程在调用结束时被终止，Controller 中途退出时由恢复终止，见[工具服务与查看图片](docs/persistent-agents.md#工具服务与查看图片)和[技能](docs/persistent-agents.md#技能)。示例配置见 [native-capabilities-run.json](examples/native-capabilities-run.json)，说明见[持久 Agent 使用说明](docs/persistent-agents.md#codex-原生工具)。容量检查覆盖可观察的会话历史与本轮输入，不声称已认证完整 provider 输入或取得模型全部内部推理。
 
 ## 离线运行
 

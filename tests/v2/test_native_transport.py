@@ -1021,7 +1021,7 @@ class NativeTransportTests(unittest.TestCase):
             with self.subTest(settings=name):
                 folder = self.root / 'calls' / ('twice-' + name)
 
-                def interrupted_kill(process, tracked=None):
+                def interrupted_kill(process, tracked=None, record=None):
                     process.kill(); process.wait()
                     raise KeyboardInterrupt('second')
                 with patch.object(transport, '_stream_process', side_effect=KeyboardInterrupt('first')), \
@@ -1056,6 +1056,114 @@ class NativeTransportTests(unittest.TestCase):
                 table.assert_not_called()
                 self.assertEqual(result['execution_status'], 'succeeded', result['error'])
                 self.assertTrue(result['descendants_stopped'])
+
+    def test_a_local_server_alone_tracks_and_stops_what_the_call_orphaned(self):
+        marker = self.root / 'server.pid'; self.addCleanup(self.stop_recorded, marker)
+        with patch.object(transport, 'TRACK_SECONDS', .1), patch.object(transport, 'codex_version', return_value='0.170.0'), \
+                patch.dict(os.environ, {'CHEM_API_KEY': 'invented'}):
+            result = self.invoke(code=self.orphaning_codex(marker, ends=True), native=LOCAL_SERVER_ONLY)
+        self.assertEqual(result['execution_status'], 'succeeded', result['error'])
+        self.assertTrue(result['descendants_stopped'])
+        pid = int(marker.read_text().split()[0])
+        self.assertIn(pid, transport.read_tracked(self.folder))
+        self.assert_stopped(marker)
+
+    def test_a_url_server_starts_no_tracking(self):
+        with patch.object(transport, 'TRACK_SECONDS', .1), patch.object(transport, 'codex_version', return_value='0.170.0'), \
+                patch.dict(os.environ, {'PAPERS_TOKEN': 'invented'}), \
+                patch.object(transport, '_process_table', wraps=transport._process_table) as table:
+            result = self.invoke(native=URL_SERVER_ONLY)
+        table.assert_not_called()
+        self.assertEqual(result['execution_status'], 'succeeded', result['error'])
+        self.assertTrue(result['descendants_stopped'])
+        self.assertFalse((self.folder / transport.TRACKED_FILE).exists())
+
+    def test_the_tracked_file_is_written_before_a_kill(self):
+        marker = self.root / 'server.pid'; self.addCleanup(self.stop_recorded, marker)
+        # What the file names at each signal to a process group, and what each write of it held.
+        at_kill, written = [], []
+        real_killpg, real_write = os.killpg, transport.write_tracked
+
+        def killpg(group, sig):
+            at_kill.append(transport.read_tracked(self.folder))
+            real_killpg(group, sig)
+
+        def write(folder, tracked):
+            written.append(dict(tracked))
+            real_write(folder, tracked)
+        with patch.object(transport, 'TRACK_SECONDS', .1), patch.object(transport, 'codex_version', return_value='0.170.0'), \
+                patch.dict(os.environ, {'CHEM_API_KEY': 'invented'}), \
+                patch.object(transport, 'write_tracked', side_effect=write), \
+                patch.object(transport.os, 'killpg', side_effect=killpg):
+            result = self.invoke(code=self.orphaning_codex(marker, ends=False), native=LOCAL_SERVER_ONLY, timeout=2.5)
+        self.assertEqual(result['execution_status'], 'unknown')
+        self.assertTrue(result['descendants_stopped'])
+        pid, start = marker.read_text().split(' ', 1)
+        # Codex's group is the first signalled; the grandchild, with its start time, was in the file by then.
+        self.assertEqual(at_kill[0].get(int(pid)), start)
+        self.assertEqual(transport.read_tracked(self.folder)[int(pid)], start)
+        # Written whenever a sample added a process, not at every sample.
+        self.assertTrue(written)
+        self.assertTrue(all(earlier != later for earlier, later in zip(written, written[1:])), written)
+        self.assertEqual(transport.read_tracked(self.folder), written[-1])
+        self.assert_stopped(marker)
+
+    def test_a_tracked_file_that_cannot_be_written_ends_the_call(self):
+        marker = self.root / 'server.pid'; self.addCleanup(self.stop_recorded, marker)
+        with patch.object(transport, 'TRACK_SECONDS', .1), patch.object(transport, 'codex_version', return_value='0.170.0'), \
+                patch.dict(os.environ, {'CHEM_API_KEY': 'invented'}), \
+                patch.object(transport, 'write_tracked', side_effect=OSError('No space left on device')):
+            result = self.invoke(code=self.orphaning_codex(marker, ends=False), native=LOCAL_SERVER_ONLY, timeout=30)
+        # Like a journal that cannot be written: Codex is killed long before its deadline, with what ran under it.
+        self.assertEqual((result['execution_status'], result['error']), ('unknown', 'OSError: No space left on device'))
+        self.assertLess(result['wall_seconds'], 20)
+        self.assertTrue(result['descendants_stopped'])
+        self.assertTrue((self.folder / 'transport_result.json').is_file())
+
+    def test_the_tracked_file_holds_only_pids_and_start_times(self):
+        folder = self.root / 'tracked'; folder.mkdir()
+        self.assertEqual(transport.read_tracked(folder), {})          # Nothing recorded yet.
+        transport.write_tracked(folder, {4242: 'Thu Nov 19 10:00:01 2026', 77: 'Thu Nov 19 10:00:00 2026'})
+        path = folder / transport.TRACKED_FILE
+        self.assertEqual(path.name, 'tracked_processes.json')
+        self.assertIn(path.name, transport.ARTIFACTS)
+        self.assertEqual(json.loads(path.read_text()), {'processes': [{'pid': 77, 'start': 'Thu Nov 19 10:00:00 2026'},
+                                                                      {'pid': 4242, 'start': 'Thu Nov 19 10:00:01 2026'}]})
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+        self.assertEqual(transport.read_tracked(folder), {77: 'Thu Nov 19 10:00:00 2026', 4242: 'Thu Nov 19 10:00:01 2026'})
+        # A start time that ps printed in another encoding than UTF-8 is read back as it was decoded.
+        transport.write_tracked(folder, {77: 'jeu. 19 d\udce9c. 10:00:00 2026'})
+        self.assertEqual(transport.read_tracked(folder), {77: 'jeu. 19 d\udce9c. 10:00:00 2026'})
+        self.assertEqual(os.listdir(folder), [transport.TRACKED_FILE])
+        entry = '{"pid": 77, "start": "s"}'
+        malformed = [b'', b'\xff', b'not json', b'[]', b'{"processes": {}}', b'{"processes": [], "pids": []}',
+                     b'{"processes": [], "processes": []}', b'{"processes": [7]}', b'{"processes": [{"pid": 77}]}',
+                     b'{"processes": [{"pid": "77", "start": "s"}]}', b'{"processes": [{"pid": true, "start": "s"}]}',
+                     b'{"processes": [{"pid": 0, "start": "s"}]}', b'{"processes": [{"pid": -1, "start": "s"}]}',
+                     b'{"processes": [{"pid": 2147483648, "start": "s"}]}', b'{"processes": [{"pid": 7.0, "start": "s"}]}',
+                     b'{"processes": [{"pid": 77, "start": ""}]}', b'{"processes": [{"pid": 77, "start": 1}]}',
+                     b'{"processes": [{"pid": 77, "start": "s", "command": "x"}]}',
+                     ('{"processes": [%s, %s]}' % (entry, entry)).encode()]
+        for raw in malformed:
+            with self.subTest(raw=raw):
+                path.write_bytes(raw)
+                with self.assertRaises(ValueError):
+                    transport.read_tracked(folder)
+                # Nothing it names is signalled, or even looked for.
+                with patch.object(transport, '_process_table', side_effect=AssertionError('process table read')):
+                    self.assertFalse(transport.stop_recorded(folder))
+        path.unlink()
+        path.symlink_to(self.root / 'elsewhere.json')
+        (self.root / 'elsewhere.json').write_text('{"processes": []}')
+        with self.assertRaises(ValueError):
+            transport.read_tracked(folder)
+        self.assertFalse(transport.stop_recorded(folder))
+        # Missing, or naming none, there is nothing to stop.
+        path.unlink()
+        with patch.object(transport, '_process_table', side_effect=AssertionError('process table read')):
+            self.assertTrue(transport.stop_recorded(folder))
+            transport.write_tracked(folder, {})
+            self.assertTrue(transport.stop_recorded(folder))
 
     def test_tracking_follows_codex_and_every_tracked_process_that_is_still_the_same(self):
         # 200 was seen under Codex and still runs, orphaned; 500 was seen too, but its pid now names a later process.
@@ -1148,6 +1256,39 @@ class NativeTransportTests(unittest.TestCase):
                                             alive={500})
         self.assertEqual(signals, [])
         self.assertFalse(stopped)
+
+    def test_what_a_kill_or_a_sweep_finds_is_recorded_before_any_signal(self):
+        recorded = []
+
+        def record(tracked):
+            # What is recorded, and whether a signal had been sent by then (a signal 0 only asks if a pid is in use).
+            sent = transport.os.killpg.called or any(call.args[1] for call in transport.os.kill.call_args_list)
+            recorded.append((dict(tracked), sent))
+        stopped, signals = self.with_tables(lambda: transport._terminate(SimpleNamespace(pid=100), {}, record),
+                                            self.LISTED)
+        self.assertEqual(recorded, [({200: 'T1', 300: 'T2', 400: 'T3'}, False)])
+        self.assertEqual((signals[0], stopped), (('killpg', 100), True))
+        # The sweep: 500, tracked at a sample, still runs and has started 510 since.
+        recorded.clear()
+        stopped, signals = self.with_tables(lambda: transport._sweep({500: 'T5'}, record),
+                                            {**self.ORPHANED, 510: (500, 'T6')})
+        self.assertEqual(recorded, [({500: 'T5', 510: 'T6'}, False)])
+        self.assertEqual((signals, stopped), ([('killpg', 500), ('killpg', 510)], True))
+        # A kill or a sweep that finds nothing new records nothing again.
+        recorded.clear()
+        self.with_tables(lambda: transport._terminate(SimpleNamespace(pid=100), {500: 'T5'}, record), self.ORPHANED)
+        self.with_tables(lambda: transport._sweep({500: 'T5'}, record), self.ORPHANED)
+        self.assertEqual(recorded, [])
+
+    def test_a_record_that_cannot_be_written_does_not_hold_back_a_kill_or_a_sweep(self):
+        def record(tracked):
+            raise OSError('No space left on device')
+        stopped, signals = self.with_tables(lambda: transport._terminate(SimpleNamespace(pid=100), {}, record),
+                                            self.LISTED)
+        self.assertEqual((signals, stopped), ([('killpg', 100), ('killpg', 200), ('killpg', 300), ('kill', 400)], True))
+        stopped, signals = self.with_tables(lambda: transport._sweep({500: 'T5'}, record),
+                                            {**self.ORPHANED, 510: (500, 'T6')})
+        self.assertEqual((signals, stopped), ([('killpg', 500), ('killpg', 510)], True))
 
 
 if __name__ == '__main__':

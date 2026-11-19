@@ -41,9 +41,11 @@ NO_SKILLS_LIST = 'skills.include_instructions=false'
 # as an off switch), so a call is not sent on any other version. RSI_LAB_ALLOW_CODEX_VERSION names one more
 # version its owner accepts unchecked.
 SUPPORTED_CODEX_VERSIONS = ("0.170.0",)
+# The processes seen under a call that tracks them, written to its folder as they are seen (write_tracked).
+TRACKED_FILE = 'tracked_processes.json'
 ARTIFACTS = frozenset({"invocation.json", "prompt.txt", "schema.json", "events.jsonl",
                        "stderr.log", "response.json", "raw_response.txt", "usage.json", "transport_result.json", "journal.jsonl",
-                       "images", "images.json"})
+                       "images", "images.json", TRACKED_FILE})
 PREAMBLE = (
     "Return only one JSON object matching the supplied response schema. Use only the supplied "
     "task and evidence. Do not use tools, read files, browse, delegate, or inspect your environment.\n\n"
@@ -223,8 +225,18 @@ def _process_table():
     return table
 
 
-# Seconds between samples of the process table while a call with the terminal on runs.
+# Seconds between samples of the process table while a call that tracks its processes runs.
 TRACK_SECONDS = 1.0
+
+
+def _tracks(settings):
+    """Whether a call under normal-form ``settings`` tracks the processes that run under it.
+
+    It does with the terminal on, and with a tool server Codex starts from a
+    command, which leads its own process group and can outlive a killed turn.
+    A URL server has no process: alone, it starts no tracking.
+    """
+    return settings['terminal'] is not None or bool(native_tools.local_servers(settings))
 
 
 def _track(tracked, table, root=None):
@@ -295,27 +307,36 @@ def _stop(tracked):
         time.sleep(.05)
 
 
-def _terminate(process, tracked=None):
+def _terminate(process, tracked=None, record=None):
     """Kill the invocation's process group and every process seen under it.
 
-    A command Codex runs can lead its own process group, out of reach of
-    Codex's. Before any signal, what now runs below Codex is added to
-    ``tracked``, the processes earlier samples saw under the call (none when
-    the terminal is off), since a killed parent's children are reparented and
-    no longer found through it. Codex's group is then killed, and every
-    tracked process by ``_stop``. Codex's own pid cannot have been reused, as
-    Codex is not reaped before this. Returns whether every process seen under
-    the call, at a sample or at the kill, was stopped; a process that detaches
-    and loses its parent between two samples is not seen. ``False`` when a
-    read of the process table fails, as nothing can then be confirmed, though
-    Codex's group is killed all the same.
+    A command Codex runs, or a local tool server Codex starts, can lead its
+    own process group, out of reach of Codex's. Before any signal, what now
+    runs below Codex is added to ``tracked``, the processes earlier samples
+    saw under the call (none when the call does not track them), since a
+    killed parent's children are reparented and no longer found through it;
+    given ``record``, ``record(tracked)`` is called then if that added a
+    process. A record that cannot be written (``OSError``) does not hold back
+    the kill. Codex's group is then killed, and every tracked process by
+    ``_stop``. Codex's own pid cannot have been reused, as Codex is not reaped
+    before this. Returns whether every process seen under the call, at a
+    sample or at the kill, was stopped; a process that detaches and loses its
+    parent between two samples is not seen. ``False`` when a read of the
+    process table fails, as nothing can then be confirmed, though Codex's
+    group is killed all the same.
     """
     tracked = {} if tracked is None else tracked
+    before = dict(tracked)
     try:
         _track(tracked, _process_table(), process.pid)
         listed = True
     except (OSError, ValueError):
         listed = False
+    if record is not None and tracked != before:
+        try:
+            record(tracked)
+        except OSError:
+            pass             # What the kill found is stopped all the same, and the result says whether it was.
     try:
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
@@ -323,22 +344,89 @@ def _terminate(process, tracked=None):
     return _stop(tracked) and listed
 
 
-def _sweep(tracked):
+def _sweep(tracked, record=None):
     """Stop what still runs of ``tracked`` once a call has ended without a kill.
 
     A last sample follows the tracked processes that are still the same to
     their children. Codex's pid is no root: Codex has been reaped, and its pid
-    can be reused. Returns what ``_stop`` returns, ``False`` when the last
-    sample cannot be read; ``True`` when nothing was tracked.
+    can be reused. Given ``record``, ``record(tracked)`` is called before any
+    signal if the sample added a process; one that cannot be written
+    (``OSError``) does not hold back the stop. Returns what ``_stop`` returns,
+    ``False`` when the last sample cannot be read; ``True`` when nothing was
+    tracked.
     """
     if not tracked:
         return True
+    before = dict(tracked)
     try:
         _track(tracked, _process_table())
         sampled = True
     except (OSError, ValueError):
         sampled = False
+    if record is not None and tracked != before:
+        try:
+            record(tracked)
+        except OSError:
+            pass             # As in _terminate.
     return _stop(tracked) and sampled
+
+
+def write_tracked(folder, tracked):
+    """Publish ``tracked`` (``{pid: start}``) as the call folder's ``TRACKED_FILE``, through ``_replace_bytes``.
+
+    The file holds ``{"processes": [{"pid": …, "start": …}, …]}`` in pid
+    order: pids and start times only, no command line and no environment. A
+    start time is text as ``_process_table`` decodes it; written with JSON
+    escapes, one that ``ps`` printed in another encoding than UTF-8 is read
+    back unchanged.
+    """
+    processes = [{'pid': pid, 'start': start} for pid, start in sorted(tracked.items())]
+    _replace_bytes(Path(folder) / TRACKED_FILE, (json.dumps({'processes': processes}) + '\n').encode('ascii'))
+
+
+def read_tracked(folder):
+    """The processes a call folder's ``TRACKED_FILE`` names, as ``{pid: start}``; ``{}`` when there is none.
+
+    Raises ``ValueError`` when the file is a symlink or malformed: anything
+    but one JSON object holding only ``processes``, a list of objects each
+    holding only a ``pid``, an integer from 1 to 2**31 - 1, and a ``start``,
+    nonempty text, no pid twice. Another failure to read it raises
+    ``OSError``.
+    """
+    path = Path(folder) / TRACKED_FILE
+    if path.is_symlink():
+        raise ValueError(TRACKED_FILE + ' is a symlink')
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return {}
+    value = _json(raw.decode('utf-8'))
+    if not isinstance(value, dict) or set(value) != {'processes'} or not isinstance(value['processes'], list):
+        raise ValueError('Malformed ' + TRACKED_FILE)
+    tracked = {}
+    for entry in value['processes']:
+        if (not isinstance(entry, dict) or set(entry) != {'pid', 'start'} or type(entry['pid']) is not int
+                or not 0 < entry['pid'] < 2 ** 31 or not isinstance(entry['start'], str) or not entry['start']
+                or entry['pid'] in tracked):
+            raise ValueError('Malformed ' + TRACKED_FILE)
+        tracked[entry['pid']] = entry['start']
+    return tracked
+
+
+def stop_recorded(folder):
+    """Stop the processes a call folder's ``TRACKED_FILE`` names, each only while it is still the same one.
+
+    What ``_stop`` does, for what ``read_tracked`` reads: the process table is
+    read just before any signal, and a pid that is gone or now has another
+    start time is not signalled and counts as stopped. Returns what ``_stop``
+    returns, ``True`` when the file is missing or names none; ``False``, with
+    no table read and no signal sent, when it cannot be read or is malformed.
+    """
+    try:
+        tracked = read_tracked(folder)
+    except (OSError, ValueError):
+        return False
+    return _stop(tracked)
 
 
 def _provider_stdout(folder):
@@ -690,7 +778,7 @@ def _archive_images(folder, images, manifest):
     return [record['path'] for record in files]
 
 
-def _stream_process(process, prompt, journal, folder, timeout, stop, tracked=None):
+def _stream_process(process, prompt, journal, folder, timeout, stop, tracked=None, record=None):
     """Drain both pipes while sending input; no turn-sized communicate buffer.
 
     Each received chunk is durable before parsing complete event frames. This
@@ -698,7 +786,9 @@ def _stream_process(process, prompt, journal, folder, timeout, stop, tracked=Non
     ``stop`` kills the process tree when the deadline elapses; the pipes then
     have 5 seconds to drain. Given ``tracked``, the process table is sampled
     every ``TRACK_SECONDS`` until then, adding to it what runs under the
-    process; a sample that cannot be read is skipped.
+    process; a sample that cannot be read is skipped. Given ``record`` too,
+    ``record(tracked)`` is called whenever a sample adds a process; what it
+    raises ends the stream, as a capture that cannot be written does.
     """
     selector = selectors.DefaultSelector()
     pending = memoryview(prompt.encode('utf-8'))
@@ -719,10 +809,13 @@ def _stream_process(process, prompt, journal, folder, timeout, stop, tracked=Non
             now = time.monotonic()
             if not timed_out and now >= next_sample:
                 next_sample = now + TRACK_SECONDS
+                before = dict(tracked)
                 try:
                     _track(tracked, _process_table(), process.pid)
                 except (OSError, ValueError):
                     pass     # The next sample tries again.
+                if record is not None and tracked != before:
+                    record(tracked)
             if not timed_out and now >= deadline:
                 timed_out = True
                 stop()
@@ -811,13 +904,19 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
     machine's skills folder holds an entry (``native.check_skill_homes``).
 
     The result's ``descendants_stopped`` says whether every process seen under
-    the call was stopped by its end. With the terminal on, the process table
-    is sampled every ``TRACK_SECONDS`` while Codex runs, and whatever was seen
-    and still runs is stopped however the call ends. A timeout or an
-    interruption that kills Codex also stops what runs under it at the kill.
-    A process that detaches and loses its parent between two samples is not
-    seen. With the terminal off nothing is sampled, and a call Codex ends on
-    its own reports ``True``.
+    the call was stopped by its end. With the terminal on or a local tool
+    server (one Codex starts from a command), the process table is sampled
+    every ``TRACK_SECONDS`` while Codex runs, and whatever was seen and still
+    runs is stopped however the call ends. What is seen is also written to the
+    call folder's ``TRACKED_FILE`` (``write_tracked``) whenever a sample, or
+    the last look at a kill or at the end, adds a process, before any signal,
+    so that recovery can stop what a Controller that died left running; a
+    write that fails during the call ends it as a journal write that fails
+    does. A timeout or an interruption that kills Codex also stops what runs
+    under it at the kill. A process that detaches and loses its parent
+    between two samples is not seen. Otherwise, a URL server alone included,
+    nothing is sampled or written, and a call Codex ends on its own reports
+    ``True``.
     """
     if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError('Prompt must be nonempty text')
@@ -891,14 +990,16 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
     journal_snapshot = None
     descendants_stopped = True
     tracked = {}                             # Every process seen under the call, as pid: start time.
-    terminal_on = settings['terminal'] is not None
+    tracking = _tracks(settings)
+    # Written as samples add processes, before any signal: recovery stops what a dead Controller left running.
+    record = (lambda tracked: write_tracked(folder, tracked)) if tracking else None
     killed = False
 
     def stop():
         nonlocal descendants_stopped, killed
         killed = True
         descendants_stopped = False          # Stays False if _terminate is interrupted before it confirms.
-        descendants_stopped = _terminate(process, tracked)
+        descendants_stopped = _terminate(process, tracked, record)
 
     invocation = {'backend': 'codex', 'model': model, 'effort': effort,
                   'timeout_seconds': timeout, 'started_at_unix': time.time(), 'dispatched': False,
@@ -937,7 +1038,7 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
                               sent_image_manifest_sha256=image_digest)
         _write_json(folder / 'invocation.json', invocation)
         returncode, timed_out, partial_tail = _stream_process(process, sent_prompt, journal, folder, timeout, stop,
-                                                              tracked if terminal_on else None)
+                                                              tracked if tracking else None, record)
         captured = read_journal(folder / 'journal.jsonl')
         stdout = raw_stream(captured, 'stdout').decode('utf-8', errors='replace')
         raw, usage, usage_complete, errors = audited_events(folder)
@@ -1026,11 +1127,11 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
         if not isinstance(exc, Exception):
             interrupted = exc
     finally:
-        if terminal_on and process is not None and not killed:
+        if tracking and process is not None and not killed:
             # Codex ended without a kill, however the call ended: what was seen under it and still runs is stopped.
             descendants_stopped = False      # Recorded as such if _sweep is interrupted before it confirms.
             try:
-                descendants_stopped = _sweep(tracked)
+                descendants_stopped = _sweep(tracked, record)
             except BaseException as exc:     # The receipts below are written all the same; it is raised after them,
                 if interrupted is None:      # unless the call itself was interrupted first.
                     interrupted = exc
