@@ -59,17 +59,24 @@ NATIVE_ACTIVITY = {
     'searches': ['q'], 'files_changed': ['/w/notes.md'], 'omitted': 0}
 
 
+# The environment ps runs in when the kernel reads the process table: its start times then read the same whoever reads
+# them, whatever their locale or time zone.
+PS_ENVIRONMENT = {'LC_ALL': 'C', 'TZ': 'UTC0', 'PATH': '/usr/bin:/bin'}
+
+
 def record(marker):
     """Python statements that write ``"<pid> <start>"`` for the process ``p`` to ``marker`` in one step, the start
-    time read from the process table right after ``p`` appears: the identity a cleanup confirms before a signal."""
+    time read from the process table right after ``p`` appears, as the kernel reads it: the identity a cleanup
+    confirms before a signal."""
     part = str(marker) + '.part'
-    return ('s=subprocess.run(["ps","-o","lstart=","-p",str(p.pid)],capture_output=True,text=True).stdout.strip();'
-            'open(%r,"w").write(str(p.pid)+" "+s);os.replace(%r,%r);' % (part, part, str(marker)))
+    return ('s=subprocess.run(["ps","-o","lstart=","-p",str(p.pid)],capture_output=True,text=True,env=%r).stdout.strip();'
+            'open(%r,"w").write(str(p.pid)+" "+s);os.replace(%r,%r);' % (PS_ENVIRONMENT, part, part, str(marker)))
 
 
 def lstart(pid):
     """The start time ``ps`` shows for ``pid``, as ``record`` reads it; ``''`` when no process has ``pid``."""
-    return subprocess.run(['ps', '-o', 'lstart=', '-p', str(pid)], capture_output=True, text=True).stdout.strip()
+    return subprocess.run(['ps', '-o', 'lstart=', '-p', str(pid)], capture_output=True, text=True,
+                          env=PS_ENVIRONMENT).stdout.strip()
 
 
 class NativeTransportTests(unittest.TestCase):
@@ -1152,14 +1159,30 @@ class NativeTransportTests(unittest.TestCase):
                 # Nothing it names is signalled, or even looked for.
                 with patch.object(transport, '_process_table', side_effect=AssertionError('process table read')):
                     self.assertFalse(transport.stop_recorded(folder))
+        # Too large, or nested too deep for the JSON reader, it cannot be read either.
+        too_large = '{"processes": [%s]}' % ', '.join('{"pid": %d, "start": "Thu Nov 19 10:00:00 2026"}' % pid
+                                                       for pid in range(2, 2000))
+        self.assertGreater(len(too_large), 65536)
+        for name, raw in (('too large', too_large.encode()), ('too deep', b'[' * 60000)):
+            with self.subTest(name):
+                path.write_bytes(raw)
+                with self.assertRaises(ValueError):
+                    transport.read_tracked(folder)
+                with patch.object(transport, '_process_table', side_effect=AssertionError('process table read')):
+                    self.assertFalse(transport.stop_recorded(folder))
         path.unlink()
-        path.symlink_to(self.root / 'elsewhere.json')
+        # Not a regular file: a symlink, a directory, or a named pipe, which must not hold recovery waiting for a writer.
         (self.root / 'elsewhere.json').write_text('{"processes": []}')
-        with self.assertRaises(ValueError):
-            transport.read_tracked(folder)
-        self.assertFalse(transport.stop_recorded(folder))
+        for name, make in (('symlink', lambda: path.symlink_to(self.root / 'elsewhere.json')),
+                           ('dangling symlink', lambda: path.symlink_to(self.root / 'nowhere.json')),
+                           ('directory', path.mkdir), ('named pipe', lambda: os.mkfifo(path))):
+            with self.subTest(name):
+                make()
+                with self.assertRaises(ValueError):
+                    transport.read_tracked(folder)
+                self.assertFalse(transport.stop_recorded(folder))
+                path.rmdir() if name == 'directory' else path.unlink()
         # Missing, or naming none, there is nothing to stop.
-        path.unlink()
         with patch.object(transport, '_process_table', side_effect=AssertionError('process table read')):
             self.assertTrue(transport.stop_recorded(folder))
             transport.write_tracked(folder, {})
@@ -1175,6 +1198,17 @@ class NativeTransportTests(unittest.TestCase):
         # Without a root (Codex reaped, its pid free for reuse) only what is under a tracked process is followed.
         transport._track(tracked, {**table, 300: (150, 'T4'), 160: (100, 'T3')})
         self.assertEqual(tracked, {200: 'T1', 500: 'T5', 150: 'T6', 210: 'T7', 211: 'T8', 300: 'T4'})
+
+    def test_the_process_table_reads_the_same_whatever_the_caller_s_locale_and_time_zone(self):
+        # A start time is written by one process and checked by another, perhaps from a shell with other settings.
+        starts = []
+        for settings in ({'LC_ALL': 'fr_FR.UTF-8', 'TZ': 'EST5'}, {'LC_ALL': 'zh_CN.UTF-8', 'TZ': 'CST-8'},
+                         {'LC_ALL': 'C', 'TZ': 'UTC0', 'LANG': 'de_DE.UTF-8', 'LC_TIME': 'ja_JP.UTF-8'}):
+            with self.subTest(**settings), patch.dict(os.environ, settings), \
+                    patch.object(transport, '_POPEN', wraps=transport._POPEN) as ps:
+                starts.append(transport._process_table()[os.getpid()][1])
+                self.assertEqual(ps.call_args.kwargs['env'], PS_ENVIRONMENT)
+        self.assertEqual(starts, [lstart(os.getpid())] * 3)
 
     def test_an_unreadable_process_table_still_kills_codex_and_reports_false(self):
         real = transport._POPEN
@@ -1280,15 +1314,51 @@ class NativeTransportTests(unittest.TestCase):
         self.with_tables(lambda: transport._sweep({500: 'T5'}, record), self.ORPHANED)
         self.assertEqual(recorded, [])
 
-    def test_a_record_that_cannot_be_written_does_not_hold_back_a_kill_or_a_sweep(self):
-        def record(tracked):
-            raise OSError('No space left on device')
-        stopped, signals = self.with_tables(lambda: transport._terminate(SimpleNamespace(pid=100), {}, record),
-                                            self.LISTED)
-        self.assertEqual((signals, stopped), ([('killpg', 100), ('killpg', 200), ('killpg', 300), ('kill', 400)], True))
-        stopped, signals = self.with_tables(lambda: transport._sweep({500: 'T5'}, record),
-                                            {**self.ORPHANED, 510: (500, 'T6')})
-        self.assertEqual((signals, stopped), ([('killpg', 500), ('killpg', 510)], True))
+    def test_a_record_that_fails_does_not_hold_back_a_kill_or_a_sweep(self):
+        for failure in (OSError('No space left on device'), TypeError('not JSON serializable'), RuntimeError('bug')):
+            with self.subTest(failure=failure):
+                def record(tracked):
+                    raise failure
+                stopped, signals = self.with_tables(lambda: transport._terminate(SimpleNamespace(pid=100), {}, record),
+                                                    self.LISTED)
+                self.assertEqual((signals, stopped),
+                                 ([('killpg', 100), ('killpg', 200), ('killpg', 300), ('kill', 400)], True))
+                stopped, signals = self.with_tables(lambda: transport._sweep({500: 'T5'}, record),
+                                                    {**self.ORPHANED, 510: (500, 'T6')})
+                self.assertEqual((signals, stopped), ([('killpg', 500), ('killpg', 510)], True))
+
+    def test_recovery_never_signals_this_process_its_ancestors_its_group_or_its_session(self):
+        # This process runs under a parent and a grandparent; 700 is a server the call orphaned. Fake pids are far
+        # above any pid this machine gives out. Nothing here sends a real signal.
+        me, parent, grandparent = os.getpid(), 2_000_001, 2_000_002
+        group, session = os.getpgrp(), os.getsid(0)
+        table = {1: (0, 'boot'), grandparent: (1, 'TG'), parent: (grandparent, 'TP'), me: (parent, 'TM'),
+                 2_000_500: (1, 'T5'), 2_000_600: (1, 'T6'), 2_000_700: (1, 'T7')}
+        folder = self.root / 'recovered'; folder.mkdir()
+
+        def stop(tracked, read=table):
+            transport.write_tracked(folder, tracked)
+
+            def run():
+                # 2_000_500 is in this process's group, 2_000_600 in its session; every other process leads its own.
+                with patch.object(transport.os, 'getpgid', side_effect=lambda pid: group if pid == 2_000_500 else pid), \
+                        patch.object(transport.os, 'getsid',
+                                     side_effect=lambda pid: session if pid in (0, 2_000_600) else pid):
+                    return transport.stop_recorded(folder)
+            return self.with_tables(run, read)
+        refused = {'this process': {me: 'TM'}, 'pid 1': {1: 'boot'}, 'its parent': {parent: 'TP'},
+                   'an ancestor': {grandparent: 'TG'}, 'a member of its group': {2_000_500: 'T5'},
+                   'a member of its session': {2_000_600: 'T6'},
+                   # Recorded with another start time, the parent's pid is refused all the same.
+                   'its parent, reused': {parent: 'T0'}}
+        for case, tracked in refused.items():
+            with self.subTest(case):
+                self.assertEqual(stop(tracked), (False, []))
+        # A process table that does not show this process says nothing of its ancestors: nothing is signalled.
+        self.assertEqual(stop({2_000_700: 'T7'}, read={1: (0, 'boot'), 2_000_700: (1, 'T7')}), (False, []))
+        # Beside such a pid the call's own processes are still stopped, but the call is not confirmed stopped.
+        self.assertEqual(stop({me: 'TM', 2_000_700: 'T7'}), (False, [('killpg', 2_000_700)]))
+        self.assertEqual(stop({2_000_700: 'T7'}), (True, [('killpg', 2_000_700)]))
 
 
 if __name__ == '__main__':

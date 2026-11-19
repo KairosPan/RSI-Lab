@@ -200,17 +200,22 @@ def _events(stdout, allowed_items=frozenset(), tool_servers=frozenset()):
 # The Popen of import time: tests stand a local process in for Codex by
 # replacing ``subprocess.Popen``, and the process table must still be read.
 _POPEN = subprocess.Popen
+# The whole environment ps runs in. Its lstart text follows the locale and the time zone; fixed, a start time
+# recorded by the Controller reads the same to a recovery run from a shell with other settings.
+_PS_ENVIRONMENT = {'LC_ALL': 'C', 'TZ': 'UTC0', 'PATH': '/usr/bin:/bin'}
 
 
 def _process_table():
     """Every process as ``{pid: (ppid, start)}``, from ``ps -axo pid=,ppid=,lstart=``.
 
     ``start`` is the raw ``lstart`` text, decoded losslessly: with the pid it
-    names one process, as a pid can be reused once its process is gone.
-    Raises ``OSError`` or ``ValueError`` when the table cannot be read.
+    names one process, as a pid can be reused once its process is gone. ``ps``
+    runs in ``_PS_ENVIRONMENT`` alone, so the text does not depend on who
+    reads the table. Raises ``OSError`` or ``ValueError`` when the table
+    cannot be read.
     """
     with _POPEN(['ps', '-axo', 'pid=,ppid=,lstart='], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL) as ps:
+                stderr=subprocess.DEVNULL, env=_PS_ENVIRONMENT) as ps:
         try:
             listing = ps.communicate(timeout=5)[0]
         except subprocess.TimeoutExpired:
@@ -316,8 +321,8 @@ def _terminate(process, tracked=None, record=None):
     saw under the call (none when the call does not track them), since a
     killed parent's children are reparented and no longer found through it;
     given ``record``, ``record(tracked)`` is called then if that added a
-    process. A record that cannot be written (``OSError``) does not hold back
-    the kill. Codex's group is then killed, and every tracked process by
+    process. A record that fails, however, does not hold back the kill.
+    Codex's group is then killed, and every tracked process by
     ``_stop``. Codex's own pid cannot have been reused, as Codex is not reaped
     before this. Returns whether every process seen under the call, at a
     sample or at the kill, was stopped; a process that detaches and loses its
@@ -335,7 +340,7 @@ def _terminate(process, tracked=None, record=None):
     if record is not None and tracked != before:
         try:
             record(tracked)
-        except OSError:
+        except Exception:
             pass             # What the kill found is stopped all the same, and the result says whether it was.
     try:
         os.killpg(process.pid, signal.SIGKILL)
@@ -350,8 +355,8 @@ def _sweep(tracked, record=None):
     A last sample follows the tracked processes that are still the same to
     their children. Codex's pid is no root: Codex has been reaped, and its pid
     can be reused. Given ``record``, ``record(tracked)`` is called before any
-    signal if the sample added a process; one that cannot be written
-    (``OSError``) does not hold back the stop. Returns what ``_stop`` returns,
+    signal if the sample added a process; one that fails, however, does not
+    hold back the stop. Returns what ``_stop`` returns,
     ``False`` when the last sample cannot be read; ``True`` when nothing was
     tracked.
     """
@@ -366,7 +371,7 @@ def _sweep(tracked, record=None):
     if record is not None and tracked != before:
         try:
             record(tracked)
-        except OSError:
+        except Exception:
             pass             # As in _terminate.
     return _stop(tracked) and sampled
 
@@ -384,23 +389,44 @@ def write_tracked(folder, tracked):
     _replace_bytes(Path(folder) / TRACKED_FILE, (json.dumps({'processes': processes}) + '\n').encode('ascii'))
 
 
+# The most a tracked file may hold; a call's processes take a few dozen bytes each.
+_TRACKED_BYTES = 65536
+
+
 def read_tracked(folder):
     """The processes a call folder's ``TRACKED_FILE`` names, as ``{pid: start}``; ``{}`` when there is none.
 
-    Raises ``ValueError`` when the file is a symlink or malformed: anything
-    but one JSON object holding only ``processes``, a list of objects each
-    holding only a ``pid``, an integer from 1 to 2**31 - 1, and a ``start``,
-    nonempty text, no pid twice. Another failure to read it raises
-    ``OSError``.
+    The file is opened without following a symlink and without waiting on a
+    named pipe. Raises ``ValueError`` when it is not a regular file, holds
+    more than ``_TRACKED_BYTES``, or is malformed: anything but one JSON object
+    holding only ``processes``, a list of objects each holding only a
+    ``pid``, an integer from 1 to 2**31 - 1, and a ``start``, nonempty text,
+    no pid twice; nesting too deep for the JSON reader included. Another
+    failure to read it raises ``OSError``.
     """
-    path = Path(folder) / TRACKED_FILE
-    if path.is_symlink():
-        raise ValueError(TRACKED_FILE + ' is a symlink')
     try:
-        raw = path.read_bytes()
+        fd = os.open(Path(folder) / TRACKED_FILE, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
         return {}
-    value = _json(raw.decode('utf-8'))
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise ValueError(TRACKED_FILE + ' is a symlink') from None
+        raise
+    chunks, size = [], 0
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError(TRACKED_FILE + ' is not a regular file')
+        while size <= _TRACKED_BYTES and (chunk := os.read(fd, _TRACKED_BYTES + 1 - size)):
+            chunks.append(chunk)
+            size += len(chunk)
+    finally:
+        os.close(fd)
+    if size > _TRACKED_BYTES:
+        raise ValueError(TRACKED_FILE + ' holds more than ' + str(_TRACKED_BYTES) + ' bytes')
+    try:
+        value = _json(b''.join(chunks).decode('utf-8'))
+    except RecursionError:
+        raise ValueError('Malformed ' + TRACKED_FILE + ': nested too deep') from None
     if not isinstance(value, dict) or set(value) != {'processes'} or not isinstance(value['processes'], list):
         raise ValueError('Malformed ' + TRACKED_FILE)
     tracked = {}
@@ -418,15 +444,50 @@ def stop_recorded(folder):
 
     What ``_stop`` does, for what ``read_tracked`` reads: the process table is
     read just before any signal, and a pid that is gone or now has another
-    start time is not signalled and counts as stopped. Returns what ``_stop``
-    returns, ``True`` when the file is missing or names none; ``False``, with
-    no table read and no signal sent, when it cannot be read or is malformed.
+    start time is not signalled and counts as stopped. The file is not
+    trusted to name only processes that ran under the call: a pid
+    ``_protected`` names is never signalled, and the call is then not
+    confirmed stopped, though the other pids are stopped. Returns what
+    ``_stop`` returns, ``True`` when the file is missing or names none;
+    ``False`` when a pid is protected or the table cannot be read, and, with
+    no table read and no signal sent, when the file cannot be read or parsed
+    in any way.
     """
     try:
         tracked = read_tracked(folder)
+    except Exception:        # Whatever stops it being read, nothing it names can be confirmed stopped.
+        return False
+    if not tracked:
+        return True
+    try:
+        protected = _protected(tracked, _process_table())
     except (OSError, ValueError):
         return False
-    return _stop(tracked)
+    return _stop({pid: start for pid, start in tracked.items() if pid not in protected}) and not protected
+
+
+def _protected(pids, table):
+    """The pids of ``pids`` that recovery must never signal, by the process ``table`` and this process's own ids.
+
+    These are pid 1 and below; this process and its ancestors in ``table``;
+    and a process in this process's group or session. When ``table`` does
+    not show this process its ancestors are unknown, and every pid is
+    protected.
+    """
+    lineage, pid = set(), os.getpid()
+    if pid not in table:
+        return set(pids)
+    while pid in table and pid not in lineage:
+        lineage.add(pid)
+        pid = table[pid][0]
+    group, session = os.getpgrp(), os.getsid(0)
+
+    def ours(pid):
+        try:
+            return os.getpgid(pid) == group or os.getsid(pid) == session
+        except OSError:      # Gone, or in a session the system does not show to this one: not this process's.
+            return False
+    return {pid for pid in pids if pid <= 1 or pid in lineage or ours(pid)}
 
 
 def _provider_stdout(folder):

@@ -382,6 +382,38 @@ class NativeRecoveryTests(unittest.TestCase):
         self.assertIsNone(self.recover(LOCAL_SERVER_ONLY))
         self.assertEqual(server.wait(timeout=5), -signal.SIGKILL)
 
+    def test_a_recorded_start_time_does_not_depend_on_who_reads_it(self):
+        # The Controller recorded the server from a shell with one locale and time zone; recovery runs from another.
+        with patch.dict(os.environ, {'LC_ALL': 'fr_FR.UTF-8', 'TZ': 'EST5'}):
+            server, start = self.server()
+        self.write_call(LOCAL_SERVER_ONLY, stream=TOOL_FREE_STREAM, turn=rows('t2'), died=True)
+        transport.write_tracked(self.folder, {server.pid: start})
+        with patch.dict(os.environ, {'LC_ALL': 'zh_CN.UTF-8', 'TZ': 'CST-8'}):
+            self.assertIsNone(self.recover(LOCAL_SERVER_ONLY))
+        self.assertEqual(server.wait(timeout=5), -signal.SIGKILL)
+
+    def tear_journal(self):
+        """Leave the journal as a Controller killed inside ``JournalWriter.append`` leaves it: a record cut short."""
+        with (self.folder / 'journal.jsonl').open('ab') as stream:
+            stream.write(b'{"seq": 6, "stream": "stdout", "kind": "stream_ch')
+
+    def test_a_torn_journal_still_has_what_the_call_recorded_stopped(self):
+        server, start = self.server()
+        self.write_call(LOCAL_SERVER_ONLY, stream=TOOL_FREE_STREAM, turn=rows('t2'), died=True)
+        self.tear_journal()
+        transport.write_tracked(self.folder, {server.pid: start})
+        # A call that is not the Effect's is refused before anything is signalled, torn journal or not.
+        with patch.object(transport.os, 'killpg', wraps=os.killpg) as killpg, \
+                patch.object(transport.os, 'kill', wraps=os.kill) as kill, \
+                self.assertRaisesRegex(RecoveryBlocked, '^recovery_binding_mismatch: '):
+            self.recover(URL_SERVER_ONLY)
+        killpg.assert_not_called(); kill.assert_not_called()
+        self.assertIsNone(server.poll())
+        # The Effect's own call: its gap is still raised, once the server it recorded has been stopped.
+        with self.assertRaisesRegex(RecoveryBlocked, '^journal_gap: '):
+            self.recover(LOCAL_SERVER_ONLY)
+        self.assertEqual(server.wait(timeout=5), -signal.SIGKILL)
+
     def test_a_call_that_tracked_nothing_has_no_process_stopped(self):
         # Neither the terminal nor a local tool server: the process table is not read, a tracked file not consulted.
         for settings in (None, SEARCH, URL_SERVER_ONLY):
