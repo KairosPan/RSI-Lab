@@ -731,9 +731,9 @@ class NativeTransportTests(unittest.TestCase):
                  'a\x00b': "Invalid path of skill plot-check: 'a\\x00b'"}
         for path, message in cases.items():
             with self.subTest(path=path):
+                skills = {'plot-check': {**PLOT_CHECK, 'files': {**files, path: blob}}}
                 with self.assertRaises(ValueError) as raised:
-                    transport.write_skills(self.workspace, {'plot-check': {**PLOT_CHECK, 'files': {**files, path: blob}}},
-                                           objects)
+                    transport.write_skills(self.workspace, skills, objects)
                 self.assertTrue(str(raised.exception).startswith(message), str(raised.exception))
                 self.assertEqual(self.files_under(self.workspace), ['.agents/skills/old/SKILL.md', '.agents/stale.md'])
 

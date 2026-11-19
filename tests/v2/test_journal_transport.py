@@ -191,8 +191,9 @@ class TransportTests(unittest.TestCase):
 
     def test_missing_cli_records_definite_undispatched_failure(self):
         # A missing CLI cannot be asked its version either.
+        missing = FileNotFoundError('provider unavailable')
         with patch.object(transport, 'codex_version', return_value=None), \
-                patch.object(transport.subprocess, 'Popen', side_effect=FileNotFoundError('provider unavailable')) as spawn:
+                patch.object(transport.subprocess, 'Popen', side_effect=missing) as spawn:
             result = transport.invoke('Inspect this task', {'type': 'object'}, self.folder,
                                       'test-model', 'medium')
         spawn.assert_called_once()

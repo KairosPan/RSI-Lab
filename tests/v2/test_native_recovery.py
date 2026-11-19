@@ -455,7 +455,8 @@ class RecoveryAgreesWithTheExecutorTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, places, ignore_errors=True)
         (places / 'home').mkdir()
         (places / 'codex-home').mkdir()
-        for patcher in (patch.dict(os.environ, {'HOME': str(places / 'home'), 'CODEX_HOME': str(places / 'codex-home')}),
+        homes = {'HOME': str(places / 'home'), 'CODEX_HOME': str(places / 'codex-home')}
+        for patcher in (patch.dict(os.environ, homes),
                         patch.object(native, 'MACHINE_SKILLS', places / 'machine-skills'),
                         patch.object(transport, 'codex_version', return_value='0.170.0')):
             patcher.start()

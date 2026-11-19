@@ -338,7 +338,7 @@ class RoleSettingsTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, r'^native_capabilities\.subagents\.roles\.x\.' + field):
                     native.validate({**PLAIN, 'subagents': {'max_concurrent': 3, 'roles': refused}})
         # Its closing tag, or the words without the brackets, are not the mark.
-        lab({'roles': {'x': {**R, 'instructions': 'Refine; skills_instructions and </skills_instructions> are words.'}}})
+        lab({'roles': {'x': {**R, 'instructions': 'Refine; skills_instructions, </skills_instructions> are words.'}}})
 
     def test_role_file_survives_toml(self):                                  # Review Focus 2
         import tomllib
@@ -805,7 +805,8 @@ class SkillSettingsTests(unittest.TestCase):
                 **read(folder, where), 'scripts/A.py': b'a = 1\n', 'scripts/a.py': b'a = 2\n'}):
             with self.assertRaisesRegex(ValueError, r"^native_capabilities\.lab\.skills\.plot-check may not hold both "
                                                     r"'scripts/A\.py' and 'scripts/a\.py'"):
-                native.freeze_skills({'lab': {'terminal': True, 'skills': {'root': str(skill_folder(self.tmp / 'any'))}}},
+                root = str(skill_folder(self.tmp / 'any'))
+                native.freeze_skills({'lab': {'terminal': True, 'skills': {'root': root}}},
                                      lambda raw: stored.append(raw) or sha(raw))
         self.assertEqual(stored, [])
         root = skill_folder(self.tmp / 'unprintable')
