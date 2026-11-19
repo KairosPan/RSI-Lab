@@ -5,6 +5,8 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -14,6 +16,34 @@ from rsi_lab.controller import Controller
 from rsi_lab.runtime import Runtime
 from rsi_lab.store import Store
 from pablo_task import harness, team
+
+
+# A tool server reached by URL; the URL is invented.
+PAPERS = {'description': 'Full text of open-access papers.', 'url': 'https://papers.example.org/mcp'}
+# The skill of the kernel's tests.v2.native_fixtures.skill_folder, byte for byte. That module cannot be imported here:
+# on this suite's path the package name tests is this folder's own.
+SKILL_MD = (b'---\nname: plot-check\ndescription: Checks a plot before it is reported.\n---\n'
+            b'Open the plot and check its axes and units.\n')
+CHECK_PY = b'print("axes checked")\n'
+
+
+def skill_folder(root):
+    """``root`` made a skills folder holding plot-check: ``SKILL.md`` and ``scripts/check.py``. Returns ``root``."""
+    (root / 'plot-check' / 'scripts').mkdir(parents=True)
+    (root / 'plot-check' / 'SKILL.md').write_bytes(SKILL_MD)
+    (root / 'plot-check' / 'scripts' / 'check.py').write_bytes(CHECK_PY)
+    return root
+
+
+def separate_homes(case, base):
+    """Point HOME, CODEX_HOME and the machine's skills folder at empty places under ``base`` for the test ``case``.
+
+    A run with skills is checked against the folders Codex lists skills from; no test may look at the real ones.
+    """
+    for patcher in (patch.dict(os.environ, {'HOME': str(base / 'home'), 'CODEX_HOME': str(base / 'codex-home')}),
+                    patch.object(native, 'MACHINE_SKILLS', base / 'machine-skills')):
+        patcher.start()
+        case.addCleanup(patcher.stop)
 
 
 def tree(base):
@@ -32,6 +62,11 @@ class TeamTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory(prefix='pablo-team-')
         self.addCleanup(temporary.cleanup)
         self.base = Path(temporary.name).resolve()
+        separate_homes(self, self.base)
+        # A stand-in for the repository checkout, and a skills folder outside it.
+        self.checkout = self.base / 'repository-checkout'
+        self.checkout.mkdir()
+        self.skills = skill_folder(self.base / 'research-skills')
 
     def test_role_text_is_the_harness_text_plus_the_closing(self):
         for role in ('local', 'challenge'):
@@ -199,6 +234,72 @@ class TeamTests(unittest.TestCase):
         for block in ({'meta': {'web_search': 'yes'}}, {'search': on}):
             with self.subTest(block=block), self.assertRaises(ValueError):
                 team.not_blind(block)
+
+    def test_tool_servers_make_the_run_not_blind(self):
+        chem = {'description': 'Fingerprints.', 'command': sys.executable}
+        self.assertEqual(team.not_blind({'lab': {'subagents': True, 'tool_servers': {'papers': PAPERS}},
+                                         'meta': {'tool_servers': {'chem': chem}}}),
+                         'Tool servers are on for the Lab and Meta: the hidden objective is protected by instruction '
+                         'only, and this run is not a blind run.')
+        both = {'lab': {'subagents': True, 'web_search': True, 'tool_servers': {'papers': PAPERS}}}
+        self.assertEqual(team.not_blind(both), team.NOT_BLIND + ' ' + team.TOOL_SERVERS_TEMPLATE.format('the Lab'))
+        # Each sentence names its own roles, in the order lab, meta, literature.
+        split = {'lab': {'web_search': True}, 'meta': {'tool_servers': {'chem': chem}},
+                 'literature': {'web_search': True, 'tool_servers': {'papers': PAPERS}}}
+        self.assertEqual(team.not_blind(split), team.NOT_BLIND_TEMPLATE.format('the Lab and Literature') + ' '
+                         + team.TOOL_SERVERS_TEMPLATE.format('Meta and Literature'))
+        # An empty object declares no server.
+        self.assertIsNone(team.not_blind({'lab': {'subagents': True, 'tool_servers': {}}}))
+        # Image viewing and skills alone make no statement.
+        self.assertIsNone(team.not_blind(team.native_block(
+            {'lab': {'subagents': True, 'terminal': True, 'view_image': True, 'skills': {'root': str(self.skills)}}},
+            protected=[self.checkout])))
+
+    def test_the_new_keys_pass_through_the_kernel_validation(self):
+        plain_http = {**PAPERS, 'url': 'http://papers.example.org/mcp'}
+        for bad in ({'lab': {'subagents': True, 'view_image': True}},
+                    {'lab': {'subagents': True, 'tool_servers': {'p': plain_http}}},
+                    {'lab': {'subagents': True, 'skills': {'root': str(self.skills)}}},
+                    {'lab': {'subagents': True, 'terminal': True, 'skills': {'root': str(self.base / 'missing')}}}):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                team.native_block(bad, protected=[])
+        given = {'lab': {'subagents': True, 'terminal': True, 'view_image': True,
+                         'tool_servers': {'papers': PAPERS}, 'skills': {'root': str(self.skills)}}}
+        before = copy.deepcopy(given)
+        block = team.native_block(given, protected=[self.checkout])
+        self.assertEqual(given, before)
+        self.assertEqual((block['lab']['view_image'], block['lab']['tool_servers']), (True, {'papers': PAPERS}))
+        self.assertEqual(sorted(block['lab']['skills']['frozen']), ['plot-check'])
+        # Frozen without a store, as the kernel freezes it: the description and each file's SHA-256.
+        self.assertEqual(block['lab']['skills'], native.freeze_skills(given)['lab']['skills'])
+        self.assertEqual(native.capabilities({'native_capabilities': block})['lab']['skills'], block['lab']['skills'])
+        # The block preparation freezes is the one its not-blind statement is made from.
+        settings = team.preparation(given, protected=[self.checkout])
+        self.assertEqual(settings['native_capabilities'], block)
+        self.assertEqual(settings['pablo_not_blind'], team.TOOL_SERVERS_TEMPLATE.format('the Lab'))
+
+    def test_a_skills_folder_that_exposes_the_scorer_is_refused(self):
+        scorer = self.skills / 'plot-check' / 'pablo_task'
+        scorer.mkdir()
+        (scorer / 'oracle.py').write_bytes(b'')        # A valid skill file, and the scorer's source by its place.
+        inside = skill_folder(self.checkout / 'skills')
+        for root, reason in ((self.skills, "holds the scorer's source " + str(scorer / 'oracle.py')),
+                             (inside, 'lies inside the protected folder ' + str(self.checkout))):
+            for role in ('lab', 'meta'):
+                block = {'lab': {'subagents': True}}
+                block.setdefault(role, {}).update(terminal=True, skills={'root': str(root)})
+                with self.subTest(root=root, role=role), \
+                        self.assertRaisesRegex(ValueError, re.escape('native_capabilities.' + role + '.skills.root: ')
+                                               + '.*' + re.escape(reason)):
+                    team.native_block(block, protected=[self.checkout])
+        # Checked once, at preparation: the run holds the copy frozen then, which later changes to the folder do not
+        # reach, so a start checks the readable roots alone.
+        clean = skill_folder(self.base / 'clean-skills')
+        block = team.native_block({'lab': {'subagents': True, 'terminal': True, 'skills': {'root': str(clean)}}},
+                                  protected=[self.checkout])
+        (clean / 'plot-check' / 'pablo_task').mkdir()
+        (clean / 'plot-check' / 'pablo_task' / 'oracle.py').write_bytes(b'')
+        team.check_readable_roots({'native_capabilities': block, 'pablo_team_protected_roots': [str(self.checkout)]})
 
     def test_goal_states_the_team_in_order(self):
         order = ['local', 'challenge', 'default', 'lead', 'pablo.select_candidates', 'pablo.evaluate',

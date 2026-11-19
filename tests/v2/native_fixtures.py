@@ -3,9 +3,15 @@
 The rollout builders return complete records shaped as the live probe of
 2026-11-17 saw them, to follow the base rollout ``fixture`` of
 tests/v2/test_session_context.py, whose ``frame`` they use and re-export.
-No Codex or model process is run.
+Those of tool server calls, viewed images and skills lists follow the record
+shapes Codex 0.170.0 wrote in the spikes of the round-two design. No Codex or
+model process is run.
 """
-from tests.v2.test_session_context import frame
+import base64
+import hashlib
+import sys
+
+from tests.v2.test_session_context import THREAD, frame
 
 SEARCH = {'web_search': True, 'terminal': None, 'subagents': None}
 TERMINAL = {'web_search': False, 'terminal': {'readable_roots': []}, 'subagents': None}
@@ -21,6 +27,52 @@ ROLES = {'challenge': {'description': 'Argues against the "leading" series.',
          'local': R}
 PLAIN = {'web_search': False, 'terminal': None, 'subagents': {'max_concurrent': 3}}
 WITH_ROLES = {'web_search': False, 'terminal': None, 'subagents': {'max_concurrent': 3, 'roles': ROLES}}
+
+# Tool servers in normal form: one started locally, one reached by URL. Every path, URL and variable name is invented;
+# the command need not exist for validate, and here() swaps in this interpreter for what goes through capabilities.
+CHEM = {'description': 'Fingerprints and similarity for SMILES.', 'command': '/opt/tools/bin/python',
+        'args': ['-m', 'chem_server'], 'env': {'CHEM_MODE': 'fast'}, 'env_from': ['CHEM_API_KEY'],
+        'tool_timeout_seconds': 300}
+PAPERS = {'description': 'Full text of open-access papers.', 'url': 'https://papers.example.org/mcp',
+          'headers': {'X-Client': 'rsi-lab'}, 'token_from': 'PAPERS_TOKEN'}
+TOOL_SERVERS = {'chem': CHEM, 'papers': PAPERS}
+WITH_TOOL_SERVERS = {**SEARCH, 'tool_servers': TOOL_SERVERS}
+LOCAL_SERVER_ONLY = {'web_search': False, 'terminal': None, 'subagents': None, 'tool_servers': {'chem': CHEM}}
+URL_SERVER_ONLY = {'web_search': False, 'terminal': None, 'subagents': None, 'tool_servers': {'papers': PAPERS}}
+VIEW_IMAGE = {**TERMINAL, 'view_image': True}
+
+# A tool server call as the event stream of the calling thread shows it. A refused call has a null result, an error
+# object and the status failed.
+MCP_ITEM = {'type': 'mcp_tool_call', 'server': 'chem', 'tool': 'lookup', 'arguments': {'query': 'CCO'},
+            'result': {'content': [{'type': 'text', 'text': 'similarity 0.42'}], 'structured_content': None},
+            'error': None, 'status': 'completed'}
+# The same call's result as the rollout's McpToolCall item holds it.
+MCP_RESULT = {'content': [{'type': 'text', 'text': 'similarity 0.42'}], 'isError': False}
+# A viewed image as the image tool returns it: a PNG of 68 bytes as a base64 data URL.
+PNG = 'data:image/png;base64,' + base64.b64encode(b'\x89PNG\r\n\x1a\n' + bytes(60)).decode()
+
+# A skills folder of one skill, plot-check, and the frozen form it gives. The root in WITH_SKILLS is invented and need
+# not exist for validate; skill_folder() writes the same skill into a temporary folder for what reads a folder.
+SKILL_MD = (b'---\nname: plot-check\ndescription: Checks a plot before it is reported.\n---\n'
+            b'Open the plot and check its axes and units.\n')
+CHECK_PY = b'print("axes checked")\n'
+PLOT_CHECK = {'description': 'Checks a plot before it is reported.',
+              'files': {'SKILL.md': hashlib.sha256(SKILL_MD).hexdigest(),
+                        'scripts/check.py': hashlib.sha256(CHECK_PY).hexdigest()}}
+WITH_SKILLS = {**TERMINAL, 'skills': {'root': '/data/research-skills', 'frozen': {'plot-check': PLOT_CHECK}}}
+
+
+def here(server):
+    """A local tool server whose command is this interpreter, an executable file ``capabilities`` accepts."""
+    return {**server, 'command': sys.executable}
+
+
+def skill_folder(root):
+    """``root`` made a skills folder holding plot-check: ``SKILL.md`` and ``scripts/check.py``. Returns ``root``."""
+    (root / 'plot-check' / 'scripts').mkdir(parents=True)
+    (root / 'plot-check' / 'SKILL.md').write_bytes(SKILL_MD)
+    (root / 'plot-check' / 'scripts' / 'check.py').write_bytes(CHECK_PY)
+    return root
 
 
 def PROFILE(run_root, codex_home, workspace):
@@ -50,6 +102,66 @@ def tool_call(call_id, script):
                                     'name': 'exec', 'input': script})
             + frame('response_item', {'type': 'custom_tool_call_output', 'call_id': call_id,
                                       'output': [{'type': 'input_text', 'text': 'done'}]}))
+
+
+def _item_completed(item, turn, thread):
+    """An ``item_completed`` event in ``thread``'s rollout under its own ``turn``, as Codex 0.170.0 writes one."""
+    return frame('event_msg', {'type': 'item_completed', 'thread_id': thread, 'turn_id': turn, 'item': item})
+
+
+def mcp_call(call_id, server, tool, arguments, *, turn, status='completed', result=MCP_RESULT, duration=(0, 439666),
+             thread=THREAD):
+    """A tool server call's ``item_completed`` event in the calling thread's rollout: an ``McpToolCall`` item whose
+    ``id`` is ``call_id``, the call id the server receives, with ``duration`` given as ``(secs, nanos)``. The script
+    that made the call is a separate ``tool_call``, such as ``text(await tools.mcp__chem__lookup({query:"CCO"}));``."""
+    secs, nanos = duration
+    return _item_completed({'type': 'McpToolCall', 'id': call_id, 'server': server, 'tool': tool,
+                            'arguments': arguments, 'readOnlyHint': True, 'status': status, 'result': result,
+                            'duration': {'secs': secs, 'nanos': nanos}}, turn, thread)
+
+
+def image_view(call_id, path, *, turn, thread=THREAD):
+    """A viewed image's ``item_completed`` event in the viewing thread's rollout: an ``ImageView`` item whose
+    ``id`` is ``call_id`` and whose ``path`` is ``file://`` followed by the absolute ``path``."""
+    return _item_completed({'type': 'ImageView', 'id': call_id, 'path': 'file://' + path}, turn, thread)
+
+
+def viewed_image(call_id, path, data_url, *, turn, thread=THREAD):
+    """An image viewed through the ``exec`` tool: the ``custom_tool_call`` of a script that views ``path``, its
+    ``image_view`` event, then the ``custom_tool_call_output``: the script's text and the image as ``data_url``."""
+    script = 'const r = await tools.view_image({path:"' + path + '"}); image(r.image_url);'
+    return (frame('response_item', {'type': 'custom_tool_call', 'status': 'completed', 'call_id': call_id,
+                                    'name': 'exec', 'input': script})
+            + image_view(call_id, path, turn=turn, thread=thread)
+            + frame('response_item', {'type': 'custom_tool_call_output', 'call_id': call_id, 'output': [
+                {'type': 'input_text', 'text': 'Script completed\n'},
+                {'type': 'input_image', 'image_url': data_url, 'detail': 'original'}]}))
+
+
+def skills_list_text(roots, *skills):
+    """The text of the skills list Codex writes for a thread, in the record shape of the round-two design: a line of
+    prose under ``## Skills``, the ``roots`` as ``r0``, ``r1``, … in order, then one line per skill, each a ``(name,
+    description, file)`` tuple whose ``file`` is under a root label, such as ``r0/plot-check/SKILL.md``."""
+    return '\n'.join(['<skills_instructions>', '## Skills',
+                      'A skill is a set of local instructions in a SKILL.md file; open the file before using it.',
+                      '### Skill roots', *('- `r%d` = `%s`' % (number, root) for number, root in enumerate(roots)),
+                      '### Available skills', *('- %s: %s (file: %s)' % skill for skill in skills),
+                      '</skills_instructions>'])
+
+
+def skills_list(roots, *skills, before=(), after=()):
+    """The rollout record of a skills list (``skills_list_text``): a ``developer`` message holding it as an
+    ``input_text`` part, after the parts of the texts ``before`` and followed by those of ``after``. Codex 0.170.0
+    writes the lead's and a sub-agent's without a role as ``after=ROLE_LESS_PARTS``, and a sub-agent's with a
+    declared role also with ``before=(<the role's instructions>,)``."""
+    texts = (*before, skills_list_text(roots, *skills), *after)
+    return frame('response_item', {'type': 'message', 'role': 'developer', 'content': [
+        {'type': 'input_text', 'text': text} for text in texts]})
+
+
+# The parts Codex 0.170.0 writes after the skills list in the same developer message.
+ROLE_LESS_PARTS = ('<permissions instructions>\nFiles are read-only outside the workspace.\n</permissions instructions>',
+                   '<collaboration_mode>\nWork on your own.\n</collaboration_mode>')
 
 
 def collab(call_id, name, output):

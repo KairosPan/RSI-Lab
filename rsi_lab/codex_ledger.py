@@ -8,30 +8,63 @@ to a rollout of its own, found by its exact thread id as an owned rollout is
 (no scanning); its rows name the parent thread as ``session_id`` and the
 parent's turn as ``root_turn_id``.
 
-The same bytes say what the call did: its tool calls, its compactions, the last
-account snapshot and the permission profile of its last turn context. A
-sub-agent's own rollout says what it was and did: its role, whether it started
-with the parent's history, the model and effort of its turn, and its web
-searches. ``settle_call`` turns all this into what the receipt of a call that
-has ended says, for the executor and for recovery alike; a turn cut off before
-its terminal event is never charged. Nothing here runs Codex or writes anything.
+The same bytes say what the call did: its tool calls, its tool server calls,
+the images it viewed, its compactions, the last account snapshot, the
+permission profile of its last turn context and the skills lists Codex wrote.
+A sub-agent's own rollout says what it was and did: its role, whether it
+started with the parent's history, the model and effort of its turn, its web
+searches, tool server calls, viewed images and skills lists. ``settle_call``
+turns all this into what the receipt of a call that has ended says, for the
+executor and for recovery alike, and checks that Codex showed exactly the
+declared skills; a turn cut off before its terminal event is never charged.
+Nothing here runs Codex or writes anything.
 """
 from __future__ import annotations
 
+from collections import Counter
 import json
 import os
 from pathlib import Path
+import re
+import urllib.parse
 
 from . import native as native_tools, transport
-from .session_context import THREAD_ID
-from .store import digest
+from .session_context import THREAD_ID, VIEWED_IMAGE_OUTPUT, VIEWED_IMAGE_URL
+from .store import digest, encode
 
 COUNTERS = ('input_tokens', 'output_tokens', 'cached_input_tokens')
 # The record field that holds each tool call's input text.
 TOOL_CALLS = {'custom_tool_call': 'input', 'function_call': 'arguments'}
 MAX_TOOL_INPUTS = 32
 MAX_SEARCHES = 20
+MAX_TOOL_SERVER_CALLS = 32
+MAX_IMAGE_PATHS = 32
 EXCERPT_CHARS = 200
+# What a receipt records of tool server calls and of viewed images, each only for a role with that tool.
+TOOL_SERVER_RECORDS = ('tool_server_calls', 'tool_server_calls_omitted')
+IMAGE_RECORDS = ('images_viewed',)
+# Every viewed image's path, which read_turn and read_child also return for the check of the folders those images
+# lie in. No receipt records it.
+IMAGE_PATHS = 'image_view_paths'
+IMAGES_OUTSIDE = 'Codex showed images outside the folders this role may read: {outside} of {viewed}'
+SUB_AGENTS_UNCHECKED = ("Codex's sub-agents could not be checked for images outside the folders this role may read: "
+                        '{unchecked} of {named}')
+# Codex's skills list of a thread: a text part of a developer message, in any position, that begins with
+# SKILLS_LIST_START and ends with SKILLS_LIST_END. Any text part of such a message holding SKILLS_LIST_START is taken
+# for a list, and one that is not of that form is a list that cannot be read. read_turn returns the texts of those the
+# call added (SKILLS_LISTS[0]) and of those before it (SKILLS_LISTS[1]); read_child those of the sub-agent's whole
+# rollout (SKILLS_LISTS[0]). No receipt records them.
+SKILLS_LIST_START, SKILLS_LIST_END = native_tools.SKILLS_LIST_TAG, '</skills_instructions>'
+SKILLS_LISTS = ('skills_lists', 'earlier_skills_lists')
+TEXT_PARTS = ('input_text', 'output_text')
+SKILL_ROOT = re.compile(r'- `(r\d+)` = `(.+)`')
+# The description is greedy, so the last "(file: …)" of a line is the skill's file. A name holds no white space.
+SKILL_LINE = re.compile(r'- ([^:\s]+): (.*) \(file: (r\d+)/(.+)\)')
+# What marks a line as naming a skill's file: anywhere but a skill line of "Available skills" it makes a list unreadable.
+SKILL_FILE = re.compile(r'\(file: r\d+/')
+SKILLS_SECTIONS = {'### Skill roots': 'roots', '### Available skills': 'skills'}
+SKILLS_TO_NONE = 'Codex showed a skills list to a role without skills: '
+SKILLS_NOT_DECLARED = 'Codex showed skills other than the declared ones: '
 
 
 class LedgerUnavailable(ValueError):
@@ -75,6 +108,42 @@ def _records(raw, start=0):
     return records
 
 
+def _skills_lists(records):
+    """The texts of the skills lists among ``records``: every text part (``TEXT_PARTS``), in any position, of a
+    ``response_item`` ``message`` whose ``role`` is ``developer``, when its text holds ``SKILLS_LIST_START``
+    anywhere. Each such part is a list on its own, its text alone; one that does not begin with the tag is still
+    taken, and ``parse_skills_list`` refuses it. A sub-agent started with a declared role gets the role's
+    instructions as the first part of that message and the list as the second; the lead and other sub-agents get the
+    list first, then other parts."""
+    texts = []
+    for kind, payload in records:
+        content = payload.get('content')
+        if (kind != 'response_item' or payload.get('type') != 'message' or payload.get('role') != 'developer'
+                or not isinstance(content, list)):
+            continue
+        texts += [entry['text'] for entry in content
+                  if isinstance(entry, dict) and entry.get('type') in TEXT_PARTS
+                  and isinstance(entry.get('text'), str) and SKILLS_LIST_START in entry['text']]
+    return texts
+
+
+def _earlier_skills_lists(raw):
+    """The skills lists (``_skills_lists``) in ``raw``, bytes a call did not add, read line by line: a line that does
+    not hold ``SKILLS_LIST_START`` as written is passed over unparsed, and so is one that is not a JSON object with an
+    object payload. These only excuse a forked sub-agent's copies, so a list not found here can only make an error."""
+    marker, records = SKILLS_LIST_START.encode(), []
+    for line in raw.split(b'\n'):
+        if marker not in line:
+            continue
+        try:
+            record = json.loads(line.decode('utf-8'))
+        except ValueError:
+            continue
+        if isinstance(record, dict) and isinstance(record.get('payload'), dict):
+            records.append((record.get('type'), record['payload']))
+    return _skills_lists(records)
+
+
 def _counters(usage):
     """A usage row's per-request counters; ``cached_input_tokens`` is 0 when absent."""
     counters = ({name: usage.get(name, 0 if name == 'cached_input_tokens' else None) for name in COUNTERS}
@@ -105,6 +174,79 @@ def _search_query(item):
     return item['query'] if searched else None
 
 
+def _duration(value):
+    """The seconds of an ``McpToolCall`` item's ``duration``, ``{'secs': int, 'nanos': int}``; else ``None``."""
+    secs, nanos = (value.get('secs'), value.get('nanos')) if isinstance(value, dict) else (None, None)
+    if type(secs) is not int or type(nanos) is not int or secs < 0 or not 0 <= nanos < 10 ** 9:
+        return None
+    return secs + nanos / 1e9
+
+
+def _tool_server_call(item):
+    """What a receipt records of one ``McpToolCall`` item: its argument text (the string itself, else its JSON with
+    sorted keys) hashed whole and cut to ``EXCERPT_CHARS``, the size of its result and its duration. ``call_id`` is
+    the item's ``id``, the ``_meta.callId`` the server received. A field of the wrong type is ``None``."""
+    arguments = item.get('arguments')
+    text = arguments if isinstance(arguments, str) else json.dumps(arguments, ensure_ascii=False, sort_keys=True)
+    result = item.get('result')
+    try:
+        size = len(encode(result)) if isinstance(result, dict) else None
+    except ValueError:                      # A value JSON cannot carry, such as NaN or a lone surrogate.
+        size = None
+    return {'server': _text(item.get('server')), 'tool': _text(item.get('tool')), 'status': _text(item.get('status')),
+            'call_id': _text(item.get('id')), 'arguments_sha256': digest(text.encode('utf-8', 'surrogatepass')),
+            'arguments_excerpt': text[:EXCERPT_CHARS], 'result_bytes': size,
+            'duration_seconds': _duration(item.get('duration'))}
+
+
+def _image_bytes(image):
+    """The decoded size of a viewed image's base64 data URL, from its length and padding alone; 0 for any other."""
+    url = image.get('image_url')
+    if not isinstance(url, str) or VIEWED_IMAGE_URL.match(url) is None:
+        return 0
+    payload = url.split(',', 1)[1]
+    return max(0, 3 * len(payload) // 4 - payload[-2:].count('='))
+
+
+def _tools_and_images(items, outputs):
+    """The tool server calls and viewed images of a thread in one call, from its completed ``items`` and the
+    outputs of its exec tool that count, the only tool output Codex returns a viewed image in.
+
+    ``tool_server_calls`` records the first ``MAX_TOOL_SERVER_CALLS`` ``McpToolCall`` items, the rest counted in
+    ``tool_server_calls_omitted``. ``images_viewed`` keeps the ``path`` of the first ``MAX_IMAGE_PATHS``
+    ``ImageView`` items (``None`` when not text), counts the rest in ``paths_omitted``, and gives the ``count`` of
+    ``input_image`` items in the outputs and their decoded ``bytes``. ``IMAGE_PATHS`` holds every path.
+    """
+    calls = [item for item in items if item.get('type') == 'McpToolCall']
+    paths = [_text(item.get('path')) for item in items if item.get('type') == 'ImageView']
+    images = [entry for output in outputs if isinstance(output, list) for entry in output
+              if isinstance(entry, dict) and entry.get('type') == 'input_image']
+    return {'tool_server_calls': [_tool_server_call(item) for item in calls[:MAX_TOOL_SERVER_CALLS]],
+            'tool_server_calls_omitted': max(0, len(calls) - MAX_TOOL_SERVER_CALLS),
+            'images_viewed': {'paths': paths[:MAX_IMAGE_PATHS], 'paths_omitted': max(0, len(paths) - MAX_IMAGE_PATHS),
+                              'count': len(images), 'bytes': sum(_image_bytes(image) for image in images)},
+            IMAGE_PATHS: paths}
+
+
+def _completed_item(kind, payload):
+    """The item of an ``item_completed`` event when it is an object, else ``None``."""
+    item = payload.get('item') if kind == 'event_msg' and payload.get('type') == 'item_completed' else None
+    return item if isinstance(item, dict) else None
+
+
+def _in_turns(records, turns):
+    """The records that lie after a ``turn_context`` of one of ``turns`` and before the next ``turn_context``: a
+    sub-agent's records of the turns counted for a call, found by position for those that carry no turn id."""
+    inside, kept = False, []
+    for kind, payload in records:
+        if kind == 'turn_context':
+            turn = payload.get('turn_id')
+            inside = isinstance(turn, str) and turn in turns
+        elif inside:
+            kept.append((kind, payload))
+    return kept
+
+
 def _account(limits):
     primary = limits.get('primary') if isinstance(limits.get('primary'), dict) else {}
     credits = limits.get('credits') if isinstance(limits.get('credits'), dict) else {}
@@ -127,7 +269,12 @@ def read_turn(path, *, thread_id, prefix_bytes):
     ``tool_calls`` counts ``custom_tool_call`` and ``function_call`` records; ``tool_inputs`` hashes the input of
     the first ``MAX_TOOL_INPUTS`` and keeps its first ``EXCERPT_CHARS`` characters. ``account`` is the last
     ``rate_limits`` snapshot and ``profile`` the ``permission_profile`` of the last ``turn_context``, each
-    ``None`` when absent.
+    ``None`` when absent. ``tool_server_calls``, ``tool_server_calls_omitted``, ``images_viewed`` and every viewed
+    image's path (``IMAGE_PATHS``) are those of ``_tools_and_images``, from the ``item_completed`` events and the
+    exec tool's outputs (``VIEWED_IMAGE_OUTPUT``) after the prefix. ``skills_lists`` are the texts of the skills
+    lists Codex wrote after the prefix and ``earlier_skills_lists`` those within it (``_earlier_skills_lists``).
+    These serve only to excuse the copies a sub-agent started with the lead's history carries, so the prefix is read
+    only when the turn started a sub-agent; otherwise ``earlier_skills_lists`` is empty.
 
     ``LedgerUnavailable`` is raised when the bytes after the prefix are not whole JSON records starting on a
     record boundary, or a usage row belongs to another thread or session, names no turn or has invalid counters.
@@ -135,10 +282,15 @@ def read_turn(path, *, thread_id, prefix_bytes):
     _identity(thread_id, 'the session thread')
     if type(prefix_bytes) is not int or prefix_bytes < 0:
         raise LedgerUnavailable('the prefix must be a byte count')
-    rows, children, tool_inputs = [], [], []
+    rows, children, tool_inputs, items, outputs = [], [], [], [], []
     tool_calls = compactions = 0
     account = profile = None
-    for kind, payload in _records(_read(path), prefix_bytes):
+    raw = _read(path)
+    records = _records(raw, prefix_bytes)
+    for kind, payload in records:
+        item = _completed_item(kind, payload)
+        if item is not None:
+            items.append(item)
         if kind == 'token_usage_record':
             if payload.get('thread_id') != thread_id or payload.get('session_id') != thread_id:
                 raise LedgerUnavailable('a usage row belongs to another thread')
@@ -155,13 +307,14 @@ def read_turn(path, *, thread_id, prefix_bytes):
             tool_calls += 1
             if len(tool_inputs) < MAX_TOOL_INPUTS:
                 tool_inputs.append(_tool_input(payload))
+        elif kind == 'response_item' and payload.get('type') == VIEWED_IMAGE_OUTPUT:
+            outputs.append(payload.get('output'))
         elif kind == 'event_msg' and payload.get('type') == 'token_count':
             if isinstance(payload.get('rate_limits'), dict):
                 account = _account(payload['rate_limits'])
-        elif kind == 'event_msg' and payload.get('type') == 'item_completed':
-            item = payload.get('item')
+        elif item is not None:
             # Any kind: a sub-agent started in an earlier turn may be addressed again in this one.
-            if isinstance(item, dict) and item.get('type') == 'SubAgentActivity':
+            if item.get('type') == 'SubAgentActivity':
                 child = item.get('agent_thread_id')
                 entry = next((known for known in children if known['thread_id'] == child), None)
                 if entry is None:
@@ -174,7 +327,10 @@ def read_turn(path, *, thread_id, prefix_bytes):
     return {'rows': rows, 'turn_ids': list(dict.fromkeys(row['turn_id'] for row in rows)), 'requests': len(rows),
             **{name: sum(row[name] for row in rows) for name in COUNTERS}, 'children': children,
             'tool_calls': tool_calls, 'tool_inputs': tool_inputs, 'tool_inputs_omitted': tool_calls - len(tool_inputs),
-            'compactions': compactions, 'account': account, 'profile': profile}
+            'compactions': compactions, 'account': account, 'profile': profile, **_tools_and_images(items, outputs),
+            'skills_lists': _skills_lists(records),
+            'earlier_skills_lists': (_earlier_skills_lists(raw[:prefix_bytes])
+                                     if any(child['started_in_call'] for child in children) else [])}
 
 
 def _rollout_of(codex_home, thread_id):
@@ -217,8 +373,13 @@ def read_child(codex_home, child_thread_id, *, parent_thread_id, root_turn_ids):
     when it is text, else ``None``. ``searches`` are the queries of the child's web searches in this call:
     ``item_completed`` events whose item is an ``Extension`` of kind ``web.search`` or a ``WebSearch``, with a
     text ``query``, and whose ``turn_id`` is the child's own turn of a counted row. The first ``MAX_SEARCHES``
-    are kept, each cut to ``EXCERPT_CHARS`` characters, and the rest are counted in ``searches_omitted``. None
-    of these makes the rollout unreadable.
+    are kept, each cut to ``EXCERPT_CHARS`` characters, and the rest are counted in ``searches_omitted``.
+    ``tool_server_calls``, ``tool_server_calls_omitted``, ``images_viewed`` and every viewed image's path
+    (``IMAGE_PATHS``) are those of ``_tools_and_images``, from the ``item_completed`` events whose ``turn_id`` is
+    such a turn and from the exec tool's outputs, which carry no turn id, that lie after a ``turn_context`` of such
+    a turn and before the next ``turn_context``. ``skills_lists`` are the texts of the skills lists in its whole
+    rollout: the list Codex built when it started, any written since, and, when it started with the parent's
+    history, the copies of the parent's. None of these makes the rollout unreadable.
     """
     _identity(child_thread_id, 'the sub-agent thread')
     _identity(parent_thread_id, 'the parent thread')
@@ -233,22 +394,27 @@ def read_child(codex_home, child_thread_id, *, parent_thread_id, root_turn_ids):
                and payload.get('session_id') == parent_thread_id and payload.get('root_turn_id') in root_turn_ids]
     rows = [_counters(payload.get('usage')) for payload in counted]
     turns = {turn for turn in (payload.get('turn_id') for payload in counted) if isinstance(turn, str) and turn}
-    searches, context = [], {}
+    searches, items, context = [], [], {}
     for kind, payload in records:
         turn = payload.get('turn_id')
-        if kind == 'event_msg' and payload.get('type') == 'item_completed' and isinstance(turn, str) and turn in turns:
-            query = _search_query(payload.get('item'))
+        item = _completed_item(kind, payload)
+        if item is not None and isinstance(turn, str) and turn in turns:
+            items.append(item)
+            query = _search_query(item)
             if query is not None:
                 searches.append(query[:EXCERPT_CHARS])
         elif kind == 'turn_context' and isinstance(turn, str) and turn in turns:
             context = payload
+    outputs = [payload.get('output') for kind, payload in _in_turns(records, turns)
+               if kind == 'response_item' and payload.get('type') == VIEWED_IMAGE_OUTPUT]
     role, forked = meta.get('agent_role'), meta.get('forked_from_id')
     return {'thread_id': child_thread_id, 'rollout_ref': str(rollout.resolve()), 'rollout_sha256': digest(raw),
             'requests': len(rows), **{name: sum(row[name] for row in rows) for name in COUNTERS},
             'role': role if isinstance(role, str) and role else None,
             'forked_history': isinstance(forked, str) and forked != '',
             'model': _text(context.get('model')), 'effort': _text(context.get('effort')),
-            'searches': searches[:MAX_SEARCHES], 'searches_omitted': max(0, len(searches) - MAX_SEARCHES)}
+            'searches': searches[:MAX_SEARCHES], 'searches_omitted': max(0, len(searches) - MAX_SEARCHES),
+            **_tools_and_images(items, outputs), 'skills_lists': _skills_lists(records)}
 
 
 def _settled(source, tokens, reason, turn=None, children=()):
@@ -362,8 +528,235 @@ def _profile_in_force(profile, *, run_root, codex_home):
     return {Path(run_root).resolve(), Path(codex_home).resolve()} <= denied
 
 
+def _resolved(path):
+    """``path`` resolved now, symbolic links followed, else ``None``.
+
+    The deepest of ``path`` and its ancestors that resolves strictly is resolved; the parts below it are then kept
+    as written, so a plot deleted after it was viewed, with its folder, still lies where it was. They are kept only
+    when the first of them is truly absent, not even a dangling link, whose target cannot be told, and none of them
+    is ``.``, ``..`` or empty; a trailing slash names the folder itself. Any other failure to look at a part gives
+    ``None``: a folder that cannot be searched, which would otherwise hide a link inside it, a loop of links, a part
+    that is not a folder. It uses nothing a Python release the kernel runs on may lack, such as
+    ``os.path.ALLOW_MISSING``.
+    """
+    try:
+        head, tail = os.fspath(path), []
+        head = head.rstrip('/') or head
+        while True:
+            try:
+                resolved = Path(head).resolve(strict=True)
+                break
+            except FileNotFoundError:
+                parent, name = os.path.split(head)
+                if parent == head:
+                    return None
+                tail.append(name)
+                head = parent
+        if not tail:
+            return resolved
+        tail.reverse()
+        if any(part in ('', '.', '..') for part in tail):
+            return None
+        try:
+            os.lstat(resolved / tail[0])
+        except FileNotFoundError:
+            return resolved.joinpath(*tail)
+        return None          # It is there after all, such as a dangling link: where it leads cannot be told.
+    except (OSError, ValueError, RuntimeError):
+        return None
+
+
+def _image_file(path):
+    """The local file an ``ImageView`` item's ``path`` names, resolved; ``None`` when it names none.
+
+    Codex writes a ``file://`` URL with an empty host, whose path is percent-decoded; a plain absolute path is taken
+    as it is, never decoded, since ``%`` is a character of a file name. Anything else names no local file: another
+    scheme, a host, a query or a fragment, a relative path, a value that is not text.
+    """
+    if not isinstance(path, str):
+        return None
+    if path.startswith('file://'):
+        rest = path[len('file://'):]
+        if not rest.startswith('/') or '?' in rest or '#' in rest:
+            return None
+        try:
+            path = os.fsdecode(urllib.parse.unquote_to_bytes(rest))
+        except ValueError:                  # Text that is not UTF-8, such as a lone surrogate.
+            return None
+    return _resolved(path) if path.startswith('/') else None
+
+
+def _images_outside(paths, *, workspace, roots):
+    """How many of the viewed images at ``paths`` lie outside the ``workspace`` and the readable ``roots``.
+
+    Both sides are compared resolved (``_resolved``) as they are when the call is settled, not when the image was
+    viewed, so a symbolic link in the workspace to a file elsewhere lies outside. Paths are compared as spelled after
+    resolution: one written in another letter case than the workspace lies outside, even on a filesystem that ignores
+    case. Without a ``workspace`` every image lies outside; a path that names no local file (``_image_file``) does too.
+    Codex's permission profile is what keeps a role from reading elsewhere; this only reports what it sees afterwards.
+    """
+    places = [] if workspace is None else [place for place in map(_resolved, (workspace, *roots)) if place is not None]
+    files = [_image_file(path) for path in paths]
+    return sum(not (file is not None and any(file.is_relative_to(place) for place in places)) for file in files)
+
+
+def parse_skills_list(text):
+    """The roots and skills of a skills list Codex wrote: ``{'roots': {label: path}, 'skills': [{'name',
+    'description', 'root', 'file'}]}``, the skills in the order listed.
+
+    The text begins with ``SKILLS_LIST_START`` and ends with ``SKILLS_LIST_END``. Between them, a line
+    ``### Skill roots`` or ``### Available skills`` starts that section and any other line beginning with ``#`` ends
+    one. In the roots section every line beginning with ``- `` must be ``SKILL_ROOT``, each label once; in the
+    skills section every such line must be ``SKILL_LINE`` under a label the roots section gave. Both sections must
+    be there and the roots section must not be empty. Any other line that names a skill's file (``SKILL_FILE``), such
+    as one indented, bulleted otherwise or under another heading, is refused: Codex may have listed a skill there.
+    Every other line, such as prose or a bullet under another heading, is ignored. ``ValueError`` otherwise.
+    """
+    if not isinstance(text, str) or not text.startswith(SKILLS_LIST_START) or not text.endswith(SKILLS_LIST_END):
+        raise ValueError('a skills list must begin with <skills_instructions> and end with </skills_instructions>')
+    roots, skills, sections, section = {}, [], set(), None
+    for line in text[len(SKILLS_LIST_START):-len(SKILLS_LIST_END)].split('\n'):
+        if section == 'skills' and line.startswith('- '):
+            match = SKILL_LINE.fullmatch(line)
+            if match is None or match[3] not in roots:
+                raise ValueError('a skill line cannot be read')
+            skills.append({'name': match[1], 'description': match[2], 'root': match[3], 'file': match[4]})
+        elif SKILL_FILE.search(line):
+            raise ValueError('a line that is not a skill line names a skill file')
+        elif line.startswith('#'):
+            section = SKILLS_SECTIONS.get(line.rstrip())
+            sections.add(section)
+        elif section == 'roots' and line.startswith('- '):
+            match = SKILL_ROOT.fullmatch(line)
+            if match is None or match[1] in roots:
+                raise ValueError('a skill root line cannot be read')
+            roots[match[1]] = match[2]
+    if not {'roots', 'skills'} <= sections or not roots:
+        raise ValueError('a skills list must give its skill roots and its available skills')
+    return {'roots': roots, 'skills': skills}
+
+
+def compare_skills(lists, *, declared, workspace):
+    """How the skills lists ``lists`` (texts) compare with the ``declared`` skill names.
+
+    A skill is ``shown`` when its root lies at the workspace's ``.agents/skills`` (both absolute and compared
+    resolved, ``_resolved``), its file is ``<name>/SKILL.md`` and its name is declared and not yet seen in that
+    list. Any other skill is ``unexpected``, and its root path as written goes to ``folders``, each folder once; its
+    name goes nowhere. ``shown`` holds the names shown by the last list that can be read; ``missing`` the declared
+    names, in the order given, that some readable list does not show; ``unreadable`` counts the lists
+    ``parse_skills_list`` refuses. Descriptions are not compared: Codex may collapse their white space.
+    """
+    declared = list(declared)
+    home = None if workspace is None else _resolved(Path(workspace) / '.agents' / 'skills')
+    shown, folders, absent = [], [], set()
+    unexpected = unreadable = 0
+    for text in lists:
+        try:
+            listed = parse_skills_list(text)
+        except ValueError:
+            unreadable += 1
+            continue
+        seen = []
+        for skill in listed['skills']:
+            root = listed['roots'][skill['root']]
+            if (skill['name'] in declared and skill['name'] not in seen and skill['file'] == skill['name'] + '/SKILL.md'
+                    and home is not None and os.path.isabs(root) and _resolved(root) == home):
+                seen.append(skill['name'])
+                continue
+            unexpected += 1
+            if root not in folders:
+                folders.append(root)
+        shown = seen
+        absent.update(set(declared) - set(seen))
+    return {'shown': shown, 'unexpected': unexpected, 'folders': folders,
+            'missing': [name for name in declared if name in absent], 'unreadable': unreadable}
+
+
+def _own_lists(lists, earlier):
+    """``lists`` less the copies of ``earlier``: each text of ``earlier`` excuses one equal text of ``lists``, as
+    many times as ``earlier`` holds it and no more."""
+    copies, own = Counter(earlier), []
+    for text in lists:
+        if copies[text]:
+            copies[text] -= 1
+        else:
+            own.append(text)
+    return own
+
+
+def _skills_check(settings, turn, children, *, read, resumed, finished, thread_id, workspace):
+    """The skills error of a dispatched call, and what was compared for the threads its receipt names.
+
+    The threads checked are the lead's, when the call has one, with the lists Codex wrote after its prefix
+    (``None`` when its rollout was not ``read``), and each sub-agent the turn started, with the lists of its whole
+    rollout (``None`` when it is not among the readable ``children``: its rollout cannot be read or was never
+    looked for). Without declared skills each list must be absent, except the copies of the lists in the lead's
+    prefix that a sub-agent recorded as started with the lead's history carries (``_own_lists``); a started
+    sub-agent whose rollout was not read is an error, the lead's unread rollout is not checked. With declared skills
+    every list is compared (``compare_skills``), copies included, and an unreadable rollout or, in a ``finished``
+    call, a thread it started without a list is an error too. Returns ``(error, lead, started)``: the error or
+    ``None``, and the comparisons under declared skills of the lead (``None`` when not read) and of each started
+    sub-agent read, by thread id.
+    """
+    declared = list(native_tools.declared_skills(settings))
+    threads = ([(thread_id, turn['skills_lists'] if read else None, not resumed, False, False)]
+               if thread_id is not None else [])
+    for child in turn.get('children', ()):
+        if child['started_in_call']:
+            # Compared, not looked up: the turn records a sub-agent's id as written, which need not be text.
+            own = next((own for own in children if own['thread_id'] == child['thread_id']), None)
+            threads.append((child['thread_id'], None if own is None else own['skills_lists'], True, True,
+                            own is not None and own['forked_history']))
+    findings, lead, started = [], None, {}
+    for thread, lists, fresh, is_child, forked in threads:
+        parts = []
+        if not declared and lists is None:
+            if is_child:
+                parts.append('rollout unreadable')
+        elif not declared:
+            # A sub-agent forked with the lead's history carries a copy of its lists, perhaps from before roles
+            # without skills were shown none; only a list of its own counts.
+            lists = _own_lists(lists, turn.get('earlier_skills_lists', ()) if forked else ())
+            if lists:
+                got = compare_skills(lists, declared=(), workspace=workspace)
+                if len(lists) > got['unreadable']:
+                    parts.append(f'{got["unexpected"]} skills'
+                                 + (f' from {", ".join(got["folders"])}' if got['folders'] else ''))
+                if got['unreadable']:
+                    parts.append(f'{got["unreadable"]} lists unreadable')
+        elif lists is None:
+            parts.append('rollout unreadable')
+        else:
+            got = compare_skills(lists, declared=declared, workspace=workspace)
+            if is_child:
+                started[thread] = got
+            else:
+                lead = got
+            if got['unexpected']:
+                parts.append(f'{got["unexpected"]} unexpected from {", ".join(got["folders"])}')
+            if got['missing']:
+                parts.append('missing ' + ', '.join(got['missing']))
+            if got['unreadable']:
+                parts.append(f'{got["unreadable"]} lists unreadable')
+            if fresh and finished and not lists:
+                parts.append('no list')
+        if parts:
+            findings.append(f'{thread}: ' + '; '.join(parts))
+    error = ((SKILLS_NOT_DECLARED if declared else SKILLS_TO_NONE) + '; '.join(findings)) if findings else None
+    return error, lead, started
+
+
+def _skills_records(compared, *, started):
+    """What a receipt records of one thread's comparison (``None`` when its rollout was not read) under declared
+    skills: ``skills_shown`` when the call ``started`` the thread, ``None`` when not read; and ``skills_unexpected``,
+    the count and folders of the skills not declared, when there are any."""
+    return {**({'skills_shown': None if compared is None else compared['shown']} if started else {}),
+            **({'skills_unexpected': {'count': compared['unexpected'], 'folders': compared['folders']}}
+               if compared is not None and compared['unexpected'] else {})}
+
+
 def settle_call(folder, settings, *, session, codex_home, path, thread_id, stream_usage, run_root, finished,
-                dispatched=True):
+                dispatched=True, workspace=None):
     """What one ended call is charged, and what its receipt says of its tokens, its native tools and its confinement.
 
     The executor and recovery both settle a call here, so a call gets the same receipt from either. ``folder`` is the
@@ -377,6 +770,18 @@ def settle_call(folder, settings, *, session, codex_home, path, thread_id, strea
     ``tokens`` is what is charged, ``None`` when unknown, and ``usage_known`` is false then. ``profile_error`` is
     ``'Permission profile was not in force'`` when the terminal is on, the call was ``dispatched`` and its last turn
     did not run under the managed offline profile that denies ``run_root`` and ``codex_home``; else ``None``.
+    ``images_error`` is ``None`` unless image viewing is on. With it on, every image the call viewed, the turn's and
+    each readable sub-agent's (every ``ImageView`` path counted for ``images_viewed``, beyond those listed too), must
+    lie in the session's ``workspace`` or one of the terminal's readable roots, compared resolved as they are now
+    (``_images_outside``); when any does not, it is ``IMAGES_OUTSIDE`` with how many of how many, never a path. And
+    every sub-agent the turn names must have been read: one whose rollout could not be read, or that was never looked
+    for because the turn added no usage rows, adds ``SUB_AGENTS_UNCHECKED`` with how many of the named were not read,
+    after ``'; '`` when both apply. A turn whose own rollout cannot be read names none; with the terminal on, which
+    image viewing needs, its ``profile_error`` already makes the call invalid.
+    ``skills_error`` is ``None`` for a call never ``dispatched``; else it is what ``_skills_check`` finds in the skills
+    lists of the lead's thread and of each sub-agent the turn started, against the skills declared (none for a role
+    without skills, everything off included), each skill not declared by count and folder, never by name:
+    ``SKILLS_TO_NONE`` for a role without skills, ``SKILLS_NOT_DECLARED`` for one with.
     ``receipt`` holds ``token_source``, ``token_reason`` (only when unknown), ``stream_usage`` and ``ledger`` for every
     call. ``ledger`` adds up the usage rows read, the turn's and its readable children's (``requests`` and the
     counters, a lower bound when the usage is unknown), and names the turns whose rows those are (``turn_ids``, the
@@ -385,8 +790,13 @@ def settle_call(folder, settings, *, session, codex_home, path, thread_id, strea
     when anything is on, ``native_capabilities`` (``native.receipt_form`` of the settings: each declared sub-agent
     role by its description and the SHA-256 of its instructions), ``native_activity``
     (``transport.stream_activity`` of ``folder`` with the turn's tool calls, tool inputs, compactions and
-    ``provider_requests``) and ``child_threads``, the readable sub-agents as ``settle`` lists them. That activity
-    is recorded only: Codex's own tool calls charge no ``tool_calls``.
+    ``provider_requests``) and ``child_threads``, the readable sub-agents as ``settle`` lists them. With tool
+    servers declared, ``native_activity`` and each ``child_threads`` entry also hold ``TOOL_SERVER_RECORDS``, and
+    with image viewing on ``IMAGE_RECORDS``; other receipts hold neither, and none holds ``IMAGE_PATHS``. With skills
+    declared, ``native_activity`` holds ``skills_shown`` in a call that started the lead's thread and each entry of a
+    sub-agent the turn started holds its own, with ``skills_unexpected`` beside them when a list held skills not
+    declared (``_skills_records``); no receipt holds ``SKILLS_LISTS``. That activity is recorded only: Codex's own
+    tool calls charge no ``tool_calls``.
     """
     resumed = session is not None and bool(session.get('provider_thread_id'))
     prefix = ((session or {}).get('context_manifest') or {}).get('native_prefix') or {}
@@ -394,6 +804,12 @@ def settle_call(folder, settings, *, session, codex_home, path, thread_id, strea
                    prefix_bytes=prefix.get('prefix_bytes') if resumed else 0, resumed=resumed,
                    stream_usage=stream_usage, children_possible=settings['subagents'] is not None, finished=finished)
     turn = spent['turn'] or {}
+    viewing, skilled = settings.get('view_image', False), bool(native_tools.declared_skills(settings))
+    recorded = (TOOL_SERVER_RECORDS if native_tools.tool_servers(settings) else ()) + (IMAGE_RECORDS if viewing else ())
+    # A call never dispatched showed nothing.
+    skills_error, lead_skills, child_skills = (_skills_check(
+        settings, turn, spent['children'], read=spent['turn'] is not None, resumed=resumed, finished=finished,
+        thread_id=thread_id, workspace=workspace) if dispatched else (None, None, {}))
     receipt = {'token_source': spent['source'],
                'token_reason': spent['reason'] if spent['source'] == 'unknown' else None,
                'stream_usage': stream_usage, 'ledger': {**{name: spent[name] for name in ('requests',) + COUNTERS},
@@ -401,13 +817,30 @@ def settle_call(folder, settings, *, session, codex_home, path, thread_id, strea
     if dispatched and spent['turn'] is not None:
         receipt['account_snapshot'] = turn['account']
     if native_tools.any_on(settings):
+        unrecorded = set(TOOL_SERVER_RECORDS + IMAGE_RECORDS + (IMAGE_PATHS,) + SKILLS_LISTS) - set(recorded)
         receipt.update(native_capabilities=native_tools.receipt_form(settings),
                        native_activity={**transport.stream_activity(folder),
                            **{name: turn.get(name) for name in ('tool_calls', 'tool_inputs', 'tool_inputs_omitted',
                                                                 'compactions')},
-                           'provider_requests': turn.get('requests')},
-                       child_threads=spent['children'])
+                           'provider_requests': turn.get('requests'), **{name: turn.get(name) for name in recorded},
+                           **(_skills_records(lead_skills, started=not resumed) if skilled else {})},
+                       child_threads=[{**{key: value for key, value in child.items() if key not in unrecorded},
+                                       **(_skills_records(child_skills[child['thread_id']], started=True)
+                                          if child['thread_id'] in child_skills else {})}
+                                      for child in spent['children']])
     confined = (settings['terminal'] is None or not dispatched
                 or _profile_in_force(turn.get('profile'), run_root=run_root, codex_home=codex_home))
+    images_error = None
+    if viewing:
+        paths = [*turn.get(IMAGE_PATHS, ()), *(path for child in spent['children'] for path in child[IMAGE_PATHS])]
+        roots = (settings['terminal'] or {}).get('readable_roots', ())       # Image viewing needs the terminal.
+        outside = _images_outside(paths, workspace=workspace, roots=roots)
+        # A sub-agent the turn names whose rollout was not read, or was never looked for, viewed what nobody checked.
+        named, read = turn.get('children', []), [child['thread_id'] for child in spent['children']]
+        unchecked = sum(child['thread_id'] not in read for child in named)
+        images_error = '; '.join(
+            ([IMAGES_OUTSIDE.format(outside=outside, viewed=len(paths))] if outside else [])
+            + ([SUB_AGENTS_UNCHECKED.format(unchecked=unchecked, named=len(named))] if unchecked else [])) or None
     return {'tokens': spent['tokens'], 'usage_known': spent['source'] != 'unknown',
-            'profile_error': None if confined else 'Permission profile was not in force', 'receipt': receipt}
+            'profile_error': None if confined else 'Permission profile was not in force',
+            'images_error': images_error, 'skills_error': skills_error, 'receipt': receipt}

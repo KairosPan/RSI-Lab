@@ -7,6 +7,7 @@ including failed attempts, and never automatically retries or switches models.
 """
 from __future__ import annotations
 
+import errno
 import json
 import hashlib
 import math
@@ -14,7 +15,9 @@ import os
 from pathlib import Path
 import re
 import selectors
+import shutil
 import signal
+import stat
 import subprocess
 import tempfile
 import time
@@ -31,14 +34,18 @@ DISABLED_FEATURES = (
     "multi_agent", "multi_agent_v2", "image_generation", "skill_search", "hooks",
     "view_image", "goals", "sleep_tool", "skill_mcp_dependency_install",
 )
+# The command value, after its own -c, on which Codex writes no skills list: passed for every role without skills.
+NO_SKILLS_LIST = 'skills.include_instructions=false'
 # The Codex CLI versions this kernel's command, stream audit and rollout reader were checked against with real
 # calls. Codex changes what its flags do between versions (0.170.0 stopped honouring the multi_agent features
 # as an off switch), so a call is not sent on any other version. RSI_LAB_ALLOW_CODEX_VERSION names one more
 # version its owner accepts unchecked.
 SUPPORTED_CODEX_VERSIONS = ("0.170.0",)
+# The processes seen under a call that tracks them, written to its folder as they are seen (write_tracked).
+TRACKED_FILE = 'tracked_processes.json'
 ARTIFACTS = frozenset({"invocation.json", "prompt.txt", "schema.json", "events.jsonl",
                        "stderr.log", "response.json", "raw_response.txt", "usage.json", "transport_result.json", "journal.jsonl",
-                       "images", "images.json"})
+                       "images", "images.json", TRACKED_FILE})
 PREAMBLE = (
     "Return only one JSON object matching the supplied response schema. Use only the supplied "
     "task and evidence. Do not use tools, read files, browse, delegate, or inspect your environment.\n\n"
@@ -98,13 +105,17 @@ def _json(text):
                       parse_constant=lambda value: (_ for _ in ()).throw(ValueError(f"Invalid JSON number: {value}")))
 
 
-def _events(stdout, allowed_items=frozenset()):
+def _events(stdout, allowed_items=frozenset(), tool_servers=frozenset()):
     """Audit the whole event stream, preserving unknown usage instead of zeroes.
 
     ``allowed_items`` are the item types a call's native settings allow beside
     ``agent_message`` and ``reasoning`` (``native.stream_items``). Empty, the
     turn must hold exactly one assistant message. Otherwise earlier messages
     are progress notes and the last completed one is the output.
+
+    ``tool_servers`` are the names of the tool servers the settings declare.
+    An allowed ``mcp_tool_call`` item, in any ``item.*`` event, whose
+    ``server`` is not one of them makes the call invalid.
 
     Lines end at ``\\n`` only, as the journal frames them: Codex leaves U+2028,
     U+2029 and U+0085 unescaped inside strings. A trailing ``\\r`` is JSON
@@ -156,6 +167,10 @@ def _events(stdout, allowed_items=frozenset()):
             item_kind = item.get("type")
             if item_kind not in allowed:
                 errors.append(f"Forbidden tool or unsupported item: {item_kind!r}")
+            elif item_kind == "mcp_tool_call":
+                server = item.get("server")
+                if not isinstance(server, str) or server not in tool_servers:
+                    errors.append(f"Undeclared tool server: {server!r}")
             if kind == "item.completed" and item_kind == "agent_message":
                 if not isinstance(item.get("text"), str):
                     errors.append("Assistant output must be text")
@@ -185,17 +200,22 @@ def _events(stdout, allowed_items=frozenset()):
 # The Popen of import time: tests stand a local process in for Codex by
 # replacing ``subprocess.Popen``, and the process table must still be read.
 _POPEN = subprocess.Popen
+# The whole environment ps runs in. Its lstart text follows the locale and the time zone; fixed, a start time
+# recorded by the Controller reads the same to a recovery run from a shell with other settings.
+_PS_ENVIRONMENT = {'LC_ALL': 'C', 'TZ': 'UTC0', 'PATH': '/usr/bin:/bin'}
 
 
 def _process_table():
     """Every process as ``{pid: (ppid, start)}``, from ``ps -axo pid=,ppid=,lstart=``.
 
     ``start`` is the raw ``lstart`` text, decoded losslessly: with the pid it
-    names one process, as a pid can be reused once its process is gone.
-    Raises ``OSError`` or ``ValueError`` when the table cannot be read.
+    names one process, as a pid can be reused once its process is gone. ``ps``
+    runs in ``_PS_ENVIRONMENT`` alone, so the text does not depend on who
+    reads the table. Raises ``OSError`` or ``ValueError`` when the table
+    cannot be read.
     """
     with _POPEN(['ps', '-axo', 'pid=,ppid=,lstart='], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL) as ps:
+                stderr=subprocess.DEVNULL, env=_PS_ENVIRONMENT) as ps:
         try:
             listing = ps.communicate(timeout=5)[0]
         except subprocess.TimeoutExpired:
@@ -210,8 +230,18 @@ def _process_table():
     return table
 
 
-# Seconds between samples of the process table while a call with the terminal on runs.
+# Seconds between samples of the process table while a call that tracks its processes runs.
 TRACK_SECONDS = 1.0
+
+
+def _tracks(settings):
+    """Whether a call under normal-form ``settings`` tracks the processes that run under it.
+
+    It does with the terminal on, and with a tool server Codex starts from a
+    command, which leads its own process group and can outlive a killed turn.
+    A URL server has no process: alone, it starts no tracking.
+    """
+    return settings['terminal'] is not None or bool(native_tools.local_servers(settings))
 
 
 def _track(tracked, table, root=None):
@@ -282,27 +312,36 @@ def _stop(tracked):
         time.sleep(.05)
 
 
-def _terminate(process, tracked=None):
+def _terminate(process, tracked=None, record=None):
     """Kill the invocation's process group and every process seen under it.
 
-    A command Codex runs can lead its own process group, out of reach of
-    Codex's. Before any signal, what now runs below Codex is added to
-    ``tracked``, the processes earlier samples saw under the call (none when
-    the terminal is off), since a killed parent's children are reparented and
-    no longer found through it. Codex's group is then killed, and every
-    tracked process by ``_stop``. Codex's own pid cannot have been reused, as
-    Codex is not reaped before this. Returns whether every process seen under
-    the call, at a sample or at the kill, was stopped; a process that detaches
-    and loses its parent between two samples is not seen. ``False`` when a
-    read of the process table fails, as nothing can then be confirmed, though
-    Codex's group is killed all the same.
+    A command Codex runs, or a local tool server Codex starts, can lead its
+    own process group, out of reach of Codex's. Before any signal, what now
+    runs below Codex is added to ``tracked``, the processes earlier samples
+    saw under the call (none when the call does not track them), since a
+    killed parent's children are reparented and no longer found through it;
+    given ``record``, ``record(tracked)`` is called then if that added a
+    process. A record that fails, however, does not hold back the kill.
+    Codex's group is then killed, and every tracked process by
+    ``_stop``. Codex's own pid cannot have been reused, as Codex is not reaped
+    before this. Returns whether every process seen under the call, at a
+    sample or at the kill, was stopped; a process that detaches and loses its
+    parent between two samples is not seen. ``False`` when a read of the
+    process table fails, as nothing can then be confirmed, though Codex's
+    group is killed all the same.
     """
     tracked = {} if tracked is None else tracked
+    before = dict(tracked)
     try:
         _track(tracked, _process_table(), process.pid)
         listed = True
     except (OSError, ValueError):
         listed = False
+    if record is not None and tracked != before:
+        try:
+            record(tracked)
+        except Exception:
+            pass             # What the kill found is stopped all the same, and the result says whether it was.
     try:
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
@@ -310,22 +349,153 @@ def _terminate(process, tracked=None):
     return _stop(tracked) and listed
 
 
-def _sweep(tracked):
+def _sweep(tracked, record=None, table_read=False):
     """Stop what still runs of ``tracked`` once a call has ended without a kill.
 
     A last sample follows the tracked processes that are still the same to
     their children. Codex's pid is no root: Codex has been reaped, and its pid
-    can be reused. Returns what ``_stop`` returns, ``False`` when the last
-    sample cannot be read; ``True`` when nothing was tracked.
+    can be reused. Given ``record``, ``record(tracked)`` is called before any
+    signal if the sample added a process; one that fails, however, does not
+    hold back the stop. Returns what ``_stop`` returns,
+    ``False`` when the last sample cannot be read. When nothing was tracked,
+    ``True`` only if the process table was read at least once:
+    ``table_read`` says whether a sample during the call read it, and when
+    none did a last read is tried, which counts.
     """
     if not tracked:
+        if table_read:
+            return True
+        try:
+            _process_table()
+        except (OSError, ValueError):
+            return False     # No look at the table succeeded: nothing seen under the call is confirmed stopped.
         return True
+    before = dict(tracked)
     try:
         _track(tracked, _process_table())
         sampled = True
     except (OSError, ValueError):
         sampled = False
+    if record is not None and tracked != before:
+        try:
+            record(tracked)
+        except Exception:
+            pass             # As in _terminate.
     return _stop(tracked) and sampled
+
+
+def write_tracked(folder, tracked):
+    """Publish ``tracked`` (``{pid: start}``) as the call folder's ``TRACKED_FILE``, through ``_replace_bytes``.
+
+    The file holds ``{"processes": [{"pid": …, "start": …}, …]}`` in pid
+    order: pids and start times only, no command line and no environment. A
+    start time is text as ``_process_table`` decodes it; written with JSON
+    escapes, one that ``ps`` printed in another encoding than UTF-8 is read
+    back unchanged.
+    """
+    processes = [{'pid': pid, 'start': start} for pid, start in sorted(tracked.items())]
+    _replace_bytes(Path(folder) / TRACKED_FILE, (json.dumps({'processes': processes}) + '\n').encode('ascii'))
+
+
+# The most a tracked file may hold; a call's processes take a few dozen bytes each.
+_TRACKED_BYTES = 65536
+
+
+def read_tracked(folder):
+    """The processes a call folder's ``TRACKED_FILE`` names, as ``{pid: start}``; ``{}`` when there is none.
+
+    The file is opened without following a symlink and without waiting on a
+    named pipe. Raises ``ValueError`` when it is not a regular file, holds
+    more than ``_TRACKED_BYTES``, or is malformed: anything but one JSON object
+    holding only ``processes``, a list of objects each holding only a
+    ``pid``, an integer from 1 to 2**31 - 1, and a ``start``, nonempty text,
+    no pid twice; nesting too deep for the JSON reader included. Another
+    failure to read it raises ``OSError``.
+    """
+    try:
+        fd = os.open(Path(folder) / TRACKED_FILE, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise ValueError(TRACKED_FILE + ' is a symlink') from None
+        raise
+    chunks, size = [], 0
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError(TRACKED_FILE + ' is not a regular file')
+        while size <= _TRACKED_BYTES and (chunk := os.read(fd, _TRACKED_BYTES + 1 - size)):
+            chunks.append(chunk)
+            size += len(chunk)
+    finally:
+        os.close(fd)
+    if size > _TRACKED_BYTES:
+        raise ValueError(TRACKED_FILE + ' holds more than ' + str(_TRACKED_BYTES) + ' bytes')
+    try:
+        value = _json(b''.join(chunks).decode('utf-8'))
+    except RecursionError:
+        raise ValueError('Malformed ' + TRACKED_FILE + ': nested too deep') from None
+    if not isinstance(value, dict) or set(value) != {'processes'} or not isinstance(value['processes'], list):
+        raise ValueError('Malformed ' + TRACKED_FILE)
+    tracked = {}
+    for entry in value['processes']:
+        if (not isinstance(entry, dict) or set(entry) != {'pid', 'start'} or type(entry['pid']) is not int
+                or not 0 < entry['pid'] < 2 ** 31 or not isinstance(entry['start'], str) or not entry['start']
+                or entry['pid'] in tracked):
+            raise ValueError('Malformed ' + TRACKED_FILE)
+        tracked[entry['pid']] = entry['start']
+    return tracked
+
+
+def stop_recorded(folder):
+    """Stop the processes a call folder's ``TRACKED_FILE`` names, each only while it is still the same one.
+
+    What ``_stop`` does, for what ``read_tracked`` reads: the process table is
+    read just before any signal, and a pid that is gone or now has another
+    start time is not signalled and counts as stopped. The file is not
+    trusted to name only processes that ran under the call: a pid
+    ``_protected`` names is never signalled, and the call is then not
+    confirmed stopped, though the other pids are stopped. Returns what
+    ``_stop`` returns, ``True`` when the file is missing or names none;
+    ``False`` when a pid is protected or the table cannot be read, and, with
+    no table read and no signal sent, when the file cannot be read or parsed
+    in any way.
+    """
+    try:
+        tracked = read_tracked(folder)
+    except Exception:        # Whatever stops it being read, nothing it names can be confirmed stopped.
+        return False
+    if not tracked:
+        return True
+    try:
+        protected = _protected(tracked, _process_table())
+    except (OSError, ValueError):
+        return False
+    return _stop({pid: start for pid, start in tracked.items() if pid not in protected}) and not protected
+
+
+def _protected(pids, table):
+    """The pids of ``pids`` that recovery must never signal, by the process ``table`` and this process's own ids.
+
+    These are pid 1 and below; this process and its ancestors in ``table``;
+    and a process in this process's group or session. When ``table`` does
+    not show this process its ancestors are unknown, and every pid is
+    protected.
+    """
+    lineage, pid = set(), os.getpid()
+    if pid not in table:
+        return set(pids)
+    while pid in table and pid not in lineage:
+        lineage.add(pid)
+        pid = table[pid][0]
+    group, session = os.getpgrp(), os.getsid(0)
+
+    def ours(pid):
+        try:
+            return os.getpgid(pid) == group or os.getsid(pid) == session
+        except OSError:      # Gone, or in a session the system does not show to this one: not this process's.
+            return False
+    return {pid for pid in pids if pid <= 1 or pid in lineage or ours(pid)}
 
 
 def _provider_stdout(folder):
@@ -363,13 +533,16 @@ def _recorded_native(folder):
 def audited_events(folder):
     """Parse the durable unique provider frames, retaining all raw duplicates.
 
-    The item types allowed are those of the native settings recorded in
-    ``invocation.json``. Older one-shot archives without a journal remain
-    readable. A torn/conflicting journal cannot certify a complete invocation.
+    The item types allowed, and the tool servers a tool server call may name,
+    are those of the native settings recorded in ``invocation.json``. Older
+    one-shot archives without a journal remain readable. A torn/conflicting
+    journal cannot certify a complete invocation.
     """
     folder = Path(folder)
     stdout, capture = _provider_stdout(folder)
-    raw, usage, complete, errors = _events(stdout, native_tools.stream_items(_recorded_native(folder)))
+    settings = _recorded_native(folder)
+    raw, usage, complete, errors = _events(stdout, native_tools.stream_items(settings),
+                                           frozenset(native_tools.tool_servers(settings)))
     if capture is not None and capture['gaps']:
         errors.append('Execution journal has unresolved gaps or conflicting provider events')
         complete = False
@@ -527,10 +700,95 @@ def write_role_files(roles_dir, roles):
         _replace_bytes(roles_dir / file_name, raw)
 
 
+def write_skills(workspace, skills, objects):
+    """Write a role's frozen skills afresh into ``<workspace>/.agents/skills``, where Codex lists them.
+
+    ``skills`` is ``native.declared_skills(settings)``; ``objects`` is the run
+    store's object folder, which holds each file's bytes as ``<sha256>``.
+    Every blob is read first and must be a regular file, not a symlink, whose
+    bytes hash to its name. Then ``<workspace>/.agents`` is removed whatever
+    it holds (a symlink or a file is unlinked, a directory removed without
+    following the symlinks in it) and each file is written to
+    ``.agents/skills/<name>/<relative path>``, folders with mode ``0o700`` and
+    files with ``0o600`` through ``_replace_bytes``. The executable bit is not
+    kept: a skill's scripts are run through their interpreter. A workspace not
+    made yet is made.
+
+    Refused with ``ValueError`` before anything is deleted or written: a blob
+    that is missing, is not a regular file or holds other bytes; a skill name,
+    file path or SHA-256 the settings would not hold (a path must not leave its
+    skill's folder, ``native._is_skill_path``, and no two paths of a skill may
+    clash where letter case is ignored, ``native._refuse_clashing_paths``); and
+    a workspace that is a symlink.
+    """
+    workspace = Path(workspace)
+    contents = {}
+    for name, skill in skills.items():
+        if not isinstance(name, str) or not native_tools.SKILL_NAME.fullmatch(name):
+            raise ValueError('Invalid skill name: ' + repr(name))
+        contents[name] = {}
+        for path, sha256 in skill['files'].items():
+            if not native_tools._is_skill_path(path):
+                raise ValueError('Invalid path of skill ' + name + ': ' + repr(path))
+            if not isinstance(sha256, str) or not native_tools.SHA256.fullmatch(sha256):
+                raise ValueError('Invalid SHA-256 of skill file ' + name + '/' + path + ': ' + repr(sha256))
+            contents[name][path] = _stored_skill_file(objects, sha256, name + '/' + path)
+        native_tools._refuse_clashing_paths(contents[name], 'Skill ' + name)
+    if workspace.is_symlink():
+        raise ValueError('Session workspace cannot be a symlink')
+    workspace.mkdir(parents=True, exist_ok=True)
+    agents = workspace / '.agents'
+    if agents.is_symlink() or (os.path.lexists(agents) and not agents.is_dir()):
+        agents.unlink()
+    elif agents.is_dir():
+        shutil.rmtree(agents)
+    agents.mkdir(mode=0o700)
+    (agents / 'skills').mkdir(mode=0o700)
+    for name, files in contents.items():
+        for path, raw in files.items():
+            # Each folder is made on its own: mkdir's parents would take the default mode, not 0o700.
+            folder = agents / 'skills'
+            for part in [name, *path.split('/')[:-1]]:
+                folder = folder / part
+                folder.mkdir(mode=0o700, exist_ok=True)
+            _replace_bytes(folder / path.rpartition('/')[2], raw)
+
+
+def _stored_skill_file(objects, sha256, label):
+    """The bytes of the run store's blob ``<objects>/<sha256>``, which holds the skill file ``label``.
+
+    Raises ``ValueError`` naming ``label`` unless the blob is a regular file,
+    not a symlink, whose bytes hash to its name. It is opened without following
+    a symlink and without waiting on a named pipe.
+    """
+    where = 'The run store does not hold skill file ' + label + ': objects/' + sha256
+    try:
+        fd = os.open(Path(objects) / sha256, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        raise ValueError(where + ' is missing') from None
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise ValueError(where + ' is a symlink') from None
+        raise
+    chunks = []
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError(where + ' is not a regular file')
+        while chunk := os.read(fd, 1 << 16):
+            chunks.append(chunk)
+    finally:
+        os.close(fd)
+    raw = b''.join(chunks)
+    if hashlib.sha256(raw).hexdigest() != sha256:
+        raise ValueError(where + ' holds other bytes than its name says')
+    return raw
+
+
 def _command(folder, model, effort, cwd, session, image_paths=(), native=None, run_root=None, roles_dir=None):
     # Everything off is today's command; native settings that are on need the
     # session's Codex home and the run root for the permission profile, and
-    # declared sub-agent roles the folder of their files.
+    # declared sub-agent roles the folder of their files. A role without skills,
+    # everything off included, is shown none: not the owner's, nor Codex's own.
     settings = native_tools.validate(native)
     parts = {'sandbox': ['--sandbox', 'read-only'], 'flags': [], 'config': [], 'enabled': set()}
     if native_tools.any_on(settings):
@@ -549,6 +807,8 @@ def _command(folder, model, effort, cwd, session, image_paths=(), native=None, r
     if settings['subagents'] is None:
         # From Codex 0.170.0 this, not the multi_agent features, is what takes the sub-agent tools away.
         command.extend(['-c', 'agents.enabled=false'])
+    if not native_tools.declared_skills(settings):
+        command.extend(['-c', NO_SKILLS_LIST])
     for value in parts['config']:
         command.extend(['-c', value])
     if session is None:
@@ -589,7 +849,7 @@ def _archive_images(folder, images, manifest):
     return [record['path'] for record in files]
 
 
-def _stream_process(process, prompt, journal, folder, timeout, stop, tracked=None):
+def _stream_process(process, prompt, journal, folder, timeout, stop, tracked=None, record=None):
     """Drain both pipes while sending input; no turn-sized communicate buffer.
 
     Each received chunk is durable before parsing complete event frames. This
@@ -597,7 +857,11 @@ def _stream_process(process, prompt, journal, folder, timeout, stop, tracked=Non
     ``stop`` kills the process tree when the deadline elapses; the pipes then
     have 5 seconds to drain. Given ``tracked``, the process table is sampled
     every ``TRACK_SECONDS`` until then, adding to it what runs under the
-    process; a sample that cannot be read is skipped.
+    process; a sample that cannot be read is skipped. Given ``record`` too,
+    ``record(tracked)`` is called whenever a sample adds a process; what it
+    raises ends the stream, as a capture that cannot be written does.
+    Returns Codex's return code, whether the deadline elapsed, whether the
+    stream ended inside a frame, and whether any sample read the table.
     """
     selector = selectors.DefaultSelector()
     pending = memoryview(prompt.encode('utf-8'))
@@ -606,7 +870,7 @@ def _stream_process(process, prompt, journal, folder, timeout, stop, tracked=Non
                 for name in buffers}
     deadline = time.monotonic() + timeout
     next_sample = time.monotonic() if tracked is not None else math.inf
-    timed_out, drain_deadline = False, None
+    timed_out, drain_deadline, table_read = False, None, False
     try:
         for name in ('stdout', 'stderr'):
             pipe = getattr(process, name)
@@ -618,10 +882,14 @@ def _stream_process(process, prompt, journal, folder, timeout, stop, tracked=Non
             now = time.monotonic()
             if not timed_out and now >= next_sample:
                 next_sample = now + TRACK_SECONDS
+                before = dict(tracked)
                 try:
                     _track(tracked, _process_table(), process.pid)
+                    table_read = True
                 except (OSError, ValueError):
                     pass     # The next sample tries again.
+                if record is not None and tracked != before:
+                    record(tracked)
             if not timed_out and now >= deadline:
                 timed_out = True
                 stop()
@@ -677,7 +945,7 @@ def _stream_process(process, prompt, journal, folder, timeout, stop, tracked=Non
                         journal.append(name, frame, kind=kind, provider_event_id=provider_id)
         if buffers['stdout']:
             journal.append('stdout', buffers['stdout'], kind='stream_incomplete')
-        return process.wait(timeout=5), timed_out, bool(buffers['stdout'])
+        return process.wait(timeout=5), timed_out, bool(buffers['stdout']), table_read
     finally:
         selector.close()
         for stream in captures.values():
@@ -700,13 +968,30 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
     and the command names them by their resolved paths. Whatever about them
     cannot work raises ``ValueError`` before Codex is started.
 
+    A tool server's ``env_from`` or ``token_from`` variable that is unset or
+    empty in this process's environment raises ``ValueError``, naming the
+    variables, before anything is written or Codex is asked for its version.
+    The command and the records name such variables only, never their values.
+
+    Settings that declare skills raise ``ValueError`` before Codex is asked for
+    its version while the session's Codex home, ``$HOME/.agents/skills`` or the
+    machine's skills folder holds an entry (``native.check_skill_homes``).
+
     The result's ``descendants_stopped`` says whether every process seen under
-    the call was stopped by its end. With the terminal on, the process table
-    is sampled every ``TRACK_SECONDS`` while Codex runs, and whatever was seen
-    and still runs is stopped however the call ends. A timeout or an
-    interruption that kills Codex also stops what runs under it at the kill.
-    A process that detaches and loses its parent between two samples is not
-    seen. With the terminal off nothing is sampled, and a call Codex ends on
+    the call was stopped by its end. With the terminal on or a local tool
+    server (one Codex starts from a command), the process table is sampled
+    every ``TRACK_SECONDS`` while Codex runs, and whatever was seen and still
+    runs is stopped however the call ends. What is seen is also written to the
+    call folder's ``TRACKED_FILE`` (``write_tracked``) whenever a sample, or
+    the last look at a kill or at the end, adds a process, before any signal,
+    so that recovery can stop what a Controller that died left running; a
+    write that fails during the call ends it as a journal write that fails
+    does. A timeout or an interruption that kills Codex also stops what runs
+    under it at the kill. A process that detaches and loses its parent
+    between two samples is not seen. Such a call reports ``True`` only when
+    the process table could be read: at the kill, or, when Codex ends on its
+    own, at a sample or at the last look (``_sweep``). Otherwise, a URL server
+    alone included, nothing is sampled or written, and a call Codex ends on
     its own reports ``True``.
     """
     if not isinstance(prompt, str) or not prompt.strip():
@@ -737,7 +1022,16 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
         run_root = str(Path(run_root).resolve())
     if declared_roles and roles_dir is None:
         raise ValueError('Declared sub-agent roles need roles_dir, the folder of their role files')
+    # Codex reads the tool servers' variables from the environment it inherits; one unset or empty would leave a
+    # server without its secret.
+    unset = native_tools.unset_variables(settings, os.environ)
+    if unset:
+        raise ValueError('Native settings name environment variables that are not set: ' + ', '.join(unset))
     binding = _session_options(session)
+    if native_tools.declared_skills(settings):
+        # Codex would list the skills of the session's own Codex home, the user's and the machine's beside the
+        # declared ones. binding is set: skills need the terminal, and native settings that are on a session.
+        native_tools.check_skill_homes(binding['codex_home'])
     version = codex_version()
     check_codex_version(version)
     if declared_roles:
@@ -772,14 +1066,17 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
     journal_snapshot = None
     descendants_stopped = True
     tracked = {}                             # Every process seen under the call, as pid: start time.
-    terminal_on = settings['terminal'] is not None
+    table_read = False                       # Whether a sample during the call read the process table.
+    tracking = _tracks(settings)
+    # Written as samples add processes, before any signal: recovery stops what a dead Controller left running.
+    record = (lambda tracked: write_tracked(folder, tracked)) if tracking else None
     killed = False
 
     def stop():
         nonlocal descendants_stopped, killed
         killed = True
         descendants_stopped = False          # Stays False if _terminate is interrupted before it confirms.
-        descendants_stopped = _terminate(process, tracked)
+        descendants_stopped = _terminate(process, tracked, record)
 
     invocation = {'backend': 'codex', 'model': model, 'effort': effort,
                   'timeout_seconds': timeout, 'started_at_unix': time.time(), 'dispatched': False,
@@ -817,8 +1114,8 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
             invocation.update(sent_image_manifest=image_manifest,
                               sent_image_manifest_sha256=image_digest)
         _write_json(folder / 'invocation.json', invocation)
-        returncode, timed_out, partial_tail = _stream_process(process, sent_prompt, journal, folder, timeout, stop,
-                                                              tracked if terminal_on else None)
+        returncode, timed_out, partial_tail, table_read = _stream_process(
+            process, sent_prompt, journal, folder, timeout, stop, tracked if tracking else None, record)
         captured = read_journal(folder / 'journal.jsonl')
         stdout = raw_stream(captured, 'stdout').decode('utf-8', errors='replace')
         raw, usage, usage_complete, errors = audited_events(folder)
@@ -907,11 +1204,11 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
         if not isinstance(exc, Exception):
             interrupted = exc
     finally:
-        if terminal_on and process is not None and not killed:
+        if tracking and process is not None and not killed:
             # Codex ended without a kill, however the call ended: what was seen under it and still runs is stopped.
             descendants_stopped = False      # Recorded as such if _sweep is interrupted before it confirms.
             try:
-                descendants_stopped = _sweep(tracked)
+                descendants_stopped = _sweep(tracked, record, table_read)
             except BaseException as exc:     # The receipts below are written all the same; it is raised after them,
                 if interrupted is None:      # unless the call itself was interrupted first.
                     interrupted = exc

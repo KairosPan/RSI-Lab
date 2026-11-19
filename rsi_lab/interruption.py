@@ -38,7 +38,7 @@ def certify_interruption(effect, packet, folder, request, invocation, capture, f
     """Pure artifact/PID checks; no writes, terminal fabrication or provider calls."""
     from .call_recovery import RecoveryBlocked, _read, _object, _same
     from .session_context import find_owned_rollout, snapshot_from_bytes
-    from .transport import _command
+    from .transport import NO_SKILLS_LIST, _command
     def require(condition, reason):
         if not condition:
             raise RecoveryBlocked('interruption_not_certified', reason)
@@ -163,8 +163,11 @@ def certify_interruption(effect, packet, folder, request, invocation, capture, f
         _same(thread, session['provider_thread_id'], 'Interrupted resume continued another thread')
     image_paths = [str(folder / 'images' / ('image-%03d.png' % i))
                    for i in range(len(request.get('image_attachments', [])))]
-    _same(invocation['command'], _command(folder, request['model'], request['effort'],
-        binding['workspace'], binding, image_paths), 'Only the exact tool-disabled local Codex command can be isolated')
+    rebuilt = _command(folder, request['model'], request['effort'], binding['workspace'], binding, image_paths)
+    # A call recorded before every role without skills was shown none lacks just that switch, in its place.
+    switch = rebuilt.index(NO_SKILLS_LIST)
+    if invocation['command'] != rebuilt[:switch - 1] + rebuilt[switch + 1:]:
+        _same(invocation['command'], rebuilt, 'Only the exact tool-disabled local Codex command can be isolated')
     native_path = find_owned_rollout(binding['codex_home'], thread, binding['workspace'])
     require(str(native_path) == saved.get('native_session_ref') and saved.get('native_session_error') is None,
             'Interrupted native rollout binding is unavailable')

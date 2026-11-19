@@ -23,6 +23,10 @@
 
 子代理的 token 记在启动它的 Lab 调用上，所以团队运行需要更大的 token 预算。这个预算由操作者在准备时用 `--additional-tokens` 提高，宿主不会自动调整。
 
+文件中的每个角色还可以设置内核的三个可选键：`view_image`（看图）、`tool_servers`（由 Codex 在本地启动或通过 URL 访问的工具服务器）和 `skills`（技能文件夹）。宿主把它们原样交给内核校验，内核拒绝的设置在写入任何内容之前被拒绝；看图和技能只接受终端打开的角色。工具服务器使运行不再是盲测（见“网络搜索使运行不再是盲测”）；技能文件夹按终端可读目录的规则检查，并在准备时冻结进运行存储（见“被拒绝的终端可读目录”）。工具服务器用 `env_from`、`token_from` 指名的环境变量要在启动宿主的环境中设好，变量的值不进入配置和记录。
+
+声明了技能的运行要在一个独立的 Codex home 中准备和启动：准备（包括 `--prepare-only`）和每次 `--resume` 都在 `CODEX_HOME` 设为这个 home 的环境中运行 `run.py`，和其他任何运行一样，宿主没有专门的选项。这个 home 由操作者自己建立，并在 `CODEX_HOME` 设为它时用 `codex login` 登录一次；其中的 `skills` 除了 Codex 自己的 `.system` 之外不能有任何条目，而 `~/.agents/skills` 和 `/etc/codex/skills` 不论 Codex home 是哪个都必须为空。内核在宿主的 `make_runtime` 构造 Runtime 时和每次调用之前检查这三个文件夹，有条目就拒绝。准备在运行初始化之后才构造 Runtime，所以这项拒绝发生时运行目录已经写入，要换一个新的运行目录重新准备。
+
 示例（路径和数值均为示意）：
 
 ```sh
@@ -92,7 +96,15 @@ Lab 可以再次联系更早启动的子代理，而不是新开一个；那个�
 
 > Web search is on for the Lab: the hidden objective is protected by instruction only, and this run is not a blind run.
 
-没有任何角色打开网络搜索的团队运行，`pablo_not_blind` 和 `not_blind` 为 null。其他运行的配置和报告没有这两个键。
+工具服务器同样使运行不再是盲测，因为服务器能接触到任何东西。任何角色声明了工具服务器（`tool_servers`，本地启动的和通过 URL 访问的都算）时，`pablo_not_blind` 带有下面这句，`<who>` 按同样的顺序和写法列出声明了工具服务器的角色：
+
+> Tool servers are on for <who>: the hidden objective is protected by instruction only, and this run is not a blind run.
+
+两种情况都有时，网络搜索那句在前，工具服务器那句在后，中间隔一个空格，两句各自列出自己的角色。例如 Lab 打开网络搜索并声明了工具服务器时：
+
+> Web search is on for the Lab: the hidden objective is protected by instruction only, and this run is not a blind run. Tool servers are on for the Lab: the hidden objective is protected by instruction only, and this run is not a blind run.
+
+只打开看图（`view_image`）或声明技能（`skills`）不会使运行记为非盲测。既没有任何角色打开网络搜索、也没有任何角色声明工具服务器的团队运行，`pablo_not_blind` 和 `not_blind` 为 null。其他运行的配置和报告没有这两个键。
 
 ## 被拒绝的终端可读目录
 
@@ -103,6 +115,8 @@ Lab 可以再次联系更早启动的子代理，而不是新开一个；那个�
 - 检查无法在界限内完成：遍历不跟随符号链接，最多向下 6 层、最多访问 20,000 个文件夹，超出任一界限即视为太大无法检查而拒绝；无法读取的目录同样拒绝。
 
 检查在两个时候进行。准备时，在写入任何内容之前检查，并把受保护的路径（解析后的绝对路径）冻结在配置的 `pablo_team_protected_roots` 中。之后宿主每次启动（`make_runtime`，包括 `--resume`）对每个角色的每个可读目录按这些路径重新检查一遍，因为目录中的内容在准备之后可能变化；有一个不通过就拒绝启动并写明原因。不是团队运行的运行不做这项检查。
+
+任何角色的技能文件夹（`skills.root`）同样按上面三条检查，因为技能在每次调用前被写进会话的工作区，终端能读到它们。拒绝原因以 `native_capabilities.<role>.skills.root:` 开头，例如某个技能里有 `pablo_task/oracle.py`，或技能文件夹位于仓库 checkout 之内。技能文件夹只在准备时检查：写入任何内容之前，宿主按内核的方式读取并冻结它（不存储），然后做这项检查；创建运行存储之后、初始化运行之前，宿主再读一遍，把每个文件按它的 SHA-256 存入运行存储，文件夹在两次读取之间有变化就拒绝，变化了的文件夹的文件不存入，运行也不初始化（两个角色都声明了技能时，先读的那个角色的文件可能已经存入运行存储）。运行用的是存储里的副本，之后文件夹的变化进不了运行，所以每次启动只重新检查可读目录，不检查技能文件夹。
 
 内核自己的规则仍然适用：可读目录不能是或位于运行目录、Codex home 之内，也不能是共享临时目录。
 
@@ -116,7 +130,7 @@ Lab 可以再次联系更早启动的子代理，而不是新开一个；那个�
 
 全部是离线测试，使用临时目录和合成数据，没有调用模型、评分器或网络：
 
-- `tests/test_team.py`：角色文字、原生设置块的拒绝条件、可读目录检查的每个拒绝原因、按角色组合的非盲陈述、团队设置，以及一个端到端测试：在真实 Runtime 中注册 Lab-led 工具，用脚本化的 Lab 回答提出声称已派出 Challenge 的选点请求；调用记录中没有 `challenge` 子代理时被拒绝，有时被接收；另一个端到端测试在真实 Runtime 中走完一个 Lab-led 批次：Lab 的选点请求、选点执行、Lab 的评分请求、评分执行（分数是合成值），然后 `harness.context` 重放这个批次的角色、`decision` 和计数。
-- `tests/test_host_team_preflight.py`：`--team` 准备冻结的架构、Harness、设置块、上限和 `pablo_not_blind`；各选项的误用都是参数错误；不带 `--team` 的准备不变；父运行是团队运行时，不带 `--team` 的准备被拒绝，`--team` 准备成功；`make_runtime` 拒绝不完整的团队配置和 Harness 为 Lab-led 版本的 v3 配置；`research-report.json` 带有 `not_blind`；`--prior-attempt-root` 受保护；每次启动重新检查可读目录，准备后变得暴露的目录使启动被拒绝；两个记录读取点传入的原生设置。
+- `tests/test_team.py`：角色文字、原生设置块的拒绝条件、可读目录检查的每个拒绝原因、按角色组合的非盲陈述（网络搜索、工具服务器以及两者都有）、三个新键经过内核校验和技能文件夹的冻结、暴露评分器的技能文件夹被拒绝、团队设置，以及一个端到端测试：在真实 Runtime 中注册 Lab-led 工具，用脚本化的 Lab 回答提出声称已派出 Challenge 的选点请求；调用记录中没有 `challenge` 子代理时被拒绝，有时被接收；另一个端到端测试在真实 Runtime 中走完一个 Lab-led 批次：Lab 的选点请求、选点执行、Lab 的评分请求、评分执行（分数是合成值），然后 `harness.context` 重放这个批次的角色、`decision` 和计数。
+- `tests/test_host_team_preflight.py`：`--team` 准备冻结的架构、Harness、设置块、上限和 `pablo_not_blind`；各选项的误用都是参数错误；不带 `--team` 的准备不变；父运行是团队运行时，不带 `--team` 的准备被拒绝，`--team` 准备成功；`make_runtime` 拒绝不完整的团队配置和 Harness 为 Lab-led 版本的 v3 配置；`research-report.json` 带有 `not_blind`；`--prior-attempt-root` 受保护；每次启动重新检查可读目录，准备后变得暴露的目录使启动被拒绝；两个记录读取点传入的原生设置；带技能文件夹和工具服务器的 `--team` 准备把两个技能文件存进运行存储、在配置中冻结它们并记下工具服务器那句非盲陈述，Codex home 有自己的技能时启动被拒绝；技能文件夹在检查之后、存储之前变化时，准备在初始化运行之前被拒绝。
 
 这些测试证明准备和检查的接线成立，不证明团队方式能提高分数；团队运行至今没有执行过。

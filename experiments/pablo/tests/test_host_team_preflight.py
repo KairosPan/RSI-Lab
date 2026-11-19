@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from experiments.pablo import run as host
 from experiments.pablo.tests import test_host_preflight as fixtures
+from experiments.pablo.tests.test_team import CHECK_PY, PAPERS, SKILL_MD, separate_homes, skill_folder
 from pablo_task import adapter, harness, methods, team
 from pablo_task.research import research_policy
 from rsi_lab import native
@@ -88,7 +89,8 @@ class HostTeamPreflightTests(unittest.TestCase):
         self.assertIs(runtime.adapters.by_id[methods.ADAPTER_ID].admit_request, methods.admit_request)
         lab = next(w for w in runtime.controller.ready('child') if w['kind'] == 'lab')
         _, _, task, _ = runtime._context(lab, read_only=True)
-        self.assertEqual(task['constraints']['native_capabilities'], native.capabilities(config)['lab'])
+        self.assertEqual(task['constraints']['native_capabilities'],
+                         native.request_form(native.capabilities(config)['lab']))
         # Preparation writes no progress report. The host's snapshot, taken at every step of a started run, returns
         # the statement and writes it to the progress.json it creates.
         self.assertFalse((args.root / 'progress.json').exists())
@@ -111,6 +113,58 @@ class HostTeamPreflightTests(unittest.TestCase):
         self.assertIn('not_blind', report)
         self.assertIsNone(report['not_blind'])
         self.assert_no_execution(store, 'child')
+
+    def test_team_preparation_stores_a_skills_folder_and_records_tool_servers_as_not_blind(self):
+        separate_homes(self, self.base)
+        skills = skill_folder(self.base / 'research-skills')
+        given = {'lab': {'subagents': True, 'terminal': True, 'view_image': True,
+                         'tool_servers': {'papers': PAPERS}, 'skills': {'root': str(skills)}}}
+        args = self.prepared_child(team=True, native_capabilities=self.native_file(given))
+        store, config = self.opened(args)
+        self.assertEqual(config['native_capabilities'], team.native_block(given, protected=[]))
+        lab = config['native_capabilities']['lab']
+        self.assertEqual((lab['view_image'], lab['tool_servers']), (True, {'papers': PAPERS}))
+        self.assertEqual(lab['skills'], {'root': str(skills), 'frozen': {'plot-check': {
+            'description': 'Checks a plot before it is reported.',
+            'files': {'SKILL.md': digest(SKILL_MD), 'scripts/check.py': digest(CHECK_PY)}}}})
+        # Both files are in the run's own store, named by their SHA-256.
+        for raw in (SKILL_MD, CHECK_PY):
+            self.assertEqual(store.read_blob(digest(raw)), raw)
+        self.assertEqual(config['pablo_not_blind'], team.TOOL_SERVERS_TEMPLATE.format('the Lab'))
+        runtime = host.make_runtime(store, 'child')
+        work = next(w for w in runtime.controller.ready('child') if w['kind'] == 'lab')
+        _, _, task, _ = runtime._context(work, read_only=True)
+        self.assertEqual(task['constraints']['native_capabilities'], native.request_form(runtime.native['lab']))
+        self.assertEqual(task['constraints']['native_capabilities']['skills'], ['plot-check'])
+        self.assertEqual(host.legacy_host.snapshot(runtime, 'prepared')['not_blind'], config['pablo_not_blind'])
+        # A start in a Codex home with skills of its own is refused, by the kernel's check that Runtime makes.
+        (self.base / 'codex-home' / 'skills' / 'personal-skill').mkdir(parents=True)
+        with self.assertRaisesRegex(ValueError, 'A role with skills needs a separate Codex home'):
+            host.make_runtime(store, 'child')
+        self.assert_no_execution(store, 'child')
+
+    def test_a_skills_folder_changed_after_it_was_checked_is_refused_before_the_run_is_initialized(self):
+        separate_homes(self, self.base)
+        skills = skill_folder(self.base / 'research-skills')
+        given = {'lab': {'subagents': True, 'terminal': True, 'skills': {'root': str(skills)}}}
+        changed = b'print("axes not checked")\n'
+        checked = team.preparation
+
+        def checked_then_changed(*positional, **named):
+            settings = checked(*positional, **named)
+            (skills / 'plot-check' / 'scripts' / 'check.py').write_bytes(changed)
+            return settings
+        with patch.object(team, 'preparation', side_effect=checked_then_changed) as preparation, \
+                self.assertRaisesRegex(ValueError, r'native_capabilities\.lab\.skills changed since it was frozen'):
+            self.prepared_child(team=True, native_capabilities=self.native_file(given))
+        preparation.assert_called_once()
+        store = Store(self.base / 'child')
+        self.addCleanup(store.close)
+        with self.assertRaises(KeyError):
+            store.run('child')
+        # Nothing of the refused folder was stored.
+        for raw in (SKILL_MD, CHECK_PY, changed):
+            self.assertFalse((store.blobs / digest(raw)).exists())
 
     def test_a_readable_root_that_could_hand_over_the_objective_is_refused_before_anything_is_written(self):
         for folder in ('source', 'parent', 'prior', 'runs'):

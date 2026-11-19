@@ -83,9 +83,15 @@ def main(argv=None):
                 'configuration_check_only':True}
         elif args.command=='init':
             config=read(args.config)
+            # A declared skills folder is read once, here: its files go into the run store, its hashes into the config.
+            if 'native_capabilities' in config:
+                config['native_capabilities']=native.freeze_skills(config['native_capabilities'],store.put_blob)
             # The config is immutable once stored; refuse what Runtime would later reject.
             for check in (unknown_usage_policy,model_failure_retries,model_timeout,orchestration_config):check(config)
-            native.check_roots(native.capabilities(config),run_root=store.root,codex_home=native.default_codex_home())
+            by_role=native.capabilities(config)
+            native.check_roots(by_role,run_root=store.root,codex_home=native.default_codex_home())
+            if any(native.declared_skills(settings) for settings in by_role.values()):
+                native.check_skill_homes(native.default_codex_home())
             budgets=config.pop('budgets');capacity=config.pop('max_external',1)
             result=controller.initialize(args.run,budgets=budgets,max_external=capacity,config=config)
         else:

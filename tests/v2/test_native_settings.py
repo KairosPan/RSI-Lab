@@ -5,18 +5,23 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
+import sys
 import tempfile
 import unittest
 from unittest import mock
 
-from rsi_lab import native
+from rsi_lab import native, transport
 from rsi_lab.__main__ import main
 from rsi_lab.controller import Controller
 from rsi_lab.runtime import Runtime
 from rsi_lab.store import Store
 from tests.v2.liveness_support import BUDGETS
-from tests.v2.native_fixtures import PLAIN, R, ROLES, WITH_ROLES
+from rsi_lab.store import digest
+from tests.v2.native_fixtures import (CHECK_PY, CHEM, PAPERS, PLAIN, PLOT_CHECK, R, ROLES, SEARCH, SKILL_MD, TERMINAL,
+                                      URL_SERVER_ONLY, VIEW_IMAGE, WITH_ROLES, WITH_SKILLS, WITH_TOOL_SERVERS, here,
+                                      skill_folder)
 
 INVALID = {'lab': {'shell': True}}
 EXAMPLE = Path(__file__).resolve().parents[2] / 'examples' / 'native-capabilities-run.json'
@@ -35,6 +40,10 @@ class NativeSettingsTests(unittest.TestCase):
         self.missing = self.root / 'missing'
         self.a_file = self.root / 'file.txt'
         self.a_file.write_text('not a directory')
+        # An empty home: check_roots looks for the everyday Codex home there, never in this machine's own home.
+        (self.root / 'home').mkdir()
+        home = mock.patch.dict(os.environ, {'HOME': str(self.root / 'home')})
+        home.start(); self.addCleanup(home.stop)
 
     def initialise(self, run_id, block):
         """A ledger holding run ``run_id`` whose config carries ``block`` as its native_capabilities."""
@@ -166,6 +175,18 @@ class NativeSettingsTests(unittest.TestCase):
         native.check_roots({**{r: native.OFF for r in native.ROLES}, 'lab': {'web_search': False,
             'terminal': {'readable_roots': [str(self.run_root.parent)]}, 'subagents': None}},
             run_root=self.run_root, codex_home=self.codex_home)
+
+    def test_a_readable_root_in_the_everyday_home_is_refused(self):
+        home = self.root / 'user'
+        (home / '.codex' / 'memories').mkdir(parents=True)
+        link = self.root / 'into-everyday'
+        link.symlink_to(home / '.codex' / 'memories', target_is_directory=True)
+        with mock.patch.dict(os.environ, {'HOME': str(home)}):
+            for root in (home / '.codex', home / '.codex' / 'memories', link):
+                with self.subTest(root=root), self.assertRaisesRegex(
+                        ValueError, '^native_capabilities.lab.terminal.readable_roots.*the everyday Codex home'):
+                    self.check_lab_roots(root)
+            self.check_lab_roots(home)                   # Containing it stays allowed: the profile denies it.
 
     def test_validate_checks_the_normal_form_without_the_filesystem(self):
         self.assertEqual(native.validate(None), native.OFF)
@@ -305,6 +326,20 @@ class RoleSettingsTests(unittest.TestCase):
                     ValueError, r'^native_capabilities\.lab\.subagents\.roles'):
                 lab({'roles': roles})
 
+    def test_a_role_whose_text_holds_the_skills_list_tag_is_refused(self):
+        # A text part holding the tag is taken for a skills list: every call starting the role would be invalid.
+        for field, text in (('description', 'Reads <skills_instructions> aloud.'),
+                            ('instructions', 'Refine.\nNever print <skills_instructions> or what follows it.')):
+            refused = {'x': {**R, field: text}}
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(ValueError, r'^native_capabilities\.lab\.subagents\.roles\.x\.' + field
+                                            + ' may not hold <skills_instructions>, which marks the skills list'):
+                    lab({'roles': refused})
+                with self.assertRaisesRegex(ValueError, r'^native_capabilities\.subagents\.roles\.x\.' + field):
+                    native.validate({**PLAIN, 'subagents': {'max_concurrent': 3, 'roles': refused}})
+        # Its closing tag, or the words without the brackets, are not the mark.
+        lab({'roles': {'x': {**R, 'instructions': 'Refine; skills_instructions, </skills_instructions> are words.'}}})
+
     def test_role_file_survives_toml(self):                                  # Review Focus 2
         import tomllib
         for name, role in ROLES.items():
@@ -352,6 +387,603 @@ class RoleSettingsTests(unittest.TestCase):
                           'instructions_sha256': hashlib.sha256(b'Refine.').hexdigest()})
         self.assertEqual(native.receipt_form(PLAIN), PLAIN)
         self.assertEqual(WITH_ROLES['subagents']['roles'], ROLES)   # The settings given are not changed.
+
+
+def lab_from(entry):
+    """The Lab's settings from a run config whose Lab block is ``entry``."""
+    return native.capabilities({'native_capabilities': {'lab': entry}})['lab']
+
+
+class ToolServerSettingsTests(unittest.TestCase):
+    """Tool servers and image viewing: their normal form, their limits, the secret names and the receipt form."""
+
+    def test_servers_reach_the_normal_form_in_name_order(self):
+        got = lab_from({'web_search': True, 'tool_servers': {'papers': PAPERS, 'chem': here(CHEM)}})
+        self.assertEqual(got, {**SEARCH, 'tool_servers': {'chem': here(CHEM), 'papers': PAPERS}})
+        self.assertEqual(list(got['tool_servers']), ['chem', 'papers'])
+        self.assertEqual(lab_from({'tool_servers': {'a': {'description': 'd', 'command': sys.executable}}})
+                         ['tool_servers']['a'],
+                         {'description': 'd', 'command': sys.executable, 'args': [], 'env': {}, 'env_from': []})
+        self.assertEqual(lab_from({'tool_servers': {'b': {'description': 'd', 'url': 'http://[::1]:8080/mcp'}}})
+                         ['tool_servers']['b'],
+                         {'description': 'd', 'url': 'http://[::1]:8080/mcp', 'headers': {}})
+
+    def test_keys_that_are_off_leave_the_settings_as_today(self):                  # Review Focus 3
+        for extra in ({}, {'view_image': False}, {'tool_servers': {}}):
+            self.assertEqual(lab_from({'terminal': True, **extra}), TERMINAL)
+        for settings in (SEARCH, TERMINAL, PLAIN, WITH_ROLES):
+            self.assertEqual(native.validate(settings), settings)
+        for settings in (SEARCH, TERMINAL, PLAIN):
+            self.assertEqual(native.receipt_form(settings), settings)
+
+    def test_image_viewing_needs_the_terminal(self):
+        self.assertEqual(lab_from({'terminal': True, 'view_image': True}), VIEW_IMAGE)
+        for entry in ({'view_image': True}, {'web_search': True, 'view_image': True},
+                      {'terminal': True, 'view_image': 1}):
+            with self.subTest(entry=entry), self.assertRaisesRegex(ValueError, '^native_capabilities.lab.view_image'):
+                lab_from(entry)
+
+    def test_bad_servers_are_refused(self):
+        ok, url = {'description': 'd', 'command': sys.executable}, {'description': 'd', 'url': PAPERS['url']}
+        bad = [{'Chem': ok}, {'codex_x': ok}, {'1x': ok}, {'a' * 33: ok}, {'s%d' % i: ok for i in range(9)}, ['chem'],
+               {'x': {**ok, 'url': PAPERS['url']}}, {'x': {'description': 'd'}}, {'x': {**ok, 'command': 'python'}},
+               {'x': {**ok, 'command': '/nonexistent/server'}}, {'x': {**ok, 'args': '-m x'}},
+               {'x': {**ok, 'env': {'A': 1}}},
+               {'x': {**ok, 'env': {'1A': 'v'}}}, {'x': {**ok, 'env_from': ['A', 'A']}},
+               {'x': {**ok, 'env': {'A': 'v'}, 'env_from': ['A']}}, {'x': {**ok, 'headers': {}}},
+               {'x': {**url, 'env': {}}},
+               {'x': {**ok, 'description': ''}}, {'x': {**ok, 'description': 'a\nb'}},
+               {'x': {**ok, 'description': 'd' * 301}},
+               {'x': {**ok, 'tool_timeout_seconds': 0}}, {'x': {**ok, 'tool_timeout_seconds': 3601}},
+               {'x': {**ok, 'tool_timeout_seconds': True}}, {'x': {**url, 'url': 'http://papers.example.org/mcp'}},
+               {'x': {**url, 'url': 'ftp://localhost/mcp'}},
+               {'x': {**url, 'url': 'https://user:pw@papers.example.org/mcp'}},
+               {'x': {**url, 'url': 'https:///mcp'}}, {'x': {**url, 'headers': {'Authorization': 'Bearer t'}}},
+               {'x': {**url, 'headers': {'authorization': 't'}}}, {'x': {**url, 'headers': {'X-A': 'a\nb'}}},
+               {'x': {**url, 'token_from': 'not a name'}},
+               # Spellings an older urlsplit reads as another host than Codex does: refused on every interpreter.
+               {'x': {**url, 'url': 'http://evil.example\\[::1]/mcp'}},
+               {'x': {**url, 'url': 'https://papers.example.org\\mcp'}},
+               {'x': {**url, 'url': 'http://evil.example[::1]/mcp'}}, {'x': {**url, 'url': 'http://[localhost]/mcp'}}]
+        for servers in bad:
+            with self.subTest(servers=servers), self.assertRaisesRegex(ValueError,
+                                                                      '^native_capabilities.lab.tool_servers'):
+                lab_from({'tool_servers': servers})
+
+    def test_headers_that_carry_credentials_or_repeat_a_name_are_refused(self):
+        url = {'description': 'd', 'url': PAPERS['url']}
+        where = r'^native_capabilities\.lab\.tool_servers\.x\.headers may not '
+        for name in ('Authorization', 'authorization', 'Proxy-Authorization', 'PROXY-AUTHORIZATION', 'Cookie',
+                     'cookie', 'cOoKiE'):
+            with self.subTest(name=name), self.assertRaisesRegex(
+                    ValueError, where + 'hold ' + name + ', which carries credentials; name the variable of a bearer '
+                    'token in token_from'):
+                lab_from({'tool_servers': {'x': {**url, 'headers': {'X-Client': 'rsi-lab', name: 'invented-4f1c'}}}})
+        # Codex would send one of two values the settings give for one header, as HTTP ignores the letter case.
+        for headers, first, second in (({'X-Client': 'a', 'x-client': 'b'}, 'X-Client', 'x-client'),
+                                       ({'x-trace': 'a', 'X-Client': 'b', 'X-TRACE': 'c'}, 'x-trace', 'X-TRACE')):
+            with self.subTest(headers=headers), self.assertRaisesRegex(
+                    ValueError, where + 'name one header twice: ' + first + ' and ' + second):
+                lab_from({'tool_servers': {'x': {**url, 'headers': headers}}})
+        # Names that only hold one of those are other headers.
+        got = lab_from({'tool_servers': {'x': {**url, 'headers': {'X-Cookie-Policy': 'none', 'X-Authorization-Mode':
+                                                                  'none', 'Set-Cookie2': 'none'}}}})
+        self.assertEqual(list(got['tool_servers']['x']['headers']), ['Set-Cookie2', 'X-Authorization-Mode',
+                                                                     'X-Cookie-Policy'])
+
+    def test_loopback_http_and_the_limits_are_accepted(self):
+        for host in ('localhost', '127.0.0.1', '[::1]'):
+            lab_from({'tool_servers': {'x': {'description': 'd', 'url': 'http://' + host + ':8080/mcp'}}})
+        for address in ('http://[::1]/mcp', 'http://[::1]', 'https://[2001:db8::1]:8443/mcp'):
+            lab_from({'tool_servers': {'x': {'description': 'd', 'url': address}}})
+        lab_from({'tool_servers': {'s%d' % i: {'description': 'd' * 300, 'command': sys.executable,
+                                               'tool_timeout_seconds': 3600} for i in range(8)}})
+
+    def test_validate_checks_the_shape_only(self):
+        self.assertEqual(native.validate(WITH_TOOL_SERVERS), WITH_TOOL_SERVERS)       # the command need not exist
+        self.assertEqual(native.validate(VIEW_IMAGE), VIEW_IMAGE)
+        self.assertTrue(native.any_on(URL_SERVER_ONLY))
+        with self.assertRaises(ValueError):
+            native.validate({**SEARCH, 'view_image': True})
+
+    def test_secret_names_and_local_servers(self):
+        self.assertEqual((native.tool_servers(SEARCH), native.local_servers(WITH_TOOL_SERVERS)), ({}, ['chem']))
+        self.assertEqual(native.secret_variables(WITH_TOOL_SERVERS), ['CHEM_API_KEY', 'PAPERS_TOKEN'])
+        self.assertEqual(native.unset_variables(WITH_TOOL_SERVERS, {'CHEM_API_KEY': 'x', 'PAPERS_TOKEN': ''}),
+                         ['PAPERS_TOKEN'])
+
+    def test_receipt_form_keeps_env_names_not_values(self):
+        got = native.receipt_form(WITH_TOOL_SERVERS)['tool_servers']
+        self.assertEqual(got['chem'], {'description': CHEM['description'], 'command': CHEM['command'],
+                                       'args': CHEM['args'], 'env_names': ['CHEM_MODE'], 'env_from': ['CHEM_API_KEY'],
+                                       'tool_timeout_seconds': 300})
+        self.assertEqual(got['papers'], PAPERS)
+
+
+def skill_text(name, description='Checks a plot before it is reported.'):
+    """The SKILL.md of a skill whose front matter gives ``name`` and the line ``description: <description>``."""
+    return ('---\nname: ' + name + '\ndescription: ' + description + '\n---\nUse it.\n').encode()
+
+
+def add_skill(root, name, text=None):
+    """A skill folder ``name`` in ``root`` holding only SKILL.md: ``text``, else ``skill_text(name)``."""
+    (root / name).mkdir()
+    (root / name / 'SKILL.md').write_bytes(skill_text(name) if text is None else text)
+
+
+def sha(raw):
+    return hashlib.sha256(raw).hexdigest()
+
+
+class SkillSettingsTests(unittest.TestCase):
+    """A declared skills folder: how it is read and frozen into the run, its limits, its normal form and receipt."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix='rsi-skills-'))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def lab_skills(self, root):
+        """The Lab's skills as capabilities reads them once a Lab block with the terminal and the skills folder
+        ``root``, given as is, is frozen."""
+        block = native.freeze_skills({'lab': {'terminal': True, 'skills': {'root': root}}})
+        return native.capabilities({'native_capabilities': block})['lab']['skills']
+
+    def test_freezing_stores_every_file_and_records_its_hash(self):
+        root, stored = skill_folder(self.tmp / 'skills'), {}
+        def put(raw):
+            stored[hashlib.sha256(raw).hexdigest()] = raw
+            return hashlib.sha256(raw).hexdigest()
+        block = native.freeze_skills({'lab': {'terminal': True, 'skills': {'root': str(root)}}}, put)
+        self.assertEqual(block['lab']['skills'], {'root': str(root.resolve()), 'frozen': {'plot-check': PLOT_CHECK}})
+        self.assertEqual(sorted(stored.values()), sorted([SKILL_MD, CHECK_PY]))
+        self.assertEqual(native.capabilities({'native_capabilities': block})['lab'],
+                         {**TERMINAL, 'skills': block['lab']['skills']})
+        self.assertEqual(list(block['lab']['skills']['frozen']['plot-check']['files']), ['SKILL.md', 'scripts/check.py'])
+
+    def test_freezing_leaves_everything_else_as_given(self):
+        root = str(skill_folder(self.tmp / 'skills'))
+        for block in ([], None, 'lab'):
+            with self.subTest(block=block), self.assertRaisesRegex(
+                    ValueError, '^native_capabilities must be an object keyed by lab, meta or literature$'):
+                native.freeze_skills(block)
+        # Malformed entries pass through unchanged, for capabilities to refuse.
+        others = {'lab': {'terminal': True}, 'meta': {'skills': 'on'}, 'literature': [],
+                  'planner': {'skills': {'root': root}}}
+        self.assertEqual(native.freeze_skills(others), others)
+        for skills in ('on', {}, {'root': root, 'extra': 1}):
+            block = native.freeze_skills({'lab': {'terminal': True, 'skills': skills}})
+            self.assertEqual(block, {'lab': {'terminal': True, 'skills': skills}})
+            with self.subTest(skills=skills), self.assertRaisesRegex(ValueError, '^native_capabilities.lab.skills'):
+                native.capabilities({'native_capabilities': block})
+        given = {'lab': {'terminal': True, 'skills': {'root': root}}, 'meta': {'web_search': True}}
+        frozen = native.freeze_skills(given)
+        self.assertEqual(given, {'lab': {'terminal': True, 'skills': {'root': root}}, 'meta': {'web_search': True}})
+        self.assertEqual(frozen['meta'], {'web_search': True})
+
+    def test_later_changes_to_the_folder_do_not_reach_the_run(self):
+        root, stored = skill_folder(self.tmp / 'skills'), []
+        def put(raw):
+            stored.append(raw)
+            return hashlib.sha256(raw).hexdigest()
+        block = native.freeze_skills({'lab': {'terminal': True, 'skills': {'root': str(root)}}})
+        settings = native.capabilities({'native_capabilities': block})
+        # An unchanged folder freezes to the same entry, and its files are stored again for the new run.
+        self.assertEqual(native.freeze_skills(block, put), block)
+        self.assertEqual(sorted(stored), sorted([SKILL_MD, CHECK_PY]))
+        (root / 'plot-check' / 'scripts' / 'check.py').write_bytes(b'print("changed")\n')
+        self.assertEqual(native.capabilities({'native_capabilities': block}), settings)
+        with self.assertRaisesRegex(ValueError, '^native_capabilities.lab.skills.*changed since it was frozen'):
+            native.freeze_skills(block)
+        shutil.rmtree(root)
+        self.assertEqual(native.capabilities({'native_capabilities': block}), settings)
+
+    def test_the_kernel_refuses_an_unfrozen_entry_and_skills_without_a_terminal(self):
+        root = str(skill_folder(self.tmp / 'skills'))
+        with self.assertRaisesRegex(ValueError, '^native_capabilities.lab.skills.*must be frozen with the run'):
+            lab_from({'terminal': True, 'skills': {'root': root}})
+        with self.assertRaisesRegex(ValueError, '^native_capabilities.skills.*must be frozen with the run'):
+            native.validate({**TERMINAL, 'skills': {'root': root}})
+        block = native.freeze_skills({'lab': {'web_search': True, 'skills': {'root': root}}})
+        with self.assertRaisesRegex(ValueError, '^native_capabilities.lab.skills'):
+            native.capabilities({'native_capabilities': block})
+        with self.assertRaisesRegex(ValueError, '^native_capabilities.skills'):
+            native.validate({**SEARCH, 'skills': WITH_SKILLS['skills']})
+
+    def test_folder_limits_refuse_the_run(self):
+        room = native.MAX_SKILL_BYTES - len(SKILL_MD) - len(CHECK_PY)
+        elsewhere = self.tmp / 'elsewhere'
+        add_skill(self.tmp, 'elsewhere')
+        def plot(root, name='SKILL.md'):
+            return root / 'plot-check' / name
+        def front(old, new):
+            return lambda root: plot(root).write_bytes(SKILL_MD.replace(old, new))
+        def link_file(root):
+            (root / 'plot-check' / 'scripts' / 'check.py').unlink()
+            (root / 'plot-check' / 'scripts' / 'check.py').symlink_to(elsewhere / 'SKILL.md')
+        def only_hidden(root):
+            shutil.rmtree(root / 'plot-check')
+            (root / '.DS_Store').write_bytes(b'x')
+        def nested_skill(root):
+            (root / 'plot-check' / 'examples' / 'x').mkdir(parents=True)
+            (root / 'plot-check' / 'examples' / 'x' / 'SKILL.md').write_bytes(skill_text('x'))
+        cases = {
+            'an empty folder': lambda root: shutil.rmtree(root / 'plot-check'),
+            'only hidden entries': only_hidden,
+            '17 skills': lambda root: [add_skill(root, 's%02d' % i) for i in range(16)],
+            '17 files in one skill': lambda root: [plot(root, 'f%02d' % i).write_bytes(b'x') for i in range(15)],
+            '262,145 bytes in one skill': lambda root: plot(root, 'data.bin').write_bytes(b'x' * (room + 1)),
+            'a folder named Plot': lambda root: add_skill(root, 'Plot'),
+            'a 33-character name': lambda root: add_skill(root, 'a' * 33),
+            'another name in the front matter': front(b'name: plot-check', b'name: plot'),
+            'no name in the front matter': front(b'name: plot-check\n', b''),
+            'a name given twice': front(b'name: plot-check\n', b'name: plot-check\nname: plot-check\n'),
+            'no SKILL.md': lambda root: plot(root).unlink(),
+            'a SKILL.md below the top of a skill': nested_skill,
+            'no front matter': lambda root: plot(root).write_bytes(b'Open the plot.\n'),
+            'unclosed front matter': lambda root: plot(root).write_bytes(SKILL_MD.replace(b'\n---\nOpen', b'\nOpen')),
+            'SKILL.md not UTF-8': front(b'reported.', b'reported \xff.'),
+            'a blank description': front(b'Checks a plot before it is reported.', b'   '),
+            'an empty quoted description': front(b'Checks a plot before it is reported.', b'""'),
+            'no description': front(b'description: Checks a plot before it is reported.\n', b''),
+            'block text': front(b'Checks a plot before it is reported.', b'>\n  Checks a plot.'),
+            'literal block text': front(b'Checks a plot before it is reported.', b'|'),
+            'a 301-character description': front(b'Checks a plot before it is reported.', b'd' * 301),
+            'a symlinked file': link_file,
+            'a symlinked skill folder': lambda root: (root / 'elsewhere').symlink_to(elsewhere, target_is_directory=True),
+            'a regular file at the top level': lambda root: (root / 'README.md').write_bytes(b'Skills.\n'),
+            'a named pipe in a skill': lambda root: os.mkfifo(plot(root, 'pipe')),
+        }
+        for index, (case, change) in enumerate(cases.items()):
+            root = skill_folder(self.tmp / ('case-%02d' % index))
+            change(root)
+            with self.subTest(case=case), self.assertRaisesRegex(ValueError, '^native_capabilities.lab.skills'):
+                self.lab_skills(str(root))
+        # A refused folder stores nothing, not even the skills read before the one refused.
+        root, stored = skill_folder(self.tmp / 'partly'), []
+        add_skill(root, 'a-first')
+        front(b'Checks a plot before it is reported.', b'>')(root)
+        with self.assertRaisesRegex(ValueError, '^native_capabilities.lab.skills.plot-check'):
+            native.freeze_skills({'lab': {'terminal': True, 'skills': {'root': str(root)}}},
+                                 lambda raw: stored.append(raw) or sha(raw))
+        self.assertEqual(stored, [])
+        for root in ('research-skills', str(self.tmp / 'missing'), str(elsewhere / 'SKILL.md'), 7):
+            with self.subTest(root=root), self.assertRaisesRegex(ValueError, '^native_capabilities.lab.skills.root'):
+                self.lab_skills(root)
+
+    def test_the_limits_themselves_are_accepted(self):
+        root = skill_folder(self.tmp / 'skills')
+        for name in ['s%02d' % i for i in range(12)] + ['a' * 32, 'b_-9']:
+            add_skill(root, name)
+        add_skill(root, 'quoted', skill_text('quoted', '"Checks: axes."'))
+        (root / 'b_-9' / 'SKILL.md').write_bytes(skill_text('b_-9', "'" + 'd' * 300 + "'"))
+        plot = root / 'plot-check'
+        for i in range(13):
+            (plot / ('f%02d' % i)).write_bytes(b'x')
+        (plot / 'data.bin').write_bytes(b'x' * (native.MAX_SKILL_BYTES - len(SKILL_MD) - len(CHECK_PY) - 13))
+        for hidden in (root / '.DS_Store', plot / '.DS_Store', plot / 'scripts' / '.cache'):
+            hidden.write_bytes(b'\0' * native.MAX_SKILL_BYTES)
+        (plot / '.git').mkdir()
+        (plot / '.git' / 'config').write_bytes(b'[core]\n')
+        frozen = self.lab_skills(str(root))['frozen']
+        self.assertEqual(len(frozen), native.MAX_SKILLS)
+        self.assertEqual(list(frozen), sorted(frozen))
+        self.assertEqual(frozen['quoted']['description'], 'Checks: axes.')
+        self.assertEqual(frozen['b_-9']['description'], 'd' * 300)
+        files = frozen['plot-check']['files']
+        self.assertEqual(len(files), native.MAX_SKILL_FILES)
+        self.assertEqual(list(files), sorted(files))
+        self.assertEqual(files['SKILL.md'], PLOT_CHECK['files']['SKILL.md'])
+        self.assertFalse([path for path in files if '.DS_Store' in path or '.git' in path or '.cache' in path])
+        self.assertEqual(native.read_skills(str(root))['plot-check']['files']['scripts/check.py'], CHECK_PY)
+
+    def test_front_matter_values_yaml_could_read_otherwise_are_refused(self):
+        # Codex reads the front matter as YAML: each of these would give it another name or description, or none.
+        descriptions = [
+            'Checks: axes.', 'Checks axes # soon', 'Checks axes\t# soon', 'Checks axes:',     # a key, a comment
+            *[mark + 'Checks axes' for mark in '[]{}*&!@%`#,'],                              # reserved first characters
+            '- Checks axes', '? Checks axes', ': Checks axes', '-',                           # a sequence, a key
+            '"Checks axes', "'Checks axes", '"Checks" axes',                                  # an unbalanced quote
+            '"Checks \\ axes"', '"Checks \\"x\\" axes"', '"Checks "x" axes"', "'It''s a check'",  # escapes in quotes
+            '42', '1.5e3', '0x1F', '.inf', 'true', 'False', 'null', '~',                      # not text
+            'Checks a plot\n  before it is reported.',                                        # continued on a line
+            'Checks a plot\n\n\tbefore it is reported.',
+            # Not trimmed by YAML, or read by it as a line break: characters that cannot be printed.
+            '\u00a0Checks a plot.', 'Checks a plot.\u00a0', '"\u00a0Checks a plot."', 'Checks\u0085 a plot.',
+            'Checks\u2028 a plot.', 'Checks\u2029 a plot.', 'Checks\x07 a plot.', 'Checks a plot.\x0b']
+        for index, description in enumerate(descriptions):
+            root = skill_folder(self.tmp / ('case-%02d' % index))
+            (root / 'plot-check' / 'SKILL.md').write_bytes(skill_text('plot-check', description))
+            with self.subTest(description=description), self.assertRaisesRegex(
+                    ValueError, r'^native_capabilities\.lab\.skills\.plot-check\.SKILL\.md front matter'):
+                self.lab_skills(str(root))
+        root = self.tmp / 'null'
+        root.mkdir()
+        add_skill(root, 'null')                                                    # name: null is YAML's null
+        with self.assertRaisesRegex(ValueError, r'^native_capabilities\.lab\.skills\.null\.SKILL\.md front matter'):
+            self.lab_skills(str(root))
+
+    def test_front_matter_values_yaml_reads_as_written_are_accepted(self):
+        root = skill_folder(self.tmp / 'skills')
+        expected = {'"Checks: axes."': 'Checks: axes.', "'Checks # axes'": 'Checks # axes',
+                    "'Checks \\ axes'": 'Checks \\ axes', '"null"': 'null', 'Checks a plot, then its axes.': None,
+                    "It's a check of C# code, ratio 1:2, x - y, 100% sure.": None, 'v1.5 of the check': None}
+        for index, description in enumerate(expected):
+            add_skill(root, 's%02d' % index, skill_text('s%02d' % index, description))
+        add_skill(root, 'null', skill_text('"null"'))
+        add_skill(root, 'with-metadata', b'---\nname: with-metadata\ndescription: Checks a plot.\nmetadata:\n'
+                                         b'  short-description: "Plots: checked"\n\nlicense: MIT\n---\nUse it.\n')
+        # Lines that end as on Windows, and spaces and tabs around a value, which YAML trims.
+        add_skill(root, 'crlf', b'---\r\nname: crlf\r\ndescription: Checks a plot.\r\n---\r\nUse it.\r\n')
+        add_skill(root, 'padded', b'---\nname: \t padded \t\ndescription: \t Checks a plot. \t\n---\nUse it.\n')
+        frozen = self.lab_skills(str(root))['frozen']
+        for index, (description, read) in enumerate(expected.items()):
+            self.assertEqual(frozen['s%02d' % index]['description'], read or description)
+        self.assertEqual(frozen['null']['description'], PLOT_CHECK['description'])
+        self.assertEqual(frozen['with-metadata']['description'], 'Checks a plot.')
+        self.assertEqual((frozen['crlf']['description'], frozen['padded']['description']),
+                         ('Checks a plot.', 'Checks a plot.'))
+
+    def test_the_frozen_form_is_checked_without_the_filesystem(self):
+        self.assertEqual(native.validate(WITH_SKILLS), WITH_SKILLS)          # The root need not exist.
+        other = {'description': 'Another.', 'files': {'scripts/z.py': sha(b'z'), 'SKILL.md': sha(b'a')}}
+        got = native.validate({**TERMINAL, 'skills': {'root': '/data/research-skills',
+                                                      'frozen': {'z-skill': other, 'plot-check': PLOT_CHECK}}})
+        self.assertEqual(list(got['skills']['frozen']), ['plot-check', 'z-skill'])
+        self.assertEqual(list(got['skills']['frozen']['z-skill']['files']), ['SKILL.md', 'scripts/z.py'])
+        def with_skill(**skill):
+            return {'root': '/data/research-skills', 'frozen': {'plot-check': {**PLOT_CHECK, **skill}}}
+        def with_files(**files):
+            return with_skill(files={**PLOT_CHECK['files'], **files})
+        bad = ['on', {}, {'frozen': WITH_SKILLS['skills']['frozen']}, {**WITH_SKILLS['skills'], 'extra': 1},
+               {**WITH_SKILLS['skills'], 'root': 'research-skills'}, {**WITH_SKILLS['skills'], 'root': 7},
+               {'root': '/data/research-skills', 'frozen': {}}, {'root': '/data/research-skills', 'frozen': []},
+               {'root': '/data/research-skills', 'frozen': {'s%02d' % i: PLOT_CHECK for i in range(17)}},
+               {'root': '/data/research-skills', 'frozen': {'Plot': PLOT_CHECK}},
+               {'root': '/data/research-skills', 'frozen': {'a' * 33: PLOT_CHECK}},
+               {'root': '/data/research-skills', 'frozen': {'-x': PLOT_CHECK}},
+               {'root': '/data/research-skills', 'frozen': {'plot-check': 'skill'}},
+               {'root': '/data/research-skills', 'frozen': {'plot-check': {'files': PLOT_CHECK['files']}}},
+               with_skill(extra=1), with_skill(description=''), with_skill(description='a\nb'),
+               with_skill(description='> folded'), with_skill(description='| literal'),
+               with_skill(description='d' * 301), with_skill(description=7),
+               with_skill(description='\u00a0Checks a plot.'), with_skill(description='Checks\u0085 a plot.'),
+               with_skill(description='Checks\x1b a plot.'),
+               with_skill(files={}), with_skill(files=[]), with_skill(files={'scripts/check.py': sha(CHECK_PY)}),
+               with_files(**{'f%02d' % i: sha(b'x') for i in range(15)}),
+               with_files(**{'examples/x/SKILL.md': sha(b'x')}),
+               *[with_files(**{path: sha(b'x')}) for path in ('../x', '/abs', 'a//b', './x', '.hidden', 'a/.git/x',
+                                                              'a/', 'a/..', '')],
+               with_files(**{'x': sha(b'x').upper()}), with_files(**{'x': sha(b'x')[:63]}), with_files(**{'x': 7})]
+        for skills in bad:
+            with self.subTest(skills=skills), self.assertRaisesRegex(ValueError, '^native_capabilities.skills'):
+                native.validate({**TERMINAL, 'skills': skills})
+
+    def test_frozen_paths_that_clash_or_cannot_be_printed_are_refused(self):
+        # Written into a workspace on a volume that ignores letter case, one file would replace the other, or a file
+        # would stand where a folder must: the model would be shown other files than the declared ones.
+        def with_files(*paths):
+            files = {**PLOT_CHECK['files'], **{path: sha(b'x') for path in paths}}
+            return {**TERMINAL, 'skills': {'root': '/data/research-skills',
+                                           'frozen': {'plot-check': {**PLOT_CHECK, 'files': files}}}}
+        where = r'^native_capabilities\.skills\.frozen\.plot-check\.files '
+        clashes = {('skill.md',): ('SKILL.md', 'skill.md'), ('A', 'a'): ('A', 'a'), ('x', 'x/y'): ('x', 'x/y'),
+                   ('X', 'x/y'): ('X', 'x/y'), ('Scripts',): ('Scripts', 'scripts/check.py'),
+                   ('scripts/check.py/x',): ('scripts/check.py', 'scripts/check.py/x')}
+        for paths, (first, second) in clashes.items():
+            with self.subTest(paths=paths), self.assertRaisesRegex(
+                    ValueError, where + 'may not hold both ' + re.escape(repr(first) + ' and ' + repr(second))
+                    + ': where letter case is ignored'):
+                native.validate(with_files(*paths))
+        for path in ('a\nb', 'a\x00b', 'docs/a b', 'a\x85b', 'a\tb'):
+            with self.subTest(path=path), self.assertRaisesRegex(
+                    ValueError, where + 'paths must be relative, with no empty part, no part beginning with . and '
+                    'only printable characters: ' + re.escape(repr(path))):
+                native.validate(with_files(path))
+        # Paths that differ in more than letter case, or share only the start of a name, are kept apart.
+        self.assertEqual(len(native.validate(with_files('scripts-old/check.py', 'scripts.py', 'a b'))['skills']
+                             ['frozen']['plot-check']['files']), 5)
+
+    def test_a_folder_whose_paths_clash_where_case_is_ignored_is_refused(self):
+        # Read where letter case is told apart, a folder can hold paths that a case-insensitive workspace cannot.
+        root = skill_folder(self.tmp / 'cased')
+        scripts = root / 'plot-check' / 'scripts'
+        (scripts / 'A.py').write_bytes(b'a = 1\n')
+        (scripts / 'a.py').write_bytes(b'a = 2\n')
+        if sorted(path.name for path in scripts.iterdir()) != ['A.py', 'a.py', 'check.py']:
+            self.skipTest('this volume ignores letter case: one folder cannot hold both a.py and A.py')
+        stored = []
+        with self.assertRaisesRegex(ValueError, r"^native_capabilities\.lab\.skills\.plot-check may not hold both "
+                                                r"'scripts/A\.py' and 'scripts/a\.py'"):
+            native.freeze_skills({'lab': {'terminal': True, 'skills': {'root': str(root)}}},
+                                 lambda raw: stored.append(raw) or sha(raw))
+        self.assertEqual(stored, [])
+
+    def test_the_folder_reader_refuses_paths_that_clash_or_cannot_be_printed(self):
+        # What a volume that tells letter case apart would give the reader, on any volume.
+        read, stored = native._skill_files, []
+        with mock.patch.object(native, '_skill_files', side_effect=lambda folder, where: {
+                **read(folder, where), 'scripts/A.py': b'a = 1\n', 'scripts/a.py': b'a = 2\n'}):
+            with self.assertRaisesRegex(ValueError, r"^native_capabilities\.lab\.skills\.plot-check may not hold both "
+                                                    r"'scripts/A\.py' and 'scripts/a\.py'"):
+                root = str(skill_folder(self.tmp / 'any'))
+                native.freeze_skills({'lab': {'terminal': True, 'skills': {'root': root}}},
+                                     lambda raw: stored.append(raw) or sha(raw))
+        self.assertEqual(stored, [])
+        root = skill_folder(self.tmp / 'unprintable')
+        (root / 'plot-check' / 'scripts' / 'a\nb.py').write_bytes(b'x = 1\n')
+        with self.assertRaisesRegex(ValueError, r'^native_capabilities\.lab\.skills\.plot-check may hold only names of '
+                                                r"printable characters: 'scripts/a\\nb\.py'"):
+            native.freeze_skills({'lab': {'terminal': True, 'skills': {'root': str(root)}}},
+                                 lambda raw: stored.append(raw) or sha(raw))
+        self.assertEqual(stored, [])
+
+    def test_declared_skills_are_read_from_normal_form_settings(self):
+        self.assertEqual(native.declared_skills(WITH_SKILLS), {'plot-check': PLOT_CHECK})
+        for settings in (TERMINAL, native.OFF, VIEW_IMAGE, WITH_TOOL_SERVERS):
+            with self.subTest(settings=settings):
+                self.assertEqual(native.declared_skills(settings), {})
+
+    def test_init_freezes_the_folder_into_the_run(self):
+        root = skill_folder(self.tmp / 'skills')
+        home, codex_home = self.tmp / 'home', self.tmp / 'codex-home'
+        home.mkdir()
+        codex_home.mkdir()
+        path = self.tmp / 'config.json'
+        path.write_text(json.dumps({'budgets': BUDGETS, 'native_capabilities': {
+            'lab': {'terminal': True, 'skills': {'root': str(root)}}}}))
+        ledger = str(self.tmp / 'ledger')
+        printed = io.StringIO()
+        # init and every start look for skills in the Codex home, the user's and the machine's folder: all empty here.
+        with mock.patch.dict(os.environ, {'HOME': str(home), 'CODEX_HOME': str(codex_home)}), \
+                mock.patch.object(native, 'MACHINE_SKILLS', self.tmp / 'machine-skills'):
+            with contextlib.redirect_stdout(io.StringIO()):
+                main(['--root', ledger, '--run', 'r', 'init', '--config', str(path)])
+            (root / 'plot-check' / 'scripts' / 'check.py').write_bytes(b'print("changed")\n')
+            with contextlib.redirect_stdout(printed):
+                main(['--root', ledger, '--run', 'r', 'features'])
+        store = Store(ledger)
+        self.addCleanup(store.close)
+        skills = store.run('r')['config']['native_capabilities']['lab']['skills']
+        self.assertEqual(skills, {'root': str(root.resolve()), 'frozen': {'plot-check': PLOT_CHECK}})
+        for name, raw in (('SKILL.md', SKILL_MD), ('scripts/check.py', CHECK_PY)):
+            self.assertEqual(store.read_blob(PLOT_CHECK['files'][name]), raw)
+        self.assertEqual(json.loads(printed.getvalue())['native_capabilities']['lab'], {**TERMINAL, 'skills': skills})
+
+    def test_receipt_form_names_skills_by_hash(self):
+        self.assertEqual(native.receipt_form(WITH_SKILLS)['skills'], {'plot-check': digest(PLOT_CHECK['files'])})
+        self.assertEqual(native.receipt_form(WITH_SKILLS)['terminal'], TERMINAL['terminal'])
+        self.assertEqual(WITH_SKILLS['skills']['frozen'], {'plot-check': PLOT_CHECK})   # The settings given are kept.
+
+
+class SkillHomeTests(unittest.TestCase):
+    """A role with skills runs only where the other folders Codex lists skills from hold nothing."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix='rsi-skill-home-'))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.user, self.codex_home, self.machine = self.tmp / 'user', self.tmp / 'codex-home', self.tmp / 'machine'
+        self.user.mkdir()
+        self.codex_home.mkdir()
+        self.machine_skills = native.MACHINE_SKILLS
+        # This machine's own home, Codex home and machine skills folder are never looked at.
+        for patcher in (mock.patch.dict(os.environ, {'HOME': str(self.user), 'CODEX_HOME': str(self.codex_home)}),
+                        mock.patch.object(native, 'MACHINE_SKILLS', self.machine)):
+            patcher.start(); self.addCleanup(patcher.stop)
+
+    def folders(self):
+        """The three folders the check lists, in the order it lists them."""
+        return [self.codex_home / 'skills', self.user / '.agents' / 'skills', self.machine]
+
+    def refusal(self, folder):
+        return ('A role with skills needs a separate Codex home with no skills of its own: ' + str(folder)
+                + ' holds entries. ' + native.SEPARATE_HOME_HELP)
+
+    def test_each_of_the_three_folders_refuses_and_no_name_is_told(self):
+        for folder in self.folders():
+            (folder / 'secret-skill').mkdir(parents=True)
+            (folder / 'secret-skill' / 'SKILL.md').write_text('---\nname: secret-skill\n---\n')
+            with self.subTest(folder=folder):
+                with self.assertRaisesRegex(ValueError, 'separate Codex home') as raised:
+                    native.check_skill_homes(self.codex_home)
+                self.assertEqual(str(raised.exception), self.refusal(folder))
+                self.assertNotIn('secret-skill', str(raised.exception))
+            shutil.rmtree(folder / 'secret-skill')
+        # Any entry counts, a hidden one too; only the Codex home's own .system is left out, and only there.
+        for folder, name in zip(self.folders(), ('.DS_Store', '.system', '.system')):
+            (folder / name).write_text('x')
+            with self.subTest(folder=folder, name=name), self.assertRaisesRegex(ValueError, 'separate Codex home'):
+                native.check_skill_homes(self.codex_home)
+            (folder / name).unlink()
+        # With all three full, the first is named.
+        for folder in self.folders():
+            (folder / 'x').mkdir()
+        with self.assertRaises(ValueError) as raised:
+            native.check_skill_homes(self.codex_home)
+        self.assertEqual(str(raised.exception), self.refusal(self.codex_home / 'skills'))
+        self.assertEqual(self.machine_skills, Path('/etc/codex/skills'))      # The value itself, never listed here.
+        self.assertEqual(native.SEPARATE_HOME_HELP, 'Create an empty folder, run codex login once with CODEX_HOME set '
+                         'to it, and start the Controller or the host with CODEX_HOME set to it. ~/.agents/skills must '
+                         'be empty whatever the Codex home is.')
+
+    def test_the_system_folder_and_missing_folders_pass(self):
+        native.check_skill_homes(self.tmp / 'no-such-home')
+        (self.codex_home / 'skills' / '.system' / 'imagegen').mkdir(parents=True)
+        native.check_skill_homes(self.codex_home)
+        (self.user / '.agents' / 'skills').mkdir(parents=True)
+        self.machine.mkdir()
+        native.check_skill_homes(self.codex_home)                       # Empty folders pass as well.
+        shutil.rmtree(self.user / '.agents')
+        (self.user / '.agents').write_text('x')                         # Then ~/.agents/skills cannot exist.
+        native.check_skill_homes(self.codex_home)
+
+    def test_a_file_where_a_skills_folder_should_be_is_refused(self):
+        (self.user / '.agents').mkdir(parents=True); (self.user / '.agents' / 'skills').write_text('x')
+        with self.assertRaisesRegex(ValueError, 'separate Codex home'):
+            native.check_skill_homes(self.codex_home)
+        (self.user / '.agents' / 'skills').unlink()
+        full, empty = self.tmp / 'full', self.tmp / 'empty'
+        (full / 'plot-check').mkdir(parents=True)
+        empty.mkdir()
+        # A file, a link to nothing and a link to a folder holding a skill are refused; a link to an empty folder
+        # is read as that folder.
+        for folder in self.folders():
+            for case, make in (('a file', lambda: folder.write_text('x')),
+                               ('a link to nothing', lambda: folder.symlink_to(self.tmp / 'nothing')),
+                               ('a link to a full folder', lambda: folder.symlink_to(full, target_is_directory=True))):
+                make()
+                with self.subTest(folder=folder, case=case), self.assertRaises(ValueError) as raised:
+                    native.check_skill_homes(self.codex_home)
+                self.assertEqual(str(raised.exception), self.refusal(folder))
+                self.assertNotIn('plot-check', str(raised.exception))
+                folder.unlink()
+            folder.symlink_to(empty, target_is_directory=True)
+            native.check_skill_homes(self.codex_home)
+            folder.unlink()
+
+    def config(self, name, lab):
+        """A run config file whose Lab block is ``lab``."""
+        path = self.tmp / (name + '.json')
+        path.write_text(json.dumps({'budgets': BUDGETS, 'native_capabilities': {'lab': lab}}))
+        return path
+
+    def init(self, ledger, config):
+        """``init`` of run r in ``ledger`` from ``config``; the ledger's store."""
+        with contextlib.redirect_stdout(io.StringIO()):
+            main(['--root', str(ledger), '--run', 'r', 'init', '--config', str(config)])
+        store = Store(ledger)
+        self.addCleanup(store.close)
+        return store
+
+    def test_init_start_and_call_check_the_home_only_for_skills(self):
+        with_skills = self.config('with-skills', {'terminal': True,
+                                                  'skills': {'root': str(skill_folder(self.tmp / 'skills'))}})
+        started = self.init(self.tmp / 'started', with_skills)
+        Runtime(started, 'r')
+        (self.codex_home / 'skills' / 'x').mkdir(parents=True)
+        # A run initialised before the folder appeared is no longer started.
+        with self.assertRaisesRegex(ValueError, '^A role with skills needs a separate Codex home'):
+            Runtime(started, 'r')
+        # init refuses the config and creates no run.
+        refused = self.tmp / 'refused'
+        with self.assertRaisesRegex(ValueError, '^A role with skills needs a separate Codex home'):
+            main(['--root', str(refused), '--run', 'r', 'init', '--config', str(with_skills)])
+        store = Store(refused)
+        self.addCleanup(store.close)
+        with self.assertRaises(KeyError):
+            store.run('r')
+        # A call is refused before Codex is asked for its version or started.
+        session = {'session_id': 's', 'workspace': str(self.tmp / 'workspace'), 'provider_thread_id': None,
+                   'codex_home': str(self.codex_home)}
+        call = self.tmp / 'call'
+        with mock.patch.object(transport, 'codex_version', return_value='0.170.0') as version, \
+                mock.patch.object(transport.subprocess, 'Popen', side_effect=AssertionError('Codex started')):
+            with self.assertRaisesRegex(ValueError, '^A role with skills needs a separate Codex home'):
+                transport.invoke('p', {'type': 'object'}, call, 'm', 'low', session=session, native=WITH_SKILLS,
+                                 run_root=str(self.tmp / 'started'))
+        version.assert_not_called()
+        self.assertFalse(call.exists())
+        # A config with only the terminal initialises and starts with the same folder full.
+        Runtime(self.init(self.tmp / 'plain', self.config('plain', {'terminal': True})), 'r')
 
 
 if __name__ == '__main__':

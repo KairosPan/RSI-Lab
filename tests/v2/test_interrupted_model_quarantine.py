@@ -237,6 +237,32 @@ class InterruptedModelQuarantineTests(unittest.TestCase):
                 self.assertEqual(self.store.verify_history('r'), self.baseline)
                 self.assertEqual(self.store.get('r', 'effect', self.effect['id'])['status'], 'dispatching')
 
+    def test_a_call_recorded_before_the_skills_switch_can_still_be_isolated(self):     # Review Focus 3
+        def without(value):
+            def remove(command):
+                at = command.index(value)
+                self.assertEqual(command[at - 1], '-c')
+                del command[at - 1:at + 1]
+            return remove
+        self.write_artifacts(command_delta=without('skills.include_instructions=false'))
+        self.assertEqual(self.certify()['status'], 'unknown')
+        for value in ('agents.enabled=false', 'suppress_unstable_features_warning=true'):
+            with self.subTest(removed=value):
+                self.write_artifacts(command_delta=without(value))
+                with self.assertRaisesRegex(RecoveryBlocked,
+                                            'Only the exact tool-disabled local Codex command can be isolated'):
+                    self.certify()
+        # The switch moved elsewhere in the command is no earlier command either.
+        def moved(command):
+            without('skills.include_instructions=false')(command)
+            command[-1:-1] = ['-c', 'skills.include_instructions=false']
+        self.write_artifacts(command_delta=moved)
+        with self.assertRaisesRegex(RecoveryBlocked, 'Only the exact tool-disabled local Codex command can be isolated'):
+            self.certify()
+        self.write_artifacts()
+        self.assertEqual(self.certify()['status'], 'unknown')
+        self.assertEqual(self.store.verify_history('r'), self.baseline)
+
     def test_attestation_requires_all_bindings_and_quiescent_pids(self):
         for delta in ({'packet_sha256': '0' * 64}, {'pause_sha256': '0' * 64},
                       {'native_writer_quiesced': False}, {'all_owned_writers_checked': False},

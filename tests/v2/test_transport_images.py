@@ -43,6 +43,9 @@ class ImageTransportTests(unittest.TestCase):
         self.folder = self.root / 'call'
         self.real_popen = subprocess.Popen
         self.commands = []
+        # A Codex CLI of the checked version, whatever this machine has installed: the CLI is never asked.
+        version = patch.object(transport, 'codex_version', return_value='0.170.0')
+        version.start(); self.addCleanup(version.stop)
 
     def invoke(self, images=None, session=None, incomplete=False):
         # The subprocess reads the exact -i files before returning their hashes.
@@ -152,7 +155,9 @@ for event in events:
 
     def test_missing_cli_keeps_requested_images_but_never_certifies_submission(self):
         images = [attachment()]
-        with patch.object(transport.subprocess, 'Popen', side_effect=FileNotFoundError('codex unavailable')):
+        # A missing CLI cannot be asked its version either.
+        with patch.object(transport, 'codex_version', return_value=None), \
+                patch.object(transport.subprocess, 'Popen', side_effect=FileNotFoundError('codex unavailable')):
             result = transport.invoke('Inspect', {'type': 'object'}, self.folder,
                                       'test-model', 'medium', images=images)
         invocation = json.loads((self.folder / 'invocation.json').read_text())

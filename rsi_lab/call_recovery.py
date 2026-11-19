@@ -1,8 +1,9 @@
 """Recover a local Codex attempt without repeating a model request.
 
 Only the exact effect directory, its acknowledged journal prefix and the owned
-native thread are inspected. A terminal model event is distinct from proof that
-the old CLI writer exited; callers must fence an unconfirmed writer before
+native thread are inspected, and for a call that tracked its processes the
+process table. A terminal model event is distinct from proof that the old CLI
+writer exited; callers must fence an unconfirmed writer before
 committing/resuming the session. Missing cost counters are never filled with 0.
 """
 from __future__ import annotations
@@ -15,7 +16,7 @@ import uuid
 
 from .store import digest
 from .journal import read_journal
-from .transport import BENIGN_FAILURE_ERRORS, _json, audited_events
+from .transport import BENIGN_FAILURE_ERRORS, _json, _tracks, audited_events, stop_recorded
 from .session_context import find_owned_rollout, read_native_snapshot, snapshot_from_bytes, verify_snapshot_images
 from . import codex_ledger, images
 from . import native as native_tools
@@ -70,7 +71,26 @@ def recover_codex_receipt(effect, packet_bytes, calls_root, *, interruption_atte
     may settle known costs/execution while retaining the session recovery duty.
     The call must have run with the Effect's frozen native settings; its tokens
     are settled as the executor settles them (``codex_ledger.settle_call``).
-    This function performs no writes, subprocess launches or provider requests.
+
+    A call that tracked its processes (the terminal on, or a local tool
+    server) wrote them to ``transport.TRACKED_FILE`` as they were seen. Once
+    the binding checks have shown the call to be this Effect's (its prompt,
+    schema and ``invocation.json``, and the durable prefix of its journal:
+    the attempt identity, the native settings and the session binding), the
+    ones still running are stopped (``transport.stop_recorded``). That is
+    before anything else is concluded: before a gap in the journal is raised
+    (a Controller killed while it appended leaves one), before the turn's
+    terminal is looked for (so an unfinished call's are stopped too) and
+    before anything is settled. The process table is read, running ``ps``;
+    only a pid that still has its recorded start time is signalled, as one
+    with another start time names another process, and never one
+    ``transport.stop_recorded`` protects (pid 1, this process, its
+    ancestors, its group and its session). The result then also carries
+    ``recovery_requires_fencing`` unless that file could be read and every
+    process it names was confirmed stopped. So recovery must not run while
+    another process still executes the call: it would stop that call's live
+    tool servers and commands. This function writes nothing, launches no
+    Codex and makes no provider request.
     """
     effect_id = effect.get('id')
     if (not isinstance(effect_id, str) or not effect_id or Path(effect_id).name != effect_id
@@ -115,8 +135,9 @@ def recover_codex_receipt(effect, packet_bytes, calls_root, *, interruption_atte
         raise RecoveryBlocked('journal_integrity_error', str(exc)) from exc
     interrupted_gap = (interruption_attestation is not None and capture['gaps'] == [
         {'kind': 'stream_incomplete', 'seq': capture['durable_seq']}])
-    if capture['gaps'] and not interrupted_gap:
-        raise RecoveryBlocked('journal_gap', 'journal has an unconfirmed, conflicting or incomplete tail')
+    # Raised once what the call recorded is stopped: a Controller killed while it appended leaves such a tail, and
+    # the call's identity needs only the durable prefix that the checks below read.
+    gap = capture['gaps'] and not interrupted_gap
     records = capture['records']
     if not records or records[0]['stream'] != 'control' or records[0]['kind'] != 'attempt_started':
         raise RecoveryBlocked('recovery_binding_mismatch', 'journal lacks its attempt identity')
@@ -160,6 +181,12 @@ def recover_codex_receipt(effect, packet_bytes, calls_root, *, interruption_atte
     _same(str(Path(binding['workspace']).resolve()), str(workspace.resolve()), 'native workspace differs')
     _same(str(Path(invocation['cwd']).resolve()), str(workspace.resolve()), 'invocation workspace differs')
     _same(binding.get('provider_thread_id'), session.get('provider_thread_id'), 'resume thread differs')
+    # What ran under Codex can outlive a Controller that died during the call, a local tool server orphaned by a
+    # killed turn going on making requests nothing records. Once the call is known to be this Effect's, it is
+    # stopped before anything else is concluded.
+    stopped = stop_recorded(folder) if _tracks(settings) else True
+    if gap:
+        raise RecoveryBlocked('journal_gap', 'journal has an unconfirmed, conflicting or incomplete tail')
     frames = []
     for row in records:
         if row['stream'] == 'stdout' and row['kind'] == 'event_frame' and row.get('duplicate_of') is None:
@@ -267,20 +294,23 @@ def recover_codex_receipt(effect, packet_bytes, calls_root, *, interruption_atte
     # terminal event the journal holds is recovered here.
     charge = codex_ledger.settle_call(folder, settings, session=session, codex_home=binding['codex_home'],
         path=native_path, thread_id=thread_id, stream_usage=usage, run_root=root.parent,
-        finished=len(terminals) == 1)
+        finished=len(terminals) == 1, workspace=workspace)
     if charge['tokens'] is not None:
         costs['tokens'] = charge['tokens']
-    if charge['profile_error']:
+    findings = [finding for finding in (charge['profile_error'], charge['images_error'], charge['skills_error'])
+                if finding]
+    if findings:
         protocol_valid = False
-    messages = ([charge['profile_error']] if charge['profile_error'] else []) + errors
+    messages = findings + errors
     latest = read_journal(journal_path)
     if (latest['durable_seq'] != capture['durable_seq'] or latest['head_hash'] != capture['head_hash']
             or latest['gaps']):
         raise RecoveryBlocked('journal_changed', 'journal advanced while recovery was reading it')
     if saved is not None:
         _same(_object(result_path), saved, 'saved result changed during recovery')
-    # As in the executor; with anything on, only a saved result can say that what ran under Codex was stopped.
-    quiesced = finished is not None and (not native_on or (
+    # As in the executor; with anything on, only a saved result can say that what ran under Codex was stopped. And
+    # what the call recorded must have been stopped here.
+    quiesced = stopped and finished is not None and (not native_on or (
         saved is not None and saved.get('descendants_stopped') is not False))
     evidence_path = result_path if saved is not None else journal_path
     return {'status': status, 'actual_costs': costs, 'response': response,
@@ -302,7 +332,12 @@ def recover_codex_receipt(effect, packet_bytes, calls_root, *, interruption_atte
 
 
 def recover_interrupted_codex_receipt(effect, packet_bytes, calls_root, operator_attestation):
-    """Explicit operator-only, read-only certification of a killed model request."""
+    """Explicit operator-only certification of a killed model request.
+
+    It writes nothing. A call that tracked its processes, which has native
+    settings on and so is refused, first has them stopped, as
+    ``recover_codex_receipt`` stops them.
+    """
     result = recover_codex_receipt(effect, packet_bytes, calls_root,
                                    interruption_attestation=operator_attestation)
     if result is None or 'interruption_quarantine_proof' not in result:

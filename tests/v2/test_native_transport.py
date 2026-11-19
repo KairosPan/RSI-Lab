@@ -4,6 +4,7 @@ The fake provider is a local Python process that writes the Codex event
 protocol; no model, network request or credential is used.
 """
 import base64
+import hashlib
 import itertools
 import json
 import os
@@ -20,16 +21,26 @@ from unittest.mock import patch
 
 from rsi_lab import native, transport
 from rsi_lab.journal import read_journal
-from tests.v2.native_fixtures import (PLAIN, R, ROLES, SEARCH, SUBAGENTS, TERMINAL, TERMINAL_AND_SEARCH,
-                                      TERMINAL_AND_SUBAGENTS, WITH_ROLES)
+from tests.v2.native_fixtures import (CHECK_PY, LOCAL_SERVER_ONLY, MCP_ITEM, PLAIN, PLOT_CHECK, R, ROLES, SEARCH,
+                                      SKILL_MD, SUBAGENTS, TERMINAL, TERMINAL_AND_SEARCH, TERMINAL_AND_SUBAGENTS,
+                                      TOOL_SERVERS, URL_SERVER_ONLY, VIEW_IMAGE, WITH_ROLES, WITH_SKILLS,
+                                      WITH_TOOL_SERVERS)
 from tests.v2.test_journal_transport import THREAD, frames
 
 TODAY = ['codex', '--no-daemon', '--ask-for-approval', 'never', 'exec', '--sandbox', 'read-only', '-C', '/w',
          '--ignore-user-config', '--model', 'm', '--skip-git-repo-check', '--json', '--output-schema', '/f/schema.json',
          '-c', 'model_reasoning_effort="low"', '-c', 'web_search="disabled"',
-         '-c', 'suppress_unstable_features_warning=true', '-c', 'agents.enabled=false']
+         '-c', 'suppress_unstable_features_warning=true', '-c', 'agents.enabled=false',
+         '-c', 'skills.include_instructions=false']
 # ... followed by '--disable', X for every X in transport.DISABLED_FEATURES, then
 # '--enable', 'skip_host_skill_discovery', the thread id when resuming, and '-'.
+# The command values of TOOL_SERVERS, in server name order.
+SERVER_VALUES = [
+    'mcp_servers.chem.command="/opt/tools/bin/python"', 'mcp_servers.chem.args=["-m","chem_server"]',
+    'mcp_servers.chem.env={"CHEM_MODE"="fast"}', 'mcp_servers.chem.env_vars=["CHEM_API_KEY"]',
+    'mcp_servers.chem.tool_timeout_sec=300', 'mcp_servers.chem.default_tools_approval_mode="approve"',
+    'mcp_servers.papers.url="https://papers.example.org/mcp"', 'mcp_servers.papers.bearer_token_env_var="PAPERS_TOKEN"',
+    'mcp_servers.papers.http_headers={"X-Client"="rsi-lab"}', 'mcp_servers.papers.default_tools_approval_mode="approve"']
 
 NATIVE_STREAM = [
     {'type': 'thread.started', 'thread_id': THREAD}, {'type': 'turn.started'},
@@ -48,17 +59,27 @@ NATIVE_ACTIVITY = {
     'searches': ['q'], 'files_changed': ['/w/notes.md'], 'omitted': 0}
 
 
+# The environment ps runs in when the kernel reads the process table: its start times then read the same whoever reads
+# them, whatever their locale or time zone.
+PS_ENVIRONMENT = {'LC_ALL': 'C', 'TZ': 'UTC0', 'PATH': '/usr/bin:/bin'}
+# The kernel's reader of the CLI's version, which every test of NativeTransportTests replaces; its own test calls it
+# through a replaced transport._POPEN.
+READ_CODEX_VERSION = transport.codex_version
+
+
 def record(marker):
     """Python statements that write ``"<pid> <start>"`` for the process ``p`` to ``marker`` in one step, the start
-    time read from the process table right after ``p`` appears: the identity a cleanup confirms before a signal."""
+    time read from the process table right after ``p`` appears, as the kernel reads it: the identity a cleanup
+    confirms before a signal."""
     part = str(marker) + '.part'
-    return ('s=subprocess.run(["ps","-o","lstart=","-p",str(p.pid)],capture_output=True,text=True).stdout.strip();'
-            'open(%r,"w").write(str(p.pid)+" "+s);os.replace(%r,%r);' % (part, part, str(marker)))
+    return ('s=subprocess.run(["ps","-o","lstart=","-p",str(p.pid)],capture_output=True,text=True,env=%r).stdout.strip();'
+            'open(%r,"w").write(str(p.pid)+" "+s);os.replace(%r,%r);' % (PS_ENVIRONMENT, part, part, str(marker)))
 
 
 def lstart(pid):
     """The start time ``ps`` shows for ``pid``, as ``record`` reads it; ``''`` when no process has ``pid``."""
-    return subprocess.run(['ps', '-o', 'lstart=', '-p', str(pid)], capture_output=True, text=True).stdout.strip()
+    return subprocess.run(['ps', '-o', 'lstart=', '-p', str(pid)], capture_output=True, text=True,
+                          env=PS_ENVIRONMENT).stdout.strip()
 
 
 class NativeTransportTests(unittest.TestCase):
@@ -69,11 +90,22 @@ class NativeTransportTests(unittest.TestCase):
         self.workspace = self.root / 'agents' / 's' / 'workspace'
         self.real_popen = subprocess.Popen
         self.commands = []
+        # An empty home: no everyday Codex home to deny, whatever this machine's own home holds.
+        (self.root / 'home').mkdir()
+        home = patch.dict(os.environ, {'HOME': str(self.root / 'home')})
+        home.start(); self.addCleanup(home.stop)
+        # A Codex CLI of the checked version, whatever this machine has installed: the CLI is never asked.
+        version = patch.object(transport, 'codex_version', return_value='0.170.0')
+        version.start(); self.addCleanup(version.stop)
 
     def command(self, settings, thread=None):
         session = {'provider_thread_id': thread, 'codex_home': '/home/.codex'}
         return transport._command(Path('/f'), 'm', 'low', '/r/agents/s/workspace', session,
                                   native=settings, run_root='/r')
+
+    def parts(self, settings, codex_home='/h'):
+        return native.command_parts(settings, workspace='/w', run_root='/r', codex_home=codex_home, model='m',
+                                    effort='low')
 
     def config_value(self, command, prefix):
         """The one ``-c`` value that starts with ``prefix``, without the prefix."""
@@ -175,9 +207,9 @@ class NativeTransportTests(unittest.TestCase):
         for text, status, expected in (('codex-cli 0.170.0\n', 0, '0.170.0'), ('codex-cli 0.171.0-alpha.2\n', 0, '0.171.0-alpha.2'),
                                        ('codex-cli 0.170.0\n', 1, None), ('something else 1.2.3\n', 0, None), ('', 0, None)):
             with self.subTest(text=text, status=status), patch.object(transport, '_POPEN', cli(text, status)):
-                self.assertEqual(transport.codex_version(), expected)
+                self.assertEqual(READ_CODEX_VERSION(), expected)
         with patch.object(transport, '_POPEN', side_effect=FileNotFoundError('codex')):
-            self.assertIsNone(transport.codex_version())
+            self.assertIsNone(READ_CODEX_VERSION())
 
     def test_a_call_records_the_codex_version_it_ran_on(self):
         wire = ''.join(json.dumps(event) + '\n' for event in frames(thread=THREAD)).encode()
@@ -309,6 +341,9 @@ class NativeTransportTests(unittest.TestCase):
             self.assertEqual(tomllib.loads('t = ' + native.toml_string(text))['t'], text)
         self.assertEqual(tomllib.loads('t = ' + native.toml_table([('a b', '"x"'), ('/c', 'd')]))['t'],
                          {'a b': '"x"', '/c': 'd'})
+        items = ['-m', 'a b', 'quote"back\\slash', 'line\nbreak', '数据', '']
+        self.assertEqual(tomllib.loads('t = ' + native.toml_array(items))['t'], items)
+        self.assertEqual(native.toml_array([]), '[]')
 
     def test_a_table_with_a_repeated_key_is_refused(self):
         with self.assertRaisesRegex(ValueError, 'repeated'):
@@ -437,17 +472,19 @@ class NativeTransportTests(unittest.TestCase):
                   '-c', 'agents.default_subagent_model="m"', '-c', 'agents.default_subagent_reasoning_effort="low"']
         tail = [part for f in transport.DISABLED_FEATURES if f != 'multi_agent' for part in ('--disable', f)] + [
             '--enable', 'skip_host_skill_discovery', '-']
+        # Sub-agents on: no agents.enabled=false, and the skills switch follows the unstable features warning.
+        head = TODAY[:-4] + ['-c', 'skills.include_instructions=false']
         # Without roles a folder for them changes nothing: the command is the one built at the base.
         for roles_dir in (None, '/r/agents/s/roles'):
             self.assertEqual(transport._command(Path('/f'), 'm', 'low', '/w', session, native=PLAIN, run_root='/r',
-                                                roles_dir=roles_dir), TODAY[:-2] + limits + tail)
+                                                roles_dir=roles_dir), head + limits + tail)
         command = transport._command(Path('/f'), 'm', 'low', '/w', session, native=WITH_ROLES, run_root='/r',
                                      roles_dir='/r/agents/s/roles')
         roles = ['-c', 'agents.challenge.description="Argues against the \\"leading\\" series."',
                  '-c', 'agents.challenge.config_file="/r/agents/s/roles/challenge.toml"',
                  '-c', 'agents.local.description="Advances the leading series."',
                  '-c', 'agents.local.config_file="/r/agents/s/roles/local.toml"']
-        self.assertEqual(command, TODAY[:-2] + limits + roles + tail)
+        self.assertEqual(command, head + limits + roles + tail)
         self.assertEqual(tomllib.loads('t = ' + self.config_value(command, 'agents.challenge.description='))['t'],
                          ROLES['challenge']['description'])
         with self.assertRaisesRegex(ValueError, 'roles_dir'):
@@ -475,6 +512,269 @@ class NativeTransportTests(unittest.TestCase):
                 self.assertFalse(self.folder.exists())
         self.assertEqual(list(elsewhere.iterdir()), [])
         self.assertFalse(roles_dir.exists())
+
+    def test_tool_servers_are_named_in_name_order(self):
+        self.assertEqual(self.parts(WITH_TOOL_SERVERS)['config'], SERVER_VALUES)
+        self.assertEqual(self.parts(WITH_TOOL_SERVERS)['sandbox'], ['--sandbox', 'read-only'])
+        command = self.command(WITH_TOOL_SERVERS)
+        for value in SERVER_VALUES + ['skills.include_instructions=false']:
+            self.assertEqual(command[command.index(value) - 1], '-c')
+        # Read as TOML, as Codex reads each -c value, they give the servers' tables; the timeout is an integer.
+        self.assertEqual(tomllib.loads('\n'.join(SERVER_VALUES)), {'mcp_servers': {
+            'chem': {'command': '/opt/tools/bin/python', 'args': ['-m', 'chem_server'], 'env': {'CHEM_MODE': 'fast'},
+                     'env_vars': ['CHEM_API_KEY'], 'tool_timeout_sec': 300, 'default_tools_approval_mode': 'approve'},
+            'papers': {'url': 'https://papers.example.org/mcp', 'bearer_token_env_var': 'PAPERS_TOKEN',
+                       'http_headers': {'X-Client': 'rsi-lab'}, 'default_tools_approval_mode': 'approve'}}})
+
+    def test_values_not_given_are_left_out(self):
+        bare = {'web_search': False, 'terminal': None, 'subagents': None, 'tool_servers': {
+            'a': {'description': 'd', 'command': '/bin/s', 'args': [], 'env': {}, 'env_from': []},
+            'b': {'description': 'd', 'url': 'http://localhost:9/mcp', 'headers': {}}}}
+        self.assertEqual(self.parts(bare)['config'], [
+            'mcp_servers.a.command="/bin/s"', 'mcp_servers.a.default_tools_approval_mode="approve"',
+            'mcp_servers.b.url="http://localhost:9/mcp"', 'mcp_servers.b.default_tools_approval_mode="approve"'])
+
+    def test_image_viewing_is_no_longer_disabled(self):
+        command = self.command(VIEW_IMAGE)
+        self.assertNotIn('view_image', command)
+        self.assertEqual(command[command.index('image_generation') - 1], '--disable')
+        self.assertEqual(self.parts(VIEW_IMAGE)['enabled'], {'shell_tool', 'unified_exec', 'view_image'})
+        without = self.command(TERMINAL)
+        self.assertEqual(without[without.index('view_image') - 1], '--disable')
+
+    def test_skills_settings_on_the_command(self):
+        self.assertEqual(self.parts(WITH_SKILLS)['config'][-2:], ['skills.bundled.enabled=false', 'project_root_markers=[]'])
+        command = self.command(WITH_SKILLS)
+        self.assertNotIn('skills.include_instructions=false', command)
+        moved = {**WITH_SKILLS, 'skills': {**WITH_SKILLS['skills'], 'root': '/elsewhere'}}
+        self.assertEqual(self.command(moved), command)                         # Nothing depends on the owner's folders.
+        for settings in (None, SEARCH, TERMINAL, PLAIN, WITH_TOOL_SERVERS):
+            self.assertIn('skills.include_instructions=false', self.command(settings))
+        # Everything in order: terminal values, sub-agent values, tool server values, skills values.
+        everything = {**WITH_SKILLS, 'subagents': {'max_concurrent': 2}, 'tool_servers': TOOL_SERVERS}
+        config = self.parts(everything)['config']
+        self.assertEqual(config[-12:], SERVER_VALUES + ['skills.bundled.enabled=false', 'project_root_markers=[]'])
+        self.assertEqual(config[-16:-12], ['agents.max_depth=1', 'agents.max_concurrent_threads_per_session=2',
+                                           'agents.default_subagent_model="m"',
+                                           'agents.default_subagent_reasoning_effort="low"'])
+        self.assertEqual(config[-17], 'project_doc_max_bytes=0')
+
+    def test_a_separate_home_also_denies_the_everyday_one(self):
+        home = self.root / 'user'; (home / '.codex').mkdir(parents=True)
+        everyday = str((home / '.codex').resolve())
+        with patch.dict(os.environ, {'HOME': str(home)}):
+            table = tomllib.loads('t = ' + self.config_value(self.command(TERMINAL), 'permissions.rsi_agent.filesystem='))['t']
+            self.assertEqual(list(table)[2:4], ['/home/.codex', everyday]); self.assertEqual(table[everyday], 'deny')
+            same = self.parts(TERMINAL, codex_home=everyday)['config']
+            self.assertEqual(sum(value.count(json.dumps(everyday)) for value in same), 1)
+            # Named through a link, the everyday home is still the call's own (both are compared resolved): it gets
+            # no second entry.
+            link = self.root / 'home-link'
+            link.symlink_to(home / '.codex', target_is_directory=True)
+            linked = self.parts(TERMINAL, codex_home=str(link))['config']
+            self.assertEqual(sum(value.count(json.dumps(everyday)) for value in linked), 0)
+            # Without the terminal there is no profile, and the everyday home is not named.
+            self.assertNotIn(everyday, ''.join(self.command(WITH_TOOL_SERVERS)))
+        with patch.dict(os.environ, {'HOME': str(self.root / 'nobody')}):
+            self.assertNotIn('nobody', ''.join(self.command(TERMINAL)))
+
+    def test_secret_values_reach_no_record_and_no_command(self):                  # Review Focus 4
+        secret = 'invented-secret-4f1c'
+        with patch.dict(os.environ, {'CHEM_API_KEY': secret, 'PAPERS_TOKEN': secret + '-url'}), \
+                patch.object(transport, 'codex_version', return_value='0.170.0'):
+            result = self.invoke(native={**LOCAL_SERVER_ONLY, 'tool_servers': TOOL_SERVERS})
+        self.assertTrue(result['protocol_valid'], result['error'])
+        for path in self.folder.rglob('*'):
+            if path.is_file():
+                self.assertNotIn(secret.encode(), path.read_bytes(), path.name)
+        self.assertFalse(any(secret in part for part in self.commands[0]))
+        self.assertIn('mcp_servers.chem.env_vars=["CHEM_API_KEY"]', self.commands[0])
+
+    def test_an_unset_or_empty_variable_refuses_before_codex_starts(self):        # Review Focus 4
+        for token in (None, ''):
+            with self.subTest(token=token), patch.dict(os.environ, {'CHEM_API_KEY': 'x'}), \
+                    patch.object(transport, 'codex_version', side_effect=AssertionError('asked')):
+                os.environ.pop('PAPERS_TOKEN', None)
+                if token is not None:
+                    os.environ['PAPERS_TOKEN'] = token
+                with self.assertRaisesRegex(ValueError, 'not set: PAPERS_TOKEN$'):
+                    self.invoke(native=WITH_TOOL_SERVERS)
+                self.assertEqual(self.commands, []); self.assertFalse(self.folder.exists())
+                self.assertFalse(self.workspace.exists())
+        with patch.dict(os.environ, {}), patch.object(transport, 'codex_version', side_effect=AssertionError('asked')):
+            for name in ('CHEM_API_KEY', 'PAPERS_TOKEN'):
+                os.environ.pop(name, None)
+            with self.assertRaisesRegex(ValueError, 'are not set: CHEM_API_KEY, PAPERS_TOKEN$'):
+                self.invoke(native=WITH_TOOL_SERVERS)
+
+    def test_a_skills_call_in_a_home_with_skills_is_refused_before_codex_is_asked(self):
+        codex_home = self.root / 'codex-home'
+        (codex_home / 'skills' / '.system' / 'imagegen').mkdir(parents=True)
+        # The session's Codex home is the one looked at, not CODEX_HOME, which is another, empty folder here.
+        (self.root / 'other-home').mkdir()
+        with patch.dict(os.environ, {'CODEX_HOME': str(self.root / 'other-home')}), \
+                patch.object(native, 'MACHINE_SKILLS', self.root / 'machine-skills'), \
+                patch.object(transport, 'codex_version', return_value='0.170.0') as version:
+            self.invoke(native=WITH_SKILLS, folder=self.root / 'calls' / 'system-only')   # Codex's own .system
+            self.assertEqual((len(self.commands), version.call_count), (1, 1))
+            (codex_home / 'skills' / 'secret-skill').mkdir()
+            with self.assertRaises(ValueError) as raised:
+                self.invoke(native=WITH_SKILLS)
+            self.assertEqual(str(raised.exception), 'A role with skills needs a separate Codex home with no skills '
+                             'of its own: ' + str(codex_home.resolve() / 'skills') + ' holds entries. '
+                             + native.SEPARATE_HOME_HELP)
+            self.assertEqual((len(self.commands), version.call_count), (1, 1))
+            self.assertFalse(self.folder.exists())
+            # A call without skills goes ahead in the same home.
+            self.invoke(native=TERMINAL)
+            self.assertEqual(len(self.commands), 2)
+
+    def stored(self, folder, *raws):
+        """``folder``'s ``objects`` made a run store's object folder holding each of ``raws`` under its SHA-256,
+        read-only as the store keeps them. Returns the object folder."""
+        objects = folder / 'objects'
+        objects.mkdir(parents=True)
+        for raw in raws:
+            path = objects / hashlib.sha256(raw).hexdigest()
+            path.write_bytes(raw)
+            path.chmod(0o444)
+        return objects
+
+    def stale_agents(self, workspace):
+        """``workspace`` made with a ``.agents`` left by an earlier call: ``stale.md`` and a skill ``old``."""
+        (workspace / '.agents' / 'skills' / 'old').mkdir(parents=True)
+        (workspace / '.agents' / 'stale.md').write_text('Stale.\n', encoding='utf-8')
+        (workspace / '.agents' / 'skills' / 'old' / 'SKILL.md').write_text('---\nname: old\n---\n', encoding='utf-8')
+
+    def files_under(self, folder):
+        """The relative paths of the files under ``folder``, sorted; no folder, no files."""
+        return sorted(str(path.relative_to(folder)) for path in folder.rglob('*') if path.is_file())
+
+    def test_skills_are_written_fresh_into_the_workspace(self):
+        objects = self.stored(self.root, SKILL_MD, CHECK_PY)
+        self.stale_agents(self.workspace)
+        transport.write_skills(self.workspace, {'plot-check': PLOT_CHECK}, objects)
+        agents = self.workspace / '.agents'
+        self.assertEqual(self.files_under(agents), ['skills/plot-check/SKILL.md', 'skills/plot-check/scripts/check.py'])
+        self.assertEqual((agents / 'skills/plot-check/SKILL.md').read_bytes(), SKILL_MD)
+        self.assertEqual((agents / 'skills/plot-check/scripts/check.py').read_bytes(), CHECK_PY)
+        # Open to their owner only: every folder 0o700, every file 0o600, whatever the blob's mode (0o444 here).
+        for path in [agents, *agents.rglob('*')]:
+            self.assertEqual(stat.S_IMODE(path.lstat().st_mode), 0o700 if path.is_dir() else 0o600, path)
+        # Nothing else in the workspace was touched, and a workspace not made yet is made.
+        self.assertEqual([path.name for path in self.workspace.iterdir()], ['.agents'])
+        fresh = self.root / 'agents' / 's2' / 'workspace'
+        transport.write_skills(fresh, {'plot-check': PLOT_CHECK}, objects)
+        self.assertEqual(self.files_under(fresh), ['.agents/skills/plot-check/SKILL.md',
+                                                   '.agents/skills/plot-check/scripts/check.py'])
+
+    def test_a_missing_changed_or_linked_blob_writes_nothing(self):
+        check = PLOT_CHECK['files']['scripts/check.py']
+
+        def missing(objects):
+            (objects / check).unlink()
+
+        def changed(objects):
+            (objects / check).chmod(0o600)
+            (objects / check).write_bytes(b'print("other bytes")\n')
+
+        def linked(objects):
+            # The link leads to the right bytes; the blob is still not the store's own file.
+            (objects / check).unlink()
+            (objects.parent / 'elsewhere.py').write_bytes(CHECK_PY)
+            (objects / check).symlink_to(objects.parent / 'elsewhere.py')
+
+        def a_folder(objects):
+            (objects / check).unlink()
+            (objects / check).mkdir()
+        cases = {'missing': (missing, 'is missing'), 'changed': (changed, 'holds other bytes than its name says'),
+                 'linked': (linked, 'is a symlink'), 'a folder': (a_folder, 'is not a regular file')}
+        for case, (alter, message) in cases.items():
+            with self.subTest(case=case):
+                place = self.root / case
+                objects = self.stored(place, SKILL_MD, CHECK_PY)
+                alter(objects)
+                workspace = place / 'workspace'
+                self.stale_agents(workspace)
+                with self.assertRaises(ValueError) as raised:
+                    transport.write_skills(workspace, {'plot-check': PLOT_CHECK}, objects)
+                self.assertEqual(str(raised.exception), 'The run store does not hold skill file '
+                                 'plot-check/scripts/check.py: objects/' + check + ' ' + message)
+                self.assertEqual(self.files_under(workspace), ['.agents/skills/old/SKILL.md', '.agents/stale.md'])
+                self.assertEqual((workspace / '.agents' / 'stale.md').read_text(encoding='utf-8'), 'Stale.\n')
+
+    def test_a_skill_name_path_or_hash_that_leaves_its_folder_writes_nothing(self):
+        objects = self.stored(self.root, SKILL_MD, CHECK_PY)
+        self.stale_agents(self.workspace)
+        before = self.files_under(self.root)
+        files = PLOT_CHECK['files']
+        cases = {'a name': {'../../plot-check': PLOT_CHECK},
+                 'a path': {'plot-check': {**PLOT_CHECK, 'files': {**files, '../../../../escape.py': files['SKILL.md']}}},
+                 'a hash': {'plot-check': {**PLOT_CHECK, 'files': {**files, 'scripts/check.py': '../' + 'a' * 61}}}}
+        for case, skills in cases.items():
+            with self.subTest(case=case):
+                with self.assertRaisesRegex(ValueError, 'skill'):
+                    transport.write_skills(self.workspace, skills, objects)
+                self.assertEqual(self.files_under(self.root), before)
+
+    def test_skill_paths_that_clash_or_cannot_be_printed_write_nothing(self):
+        # A hand-made mapping the settings would refuse: on a volume that ignores letter case one file would replace
+        # the other, or a file would stand where a folder must.
+        objects = self.stored(self.root, SKILL_MD, CHECK_PY)
+        self.stale_agents(self.workspace)
+        files, blob = PLOT_CHECK['files'], PLOT_CHECK['files']['scripts/check.py']
+        cases = {'skill.md': "Skill plot-check may not hold both 'SKILL.md' and 'skill.md': where letter case is "
+                             'ignored they are one file, or a file and a folder at one path',
+                 'Scripts': "Skill plot-check may not hold both 'Scripts' and 'scripts/check.py'",
+                 'scripts/check.py/x': "Skill plot-check may not hold both 'scripts/check.py' and 'scripts/check.py/x'",
+                 'a\nb': "Invalid path of skill plot-check: 'a\\nb'",
+                 'a\x00b': "Invalid path of skill plot-check: 'a\\x00b'"}
+        for path, message in cases.items():
+            with self.subTest(path=path):
+                skills = {'plot-check': {**PLOT_CHECK, 'files': {**files, path: blob}}}
+                with self.assertRaises(ValueError) as raised:
+                    transport.write_skills(self.workspace, skills, objects)
+                self.assertTrue(str(raised.exception).startswith(message), str(raised.exception))
+                self.assertEqual(self.files_under(self.workspace), ['.agents/skills/old/SKILL.md', '.agents/stale.md'])
+
+    def test_a_symlinked_agents_folder_is_replaced_not_followed(self):
+        objects = self.stored(self.root, SKILL_MD, CHECK_PY)
+        outside = self.root / 'outside'
+        outside.mkdir()
+        (outside / 'keep.txt').write_text('Kept.\n', encoding='utf-8')
+        self.workspace.mkdir(parents=True)
+        (self.workspace / '.agents').symlink_to(outside, target_is_directory=True)
+        transport.write_skills(self.workspace, {'plot-check': PLOT_CHECK}, objects)
+        self.assertEqual(self.files_under(outside), ['keep.txt'])
+        self.assertEqual((outside / 'keep.txt').read_text(encoding='utf-8'), 'Kept.\n')
+        agents = self.workspace / '.agents'
+        self.assertFalse(agents.is_symlink())
+        self.assertTrue(agents.is_dir())
+        self.assertEqual(self.files_under(agents), ['skills/plot-check/SKILL.md', 'skills/plot-check/scripts/check.py'])
+        # A file in its place, or a link inside it, goes the same way; what a link inside leads to stays.
+        agents_file = self.root / 'file' / 'workspace'
+        agents_file.mkdir(parents=True)
+        (agents_file / '.agents').write_text('Not a folder.\n', encoding='utf-8')
+        transport.write_skills(agents_file, {'plot-check': PLOT_CHECK}, objects)
+        self.assertEqual(self.files_under(agents_file / '.agents'), ['skills/plot-check/SKILL.md',
+                                                                     'skills/plot-check/scripts/check.py'])
+        linked_inside = self.root / 'inner' / 'workspace'
+        (linked_inside / '.agents' / 'skills').mkdir(parents=True)
+        (linked_inside / '.agents' / 'skills' / 'old').symlink_to(outside, target_is_directory=True)
+        transport.write_skills(linked_inside, {'plot-check': PLOT_CHECK}, objects)
+        self.assertEqual(self.files_under(outside), ['keep.txt'])
+        self.assertEqual(self.files_under(linked_inside / '.agents'), ['skills/plot-check/SKILL.md',
+                                                                       'skills/plot-check/scripts/check.py'])
+
+    def test_a_symlinked_workspace_is_refused_and_nothing_is_written_through_it(self):
+        objects = self.stored(self.root, SKILL_MD, CHECK_PY)
+        outside = self.root / 'outside'
+        self.stale_agents(outside)
+        self.workspace.parent.mkdir(parents=True)
+        self.workspace.symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, 'symlink'):
+            transport.write_skills(self.workspace, {'plot-check': PLOT_CHECK}, objects)
+        self.assertEqual(self.files_under(outside), ['.agents/skills/old/SKILL.md', '.agents/stale.md'])
 
     def archive(self, events, invocation=None, name='archive'):
         """A call folder written before journals: ``events.jsonl`` and, unless ``None``, ``invocation.json`` text."""
@@ -515,6 +815,49 @@ class NativeTransportTests(unittest.TestCase):
         self.assertEqual(native.stream_items(TERMINAL_AND_SUBAGENTS),
                          always | {'command_execution', 'file_change', 'collab_tool_call'})
         self.assertIsInstance(native.stream_items(SEARCH), frozenset)
+        # Tool server calls appear only with tool servers declared; image viewing adds no item type.
+        self.assertEqual(native.stream_items(WITH_TOOL_SERVERS), always | {'web_search', 'mcp_tool_call'})
+        for settings in (LOCAL_SERVER_ONLY, URL_SERVER_ONLY):
+            self.assertEqual(native.stream_items(settings), always | {'mcp_tool_call'})
+        self.assertEqual(native.stream_items(VIEW_IMAGE), native.stream_items(TERMINAL))
+
+    def test_tool_server_items_only_for_a_declared_server(self):
+        stream = [*NATIVE_STREAM[:2], {'type': 'item.completed', 'item': MCP_ITEM}, *NATIVE_STREAM[-2:]]
+        allowed = native.stream_items(WITH_TOOL_SERVERS)
+        self.assertEqual(transport._events(self.wire(stream), allowed, frozenset({'chem', 'papers'}))[3], [])
+        other = [*stream[:2], {'type': 'item.started', 'item': {**MCP_ITEM, 'server': 'other'}}, *stream[2:]]
+        self.assertIn("Undeclared tool server: 'other'",
+                      transport._events(self.wire(other), allowed, frozenset({'chem'}))[3])
+        # Without tool servers the item stays forbidden, with the one error it had before they existed.
+        for settings in (SEARCH, None):
+            with self.subTest(settings=settings):
+                self.assertEqual(transport._events(self.wire(stream), native.stream_items(settings))[3],
+                                 ["Forbidden tool or unsupported item: 'mcp_tool_call'"])
+
+    def test_a_tool_server_item_must_name_a_declared_server_exactly(self):
+        allowed = native.stream_items(LOCAL_SERVER_ONLY)
+        for server, shown in ((None, 'None'), (['chem'], "['chem']"), ('', "''"), ('Chem', "'Chem'")):
+            item = {key: value for key, value in MCP_ITEM.items() if key != 'server'}
+            if server is not None:
+                item['server'] = server
+            for kind in ('item.started', 'item.updated', 'item.completed'):
+                stream = [*NATIVE_STREAM[:2], {'type': kind, 'item': item}, *NATIVE_STREAM[-2:]]
+                with self.subTest(server=server, kind=kind):
+                    self.assertEqual(transport._events(self.wire(stream), allowed, frozenset({'chem'}))[3],
+                                     ['Undeclared tool server: ' + shown])
+
+    def test_audited_events_reads_the_declared_servers(self):
+        stream = [*NATIVE_STREAM[:2], {'type': 'item.completed', 'item': MCP_ITEM}, *NATIVE_STREAM[-2:]]
+        recorded = json.dumps({'backend': 'codex', 'native': WITH_TOOL_SERVERS})
+        self.assertEqual(transport.audited_events(self.archive(stream, recorded)),
+                         ('{"ok":true}', {'input_tokens': 20, 'output_tokens': 5}, True, []))
+        other = [*stream[:2], {'type': 'item.completed', 'item': {**MCP_ITEM, 'server': 'other'}}, *stream[3:]]
+        self.assertEqual(transport.audited_events(self.archive(other, recorded, name='other'))[3],
+                         ["Undeclared tool server: 'other'"])
+        # Settings that declare only the URL server do not cover a call to chem.
+        papers = json.dumps({'backend': 'codex', 'native': URL_SERVER_ONLY})
+        self.assertEqual(transport.audited_events(self.archive(stream, papers, name='papers'))[3],
+                         ["Undeclared tool server: 'chem'"])
 
     def test_the_last_message_is_the_response_when_tools_are_on(self):
         allowed = native.stream_items({'web_search': True, 'terminal': {'readable_roots': []}, 'subagents': None})
@@ -711,7 +1054,7 @@ class NativeTransportTests(unittest.TestCase):
             with self.subTest(settings=name):
                 folder = self.root / 'calls' / ('twice-' + name)
 
-                def interrupted_kill(process, tracked=None):
+                def interrupted_kill(process, tracked=None, record=None):
                     process.kill(); process.wait()
                     raise KeyboardInterrupt('second')
                 with patch.object(transport, '_stream_process', side_effect=KeyboardInterrupt('first')), \
@@ -747,6 +1090,130 @@ class NativeTransportTests(unittest.TestCase):
                 self.assertEqual(result['execution_status'], 'succeeded', result['error'])
                 self.assertTrue(result['descendants_stopped'])
 
+    def test_a_local_server_alone_tracks_and_stops_what_the_call_orphaned(self):
+        marker = self.root / 'server.pid'; self.addCleanup(self.stop_recorded, marker)
+        with patch.object(transport, 'TRACK_SECONDS', .1), patch.object(transport, 'codex_version', return_value='0.170.0'), \
+                patch.dict(os.environ, {'CHEM_API_KEY': 'invented'}):
+            result = self.invoke(code=self.orphaning_codex(marker, ends=True), native=LOCAL_SERVER_ONLY)
+        self.assertEqual(result['execution_status'], 'succeeded', result['error'])
+        self.assertTrue(result['descendants_stopped'])
+        pid = int(marker.read_text().split()[0])
+        self.assertIn(pid, transport.read_tracked(self.folder))
+        self.assert_stopped(marker)
+
+    def test_a_url_server_starts_no_tracking(self):
+        with patch.object(transport, 'TRACK_SECONDS', .1), patch.object(transport, 'codex_version', return_value='0.170.0'), \
+                patch.dict(os.environ, {'PAPERS_TOKEN': 'invented'}), \
+                patch.object(transport, '_process_table', wraps=transport._process_table) as table:
+            result = self.invoke(native=URL_SERVER_ONLY)
+        table.assert_not_called()
+        self.assertEqual(result['execution_status'], 'succeeded', result['error'])
+        self.assertTrue(result['descendants_stopped'])
+        self.assertFalse((self.folder / transport.TRACKED_FILE).exists())
+
+    def test_the_tracked_file_is_written_before_a_kill(self):
+        marker = self.root / 'server.pid'; self.addCleanup(self.stop_recorded, marker)
+        # What the file names at each signal to a process group, and what each write of it held.
+        at_kill, written = [], []
+        real_killpg, real_write = os.killpg, transport.write_tracked
+
+        def killpg(group, sig):
+            at_kill.append(transport.read_tracked(self.folder))
+            real_killpg(group, sig)
+
+        def write(folder, tracked):
+            written.append(dict(tracked))
+            real_write(folder, tracked)
+        with patch.object(transport, 'TRACK_SECONDS', .1), patch.object(transport, 'codex_version', return_value='0.170.0'), \
+                patch.dict(os.environ, {'CHEM_API_KEY': 'invented'}), \
+                patch.object(transport, 'write_tracked', side_effect=write), \
+                patch.object(transport.os, 'killpg', side_effect=killpg):
+            result = self.invoke(code=self.orphaning_codex(marker, ends=False), native=LOCAL_SERVER_ONLY, timeout=2.5)
+        self.assertEqual(result['execution_status'], 'unknown')
+        self.assertTrue(result['descendants_stopped'])
+        pid, start = marker.read_text().split(' ', 1)
+        # Codex's group is the first signalled; the grandchild, with its start time, was in the file by then.
+        self.assertEqual(at_kill[0].get(int(pid)), start)
+        self.assertEqual(transport.read_tracked(self.folder)[int(pid)], start)
+        # Written whenever a sample added a process, not at every sample.
+        self.assertTrue(written)
+        self.assertTrue(all(earlier != later for earlier, later in zip(written, written[1:])), written)
+        self.assertEqual(transport.read_tracked(self.folder), written[-1])
+        self.assert_stopped(marker)
+
+    def test_a_tracked_file_that_cannot_be_written_ends_the_call(self):
+        marker = self.root / 'server.pid'; self.addCleanup(self.stop_recorded, marker)
+        with patch.object(transport, 'TRACK_SECONDS', .1), patch.object(transport, 'codex_version', return_value='0.170.0'), \
+                patch.dict(os.environ, {'CHEM_API_KEY': 'invented'}), \
+                patch.object(transport, 'write_tracked', side_effect=OSError('No space left on device')):
+            result = self.invoke(code=self.orphaning_codex(marker, ends=False), native=LOCAL_SERVER_ONLY, timeout=30)
+        # Like a journal that cannot be written: Codex is killed long before its deadline, with what ran under it.
+        self.assertEqual((result['execution_status'], result['error']), ('unknown', 'OSError: No space left on device'))
+        self.assertLess(result['wall_seconds'], 20)
+        self.assertTrue(result['descendants_stopped'])
+        self.assertTrue((self.folder / 'transport_result.json').is_file())
+
+    def test_the_tracked_file_holds_only_pids_and_start_times(self):
+        folder = self.root / 'tracked'; folder.mkdir()
+        self.assertEqual(transport.read_tracked(folder), {})          # Nothing recorded yet.
+        transport.write_tracked(folder, {4242: 'Thu Nov 19 10:00:01 2026', 77: 'Thu Nov 19 10:00:00 2026'})
+        path = folder / transport.TRACKED_FILE
+        self.assertEqual(path.name, 'tracked_processes.json')
+        self.assertIn(path.name, transport.ARTIFACTS)
+        self.assertEqual(json.loads(path.read_text()), {'processes': [{'pid': 77, 'start': 'Thu Nov 19 10:00:00 2026'},
+                                                                      {'pid': 4242, 'start': 'Thu Nov 19 10:00:01 2026'}]})
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+        self.assertEqual(transport.read_tracked(folder), {77: 'Thu Nov 19 10:00:00 2026', 4242: 'Thu Nov 19 10:00:01 2026'})
+        # A start time that ps printed in another encoding than UTF-8 is read back as it was decoded.
+        transport.write_tracked(folder, {77: 'jeu. 19 d\udce9c. 10:00:00 2026'})
+        self.assertEqual(transport.read_tracked(folder), {77: 'jeu. 19 d\udce9c. 10:00:00 2026'})
+        self.assertEqual(os.listdir(folder), [transport.TRACKED_FILE])
+        entry = '{"pid": 77, "start": "s"}'
+        malformed = [b'', b'\xff', b'not json', b'[]', b'{"processes": {}}', b'{"processes": [], "pids": []}',
+                     b'{"processes": [], "processes": []}', b'{"processes": [7]}', b'{"processes": [{"pid": 77}]}',
+                     b'{"processes": [{"pid": "77", "start": "s"}]}', b'{"processes": [{"pid": true, "start": "s"}]}',
+                     b'{"processes": [{"pid": 0, "start": "s"}]}', b'{"processes": [{"pid": -1, "start": "s"}]}',
+                     b'{"processes": [{"pid": 2147483648, "start": "s"}]}', b'{"processes": [{"pid": 7.0, "start": "s"}]}',
+                     b'{"processes": [{"pid": 77, "start": ""}]}', b'{"processes": [{"pid": 77, "start": 1}]}',
+                     b'{"processes": [{"pid": 77, "start": "s", "command": "x"}]}',
+                     ('{"processes": [%s, %s]}' % (entry, entry)).encode()]
+        for raw in malformed:
+            with self.subTest(raw=raw):
+                path.write_bytes(raw)
+                with self.assertRaises(ValueError):
+                    transport.read_tracked(folder)
+                # Nothing it names is signalled, or even looked for.
+                with patch.object(transport, '_process_table', side_effect=AssertionError('process table read')):
+                    self.assertFalse(transport.stop_recorded(folder))
+        # Too large, or nested too deep for the JSON reader, it cannot be read either.
+        too_large = '{"processes": [%s]}' % ', '.join('{"pid": %d, "start": "Thu Nov 19 10:00:00 2026"}' % pid
+                                                       for pid in range(2, 2000))
+        self.assertGreater(len(too_large), 65536)
+        for name, raw in (('too large', too_large.encode()), ('too deep', b'[' * 60000)):
+            with self.subTest(name):
+                path.write_bytes(raw)
+                with self.assertRaises(ValueError):
+                    transport.read_tracked(folder)
+                with patch.object(transport, '_process_table', side_effect=AssertionError('process table read')):
+                    self.assertFalse(transport.stop_recorded(folder))
+        path.unlink()
+        # Not a regular file: a symlink, a directory, or a named pipe, which must not hold recovery waiting for a writer.
+        (self.root / 'elsewhere.json').write_text('{"processes": []}')
+        for name, make in (('symlink', lambda: path.symlink_to(self.root / 'elsewhere.json')),
+                           ('dangling symlink', lambda: path.symlink_to(self.root / 'nowhere.json')),
+                           ('directory', path.mkdir), ('named pipe', lambda: os.mkfifo(path))):
+            with self.subTest(name):
+                make()
+                with self.assertRaises(ValueError):
+                    transport.read_tracked(folder)
+                self.assertFalse(transport.stop_recorded(folder))
+                path.rmdir() if name == 'directory' else path.unlink()
+        # Missing, or naming none, there is nothing to stop.
+        with patch.object(transport, '_process_table', side_effect=AssertionError('process table read')):
+            self.assertTrue(transport.stop_recorded(folder))
+            transport.write_tracked(folder, {})
+            self.assertTrue(transport.stop_recorded(folder))
+
     def test_tracking_follows_codex_and_every_tracked_process_that_is_still_the_same(self):
         # 200 was seen under Codex and still runs, orphaned; 500 was seen too, but its pid now names a later process.
         tracked = {200: 'T1', 500: 'T5'}
@@ -757,6 +1224,17 @@ class NativeTransportTests(unittest.TestCase):
         # Without a root (Codex reaped, its pid free for reuse) only what is under a tracked process is followed.
         transport._track(tracked, {**table, 300: (150, 'T4'), 160: (100, 'T3')})
         self.assertEqual(tracked, {200: 'T1', 500: 'T5', 150: 'T6', 210: 'T7', 211: 'T8', 300: 'T4'})
+
+    def test_the_process_table_reads_the_same_whatever_the_caller_s_locale_and_time_zone(self):
+        # A start time is written by one process and checked by another, perhaps from a shell with other settings.
+        starts = []
+        for settings in ({'LC_ALL': 'fr_FR.UTF-8', 'TZ': 'EST5'}, {'LC_ALL': 'zh_CN.UTF-8', 'TZ': 'CST-8'},
+                         {'LC_ALL': 'C', 'TZ': 'UTC0', 'LANG': 'de_DE.UTF-8', 'LC_TIME': 'ja_JP.UTF-8'}):
+            with self.subTest(**settings), patch.dict(os.environ, settings), \
+                    patch.object(transport, '_POPEN', wraps=transport._POPEN) as ps:
+                starts.append(transport._process_table()[os.getpid()][1])
+                self.assertEqual(ps.call_args.kwargs['env'], PS_ENVIRONMENT)
+        self.assertEqual(starts, [lstart(os.getpid())] * 3)
 
     def test_an_unreadable_process_table_still_kills_codex_and_reports_false(self):
         real = transport._POPEN
@@ -838,6 +1316,110 @@ class NativeTransportTests(unittest.TestCase):
                                             alive={500})
         self.assertEqual(signals, [])
         self.assertFalse(stopped)
+
+    def test_a_call_that_never_read_the_process_table_confirms_nothing_stopped(self):
+        # Codex ends on its own, and every look at the process table fails: nothing seen under it is confirmed.
+        with patch.object(transport, 'TRACK_SECONDS', .1), \
+                patch.object(transport, '_process_table', side_effect=OSError('ps unavailable')) as table:
+            result = self.invoke(native=TERMINAL)
+        self.assertEqual(result['execution_status'], 'succeeded', result['error'])
+        self.assertIs(result['descendants_stopped'], False)
+        self.assertGreaterEqual(table.call_count, 2)            # A sample during the call, and the last look.
+        self.assertIs(json.loads((self.folder / 'transport_result.json').read_text())['descendants_stopped'], False)
+        # Every sample failed but the last look at the end read the table: that read counts.
+        sweeping, real_sweep, real_table = [], transport._sweep, transport._process_table
+
+        def sweep(*arguments):
+            sweeping.append(True)
+            return real_sweep(*arguments)
+
+        def table_at_the_end():
+            if not sweeping:
+                raise OSError('ps unavailable')
+            return real_table()
+        with patch.object(transport, 'TRACK_SECONDS', .1), patch.object(transport, '_sweep', side_effect=sweep), \
+                patch.object(transport, '_process_table', side_effect=table_at_the_end):
+            result = self.invoke(native=TERMINAL, folder=self.root / 'calls' / 'read-at-the-end')
+        self.assertEqual((result['execution_status'], sweeping), ('succeeded', [True]))
+        self.assertIs(result['descendants_stopped'], True)
+
+    def test_a_sweep_with_nothing_tracked_needs_one_read_of_the_table(self):
+        # Nothing was tracked: a sample read the table, so nothing ran under the call; else the last look must.
+        stopped, signals = self.with_tables(lambda: transport._sweep({}, table_read=False), OSError('ps unavailable'))
+        self.assertEqual((stopped, signals), (False, []))
+        stopped, signals = self.with_tables(lambda: transport._sweep({}, table_read=False), self.ORPHANED)
+        self.assertEqual((stopped, signals), (True, []))
+        with patch.object(transport, '_process_table', side_effect=AssertionError('process table read')):
+            self.assertTrue(transport._sweep({}, table_read=True))
+
+    def test_what_a_kill_or_a_sweep_finds_is_recorded_before_any_signal(self):
+        recorded = []
+
+        def record(tracked):
+            # What is recorded, and whether a signal had been sent by then (a signal 0 only asks if a pid is in use).
+            sent = transport.os.killpg.called or any(call.args[1] for call in transport.os.kill.call_args_list)
+            recorded.append((dict(tracked), sent))
+        stopped, signals = self.with_tables(lambda: transport._terminate(SimpleNamespace(pid=100), {}, record),
+                                            self.LISTED)
+        self.assertEqual(recorded, [({200: 'T1', 300: 'T2', 400: 'T3'}, False)])
+        self.assertEqual((signals[0], stopped), (('killpg', 100), True))
+        # The sweep: 500, tracked at a sample, still runs and has started 510 since.
+        recorded.clear()
+        stopped, signals = self.with_tables(lambda: transport._sweep({500: 'T5'}, record),
+                                            {**self.ORPHANED, 510: (500, 'T6')})
+        self.assertEqual(recorded, [({500: 'T5', 510: 'T6'}, False)])
+        self.assertEqual((signals, stopped), ([('killpg', 500), ('killpg', 510)], True))
+        # A kill or a sweep that finds nothing new records nothing again.
+        recorded.clear()
+        self.with_tables(lambda: transport._terminate(SimpleNamespace(pid=100), {500: 'T5'}, record), self.ORPHANED)
+        self.with_tables(lambda: transport._sweep({500: 'T5'}, record), self.ORPHANED)
+        self.assertEqual(recorded, [])
+
+    def test_a_record_that_fails_does_not_hold_back_a_kill_or_a_sweep(self):
+        for failure in (OSError('No space left on device'), TypeError('not JSON serializable'), RuntimeError('bug')):
+            with self.subTest(failure=failure):
+                def record(tracked):
+                    raise failure
+                stopped, signals = self.with_tables(lambda: transport._terminate(SimpleNamespace(pid=100), {}, record),
+                                                    self.LISTED)
+                self.assertEqual((signals, stopped),
+                                 ([('killpg', 100), ('killpg', 200), ('killpg', 300), ('kill', 400)], True))
+                stopped, signals = self.with_tables(lambda: transport._sweep({500: 'T5'}, record),
+                                                    {**self.ORPHANED, 510: (500, 'T6')})
+                self.assertEqual((signals, stopped), ([('killpg', 500), ('killpg', 510)], True))
+
+    def test_recovery_never_signals_this_process_its_ancestors_its_group_or_its_session(self):
+        # This process runs under a parent and a grandparent; 700 is a server the call orphaned. Fake pids are far
+        # above any pid this machine gives out. Nothing here sends a real signal.
+        me, parent, grandparent = os.getpid(), 2_000_001, 2_000_002
+        group, session = os.getpgrp(), os.getsid(0)
+        table = {1: (0, 'boot'), grandparent: (1, 'TG'), parent: (grandparent, 'TP'), me: (parent, 'TM'),
+                 2_000_500: (1, 'T5'), 2_000_600: (1, 'T6'), 2_000_700: (1, 'T7')}
+        folder = self.root / 'recovered'; folder.mkdir()
+
+        def stop(tracked, read=table):
+            transport.write_tracked(folder, tracked)
+
+            def run():
+                # 2_000_500 is in this process's group, 2_000_600 in its session; every other process leads its own.
+                with patch.object(transport.os, 'getpgid', side_effect=lambda pid: group if pid == 2_000_500 else pid), \
+                        patch.object(transport.os, 'getsid',
+                                     side_effect=lambda pid: session if pid in (0, 2_000_600) else pid):
+                    return transport.stop_recorded(folder)
+            return self.with_tables(run, read)
+        refused = {'this process': {me: 'TM'}, 'pid 1': {1: 'boot'}, 'its parent': {parent: 'TP'},
+                   'an ancestor': {grandparent: 'TG'}, 'a member of its group': {2_000_500: 'T5'},
+                   'a member of its session': {2_000_600: 'T6'},
+                   # Recorded with another start time, the parent's pid is refused all the same.
+                   'its parent, reused': {parent: 'T0'}}
+        for case, tracked in refused.items():
+            with self.subTest(case):
+                self.assertEqual(stop(tracked), (False, []))
+        # A process table that does not show this process says nothing of its ancestors: nothing is signalled.
+        self.assertEqual(stop({2_000_700: 'T7'}, read={1: (0, 'boot'), 2_000_700: (1, 'T7')}), (False, []))
+        # Beside such a pid the call's own processes are still stopped, but the call is not confirmed stopped.
+        self.assertEqual(stop({me: 'TM', 2_000_700: 'T7'}), (False, [('killpg', 2_000_700)]))
+        self.assertEqual(stop({2_000_700: 'T7'}), (True, [('killpg', 2_000_700)]))
 
 
 if __name__ == '__main__':

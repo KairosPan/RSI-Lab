@@ -323,7 +323,8 @@ class MetaAgent:
         orchestration = task.get('constraints',{}).get('orchestration')
         lab_settings = lab_settings_enabled(orchestration)
         admission = task.get('constraints',{}).get('research_loop',{}).get('recommendation_admission')
-        native_settings = native_tools.validate(task.get('constraints', {}).get('native_capabilities'))
+        # The task carries the role's native settings in request form (native.request_form).
+        native_settings = native_tools.validate_request(task.get('constraints', {}).get('native_capabilities'))
         native_on = native_settings != native_tools.OFF
         response_schema(mode,research_features=features,final_review_only=final_review_only,research_policy=policy,
                         lab_settings=lab_settings, recommendation_admission=admission,
@@ -831,7 +832,11 @@ class CodexExecutor:
             packet_policy = normalize_research_policy(data['task'].get('constraints',{}).get('research_policy'))
         except (ValueError, TypeError, KeyError, IndexError) as exc:
             raise ValueError('Model packet must contain its exact research task and policy') from exc
-        if data['task'].get('constraints', {}).get('native_capabilities') != metadata.get('native_capabilities'):
+        # The packet carries the request form of the Effect's settings, and none when everything is off.
+        constraints = data['task'].get('constraints', {})
+        request_native = native_tools.request_form(settings) if native_on else None
+        if (('native_capabilities' in constraints) != native_on
+                or constraints.get('native_capabilities') != request_native):
             raise ValueError('Unsupported exact model request envelope')
         if packet_policy != normalize_research_policy(metadata.get('research_policy')):
             raise ValueError('Model packet policy differs from the admitted effect policy')
@@ -848,7 +853,7 @@ class CodexExecutor:
         if not isinstance(effect_id, str) or not effect_id or Path(effect_id).name != effect_id or effect_id in ('.', '..'):
             raise ValueError('Unsafe model effect identity')
         folder = self.calls_root / effect_id
-        extra = {}
+        extra, workspace = {}, None
         image_manifest = images.attachment_manifest(request.get('image_attachments', []))
         loaded_images = []
         for item in image_manifest:
@@ -868,11 +873,22 @@ class CodexExecutor:
                 workspace = self.calls_root.parent / 'agents' / sid / 'workspace'
                 # Beside the workspace, inside the run root the terminal's commands are denied; Codex reads it.
                 roles_dir = self.calls_root.parent / 'agents' / sid / 'roles'
+                # The transport refuses these too, but a refusal raised there would leave the Effect unknown.
+                # Codex reads the tool servers' variables from the environment it inherits.
+                unset = native_tools.unset_variables(settings, os.environ)
+                if unset:
+                    raise ValueError('Native settings name environment variables that are not set: '
+                                     + ', '.join(unset))
+                skills = native_tools.declared_skills(settings)
+                if skills:
+                    # The Codex home the transport gives a session that names none.
+                    native_tools.check_skill_homes(native_tools.default_codex_home())
                 if settings['terminal'] is not None:
                     # The terminal cannot write these names: anything there would reach Codex as instructions
-                    # or configuration nobody admitted.
+                    # or configuration nobody admitted. With skills declared .agents is the kernel's own, and
+                    # replaced below.
                     found = [name for name in native_tools.WORKSPACE_INSTRUCTIONS
-                             if os.path.lexists(workspace / name)]
+                             if not (skills and name == '.agents') and os.path.lexists(workspace / name)]
                     if found:
                         raise ValueError('The workspace holds Codex instructions or configuration that the '
                                          'Controller did not put there: ' + ', '.join(found))
@@ -880,6 +896,8 @@ class CodexExecutor:
                     if os.path.lexists(workspace / '.tmp') and not (workspace / '.tmp').is_dir():
                         raise ValueError("The workspace's .tmp, where the terminal's temporary files go, "
                                          'is not a directory')
+                if skills:
+                    transport.write_skills(workspace, skills, self.calls_root.parent / 'objects')
                 if declared_roles:
                     # Written here so that what cannot be written refuses the call; the transport writes them
                     # again, from the same settings, just before Codex starts.
@@ -942,7 +960,7 @@ class CodexExecutor:
         charge = codex_ledger.settle_call(folder, settings, session=session, codex_home=result.get('codex_home'),
             path=result.get('native_session_ref'), thread_id=result.get('provider_thread_id'), stream_usage=usage,
             run_root=self.calls_root.parent, finished=terminal_received is True,
-            dispatched=result.get('dispatched') is not False)
+            dispatched=result.get('dispatched') is not False, workspace=workspace)
         if charge['tokens'] is not None:
             costs['tokens'] = charge['tokens']
         context = None
@@ -973,9 +991,10 @@ class CodexExecutor:
                 result['protocol_valid'] = False
                 result['error'] = 'Native session continuation is unverifiable: ' + str(
                     context.get('native_session_error') or 'missing native session snapshot')
-        if charge['profile_error']:
+        if charge['profile_error'] or charge['images_error'] or charge['skills_error']:
             result['protocol_valid'] = False
-            result['error'] = '; '.join(filter(None, (charge['profile_error'], result.get('error'))))
+            result['error'] = '; '.join(filter(None, (charge['profile_error'], charge['images_error'],
+                                                      charge['skills_error'], result.get('error'))))
         return {'status': 'succeeded' if success else 'failed_definite' if execution == 'failed_definite' else 'unknown', 'actual_costs': costs,
                 'response': result.get('response'), 'usage': usage,
                 'usage_complete': result.get('usage_complete', False) and charge['usage_known'],

@@ -101,6 +101,9 @@ class TransportTests(unittest.TestCase):
         self.folder = self.root / 'call'
         self.real_popen = subprocess.Popen
         self.commands = []
+        # A Codex CLI of the checked version, whatever this machine has installed: the CLI is never asked.
+        version = patch.object(transport, 'codex_version', return_value='0.170.0')
+        version.start(); self.addCleanup(version.stop)
 
     def invoke(self, events=None, *, code=None, session=None, timeout=3):
         if code is None:
@@ -187,7 +190,10 @@ class TransportTests(unittest.TestCase):
         self.assertEqual(len(self.commands), 1)
 
     def test_missing_cli_records_definite_undispatched_failure(self):
-        with patch.object(transport.subprocess, 'Popen', side_effect=FileNotFoundError('provider unavailable')) as spawn:
+        # A missing CLI cannot be asked its version either.
+        missing = FileNotFoundError('provider unavailable')
+        with patch.object(transport, 'codex_version', return_value=None), \
+                patch.object(transport.subprocess, 'Popen', side_effect=missing) as spawn:
             result = transport.invoke('Inspect this task', {'type': 'object'}, self.folder,
                                       'test-model', 'medium')
         spawn.assert_called_once()

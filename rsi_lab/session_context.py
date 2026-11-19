@@ -36,6 +36,12 @@ TOOL_OUTPUT_KINDS = {'custom_tool_call_output', 'function_call_output'}
 # From Codex 0.170.0 the tool definitions of a thread are written into its rollout as a developer item,
 # again whenever they change. It is counted in the history bytes like any record and grants nothing.
 TOOL_DEFINITION_KIND = 'additional_tools'
+# How an image a role views with its image tool begins in the tool's output: a data: URL of an image type.
+# Its data is never decoded; it counts in the text history like the rest of the output.
+VIEWED_IMAGE_URL = re.compile(r'data:image/[A-Za-z0-9.+-]+;base64,')
+# The one tool output a viewed image is returned in: the exec tool's. A function_call_output carries results
+# between agents, and an image there is refused, never counted as viewed.
+VIEWED_IMAGE_OUTPUT = 'custom_tool_call_output'
 
 
 class ContextUnavailable(ValueError):
@@ -108,10 +114,20 @@ def _native_metadata(kind, payload, expected_thread_id):
             raise ContextUnavailable('context_unverifiable', 'invalid native usage counters')
 
 
-def _text_output(output):
-    """Whether a tool output is a string, or a list of items that each hold string ``text`` and no ``image_url``."""
+def _viewed_image(item):
+    """Whether a tool output item is an image the role viewed: ``input_image`` with an ``image_url`` that
+    ``VIEWED_IMAGE_URL`` begins and, optionally, a string ``detail``, and nothing else."""
+    return (isinstance(item, dict) and item.get('type') == 'input_image'
+            and not set(item) - {'type', 'image_url', 'detail'} and isinstance(item.get('detail', ''), str)
+            and isinstance(item.get('image_url'), str) and VIEWED_IMAGE_URL.match(item['image_url']) is not None)
+
+
+def _text_output(output, images=False):
+    """Whether a tool output is a string, or a list of items that each hold string ``text`` and no ``image_url``;
+    with ``images``, items may also be viewed images (``_viewed_image``), which are not decoded."""
     return isinstance(output, str) or (isinstance(output, list) and all(
-        isinstance(item, dict) and isinstance(item.get('text'), str) and 'image_url' not in item for item in output))
+        (isinstance(item, dict) and isinstance(item.get('text'), str) and 'image_url' not in item)
+        or (images and _viewed_image(item)) for item in output))
 
 
 def _imageless(content):
@@ -149,10 +165,20 @@ def snapshot_from_bytes(raw, *, expected_thread_id, expected_cwd, expected_prefi
     the text history counts, inclusive, together with the ``session_meta``
     records and the last full ``world_state`` before it; ``None`` when there
     is none and the whole file counts. Everything off reads exactly as before.
+
+    With ``view_image`` on, the exec tool's output (``VIEWED_IMAGE_OUTPUT``)
+    may also hold the images the role viewed (``_text_output``); an image in
+    a ``function_call_output`` is still refused. They are not decoded, are not
+    ``image_inputs`` and do not count in ``observable_image_bytes``, which hold
+    only the images a request attached; their bytes stay in the text history.
+    The snapshot then also carries ``viewed_image_count`` and
+    ``viewed_image_encoded_bytes``, the characters after the comma of their
+    URLs, over the whole file.
     """
     _identity(expected_thread_id)
     settings = native_tools.validate(native)
     kinds = native_tools.rollout_kinds(settings)
+    viewing = settings.get('view_image', False)
     if not isinstance(raw, bytes) or not raw or not raw.endswith(b'\n'):
         raise ContextUnavailable('stream_incomplete', 'rollout has no complete final record')
     if expected_prefix is not None:
@@ -164,6 +190,7 @@ def snapshot_from_bytes(raw, *, expected_thread_id, expected_cwd, expected_prefi
             raise ContextUnavailable('session_owner_mismatch', 'prefix belongs to another thread')
     records, messages, contexts, metadata, unsupported, runtime_metadata = [], [], [], [], [], []
     image_inputs, image_bytes, image_encoding_bytes = [], 0, 0
+    viewed_count, viewed_bytes = 0, 0
     # Text history starts at the last compacted record that holds its replacement history (record
     # number ``history_record``), else at the file's start; image encodings before it are not in its bytes.
     # The session_meta records and the last full world_state before that start still count (``carried``).
@@ -207,8 +234,14 @@ def snapshot_from_bytes(raw, *, expected_thread_id, expected_cwd, expected_prefi
         elif kind == 'response_item':
             item_kind = payload.get('type')
             if item_kind in kinds['response']:
-                if item_kind in TOOL_OUTPUT_KINDS and not _text_output(payload.get('output')):
+                images = viewing and item_kind == VIEWED_IMAGE_OUTPUT
+                if item_kind in TOOL_OUTPUT_KINDS and not _text_output(payload.get('output'), images=images):
                     unsupported.append({'record': number, 'kind': 'unsupported_tool_output'})
+                elif images and isinstance(payload['output'], list):
+                    # Viewed images stay in the text history; they are counted apart from attached images.
+                    for item in filter(_viewed_image, payload['output']):
+                        viewed_count += 1
+                        viewed_bytes += len(item['image_url'].split(',', 1)[1])
                 # Images reach a model only as Controller attachments, never inside a message between agents.
                 elif item_kind == 'agent_message' and not _imageless(payload.get('content')):
                     unsupported.append({'record': number, 'kind': 'unsupported_agent_message_content'})
@@ -288,6 +321,8 @@ def snapshot_from_bytes(raw, *, expected_thread_id, expected_cwd, expected_prefi
                         history_counted_from_record=history_record,
                         observable_text_history_bytes=(len(raw) - history_start + carried
                                                        - (image_encoding_bytes - encoding_before_start)))
+    if viewing:
+        snapshot.update(viewed_image_count=viewed_count, viewed_image_encoded_bytes=viewed_bytes)
     return snapshot
 
 

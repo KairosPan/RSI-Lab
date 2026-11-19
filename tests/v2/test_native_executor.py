@@ -20,12 +20,16 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from rsi_lab import native, roles, transport
+from rsi_lab import input_view, native, packets, roles, transport
 from rsi_lab.session_context import read_native_snapshot
-from rsi_lab.store import digest
+from rsi_lab.store import digest, encode
 from tests.v2.liveness_support import Scripted, none, open_run
-from tests.v2.native_fixtures import (PLAIN, PROFILE, R, ROLES, SEARCH, TERMINAL, TERMINAL_AND_SUBAGENTS, WITH_ROLES,
-                                      account, child_rollout, sub_agent_started, tool_call, turn_context, usage_row)
+from tests.v2.native_fixtures import (CHECK_PY, CHEM, MCP_RESULT, PLAIN, PNG, PROFILE, R, ROLE_LESS_PARTS, ROLES,
+                                      SEARCH, SKILL_MD,
+                                      TERMINAL, TERMINAL_AND_SUBAGENTS, TOOL_SERVERS, VIEW_IMAGE, WITH_ROLES,
+                                      WITH_SKILLS, WITH_TOOL_SERVERS, account, child_rollout, here, mcp_call,
+                                      skills_list, sub_agent_started, tool_call, turn_context, usage_row,
+                                      viewed_image)
 from tests.v2.test_session_context import THREAD, fixture
 
 CHILD = '33333333-3333-3333-3333-333333333333'
@@ -37,6 +41,11 @@ RESPONSE = {'command': {'mode': 'lab', 'action': 'no_action', 'issue_id': None, 
                         'evidence_ids': [], 'payload': {'reason': 'Synthetic turn'}}}
 EXEC = 'text(await tools.exec_command({cmd: "ls"}))'
 SAME = object()
+# Lines of Codex's skills list: the skill WITH_SKILLS declares, under the workspace's skills folder, and one nobody
+# declared, under the owner's.
+DECLARED = ('plot-check', 'Checks a plot before it is reported.', 'r0/plot-check/SKILL.md')
+SECRET = ('secret-notes', 'Notes of the owner.', 'r1/secret-notes/SKILL.md')
+OWNERS = '/u/.agents/skills'
 # What transport.invoke returns for a call killed at its deadline before its terminal event.
 UNFINISHED = {'response': None, 'usage': None, 'usage_complete': False, 'protocol_valid': False,
               'execution_status': 'unknown', 'terminal_received': False, 'stream_complete': False, 'returncode': -9,
@@ -73,6 +82,15 @@ def UNREADABLE(profile, cwd):
     return b'', b'{"type": "event_msg", "payload": \n'
 
 
+def listing(*skills):
+    """A rollout whose call writes Codex's skills list of ``skills``, with the workspace's skills folder as ``r0`` and
+    the owner's own as ``r1``, then a turn under ``profile``."""
+    def rollout(profile, cwd):
+        return b'', (skills_list([str(cwd / '.agents' / 'skills'), OWNERS], *skills)
+                     + turn_context('t1', profile, cwd=cwd) + usage_row(THREAD, 't1', 't1', 10, 1))
+    return rollout
+
+
 def SEARCHED_TWICE(profile, cwd):
     search = 'text(await tools.web_search({query: "%s"}))'
     return (tool_call('c1', search % 'first') + usage_row(THREAD, 't1', 't1', 300, 20),
@@ -84,15 +102,45 @@ def config_form(settings):
     return {name: False if value is None else value for name, value in settings.items()}
 
 
+def carrying(value):
+    """An ``alter`` for ``NativeExecutorTests.execute``: the packet rebuilt as the packet builder builds it, with
+    ``value`` as its task's ``constraints.native_capabilities``, and the Effect bound to the rebuilt packet."""
+    def alter(dispatching, raw):
+        request = json.loads(raw)
+        head, rendered = request['prompt'].rsplit('INPUT_DATA_JSON:\n', 1)
+        data = input_view.decode(rendered, request['input_view_mode'])
+        data['task']['constraints']['native_capabilities'] = value
+        request['prompt'] = head + 'INPUT_DATA_JSON:\n' + input_view.render(data, request['input_view_mode'])
+        raw = packets.encoded(request)
+        return {**dispatching, 'packet_sha256': digest(raw)}, raw
+    return alter
+
+
 class NativeExecutorTests(unittest.TestCase):
+    def setUp(self):
+        # An empty home and Codex home, and no machine skills folder: the Runtime and the executor look for skills
+        # there, and nothing of this machine's own may be read.
+        places = Path(tempfile.mkdtemp(prefix='rsi-native-places-'))
+        self.addCleanup(shutil.rmtree, places, ignore_errors=True)
+        (places / 'home').mkdir()
+        self.codex_home = places / 'codex-home'
+        self.codex_home.mkdir()
+        for patcher in (patch.dict(os.environ, {'HOME': str(places / 'home'), 'CODEX_HOME': str(self.codex_home)}),
+                        patch.object(native, 'MACHINE_SKILLS', places / 'machine-skills')):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     def execute(self, *, settings, rollout=CONFINED_TURN, child=None, stream_usage=STREAM_USAGE, resumed=False,
                 packet_settings=SAME, transport_extra=None, stream_items=(), workspace_files=(), profile=None,
-                finished=True, answer=json.dumps(RESPONSE)):
+                finished=True, answer=json.dumps(RESPONSE), arrange=None, alter=None, child_records=None):
         """Prepare a Lab turn under ``packet_settings`` (``settings`` unless given) and run it through the Controller
         with the executor, which sees ``settings`` in the Effect. Returns the executor's receipt; a ``ValueError``
         it raises is raised here. ``profile(run_root, codex_home, workspace)`` replaces the confined profile.
+        ``child`` holds the usage rows of the sub-agent ``CHILD``'s rollout, and ``child_records(workspace)`` the
+        records that follow them.
         ``answer`` is the text of the turn's last message. A call that is not ``finished`` was killed before its
-        answer and terminal event (``UNFINISHED``)."""
+        answer and terminal event (``UNFINISHED``). ``arrange(store)`` runs once the Effect is prepared, before
+        it is dispatched. ``alter(dispatching, raw)`` returns the Effect and packet the executor is handed."""
         packet_settings = settings if packet_settings is SAME else packet_settings
         config = {'native_capabilities': {'lab': config_form(packet_settings)}} if packet_settings else {}
         store, controller, runtime = open_run(self, config=config)
@@ -128,6 +176,8 @@ class NativeExecutorTests(unittest.TestCase):
         for make in workspace_files:
             workspace.mkdir(parents=True, exist_ok=True)
             make(workspace)
+        if arrange is not None:
+            arrange(store)
         self.calls, receipts, raised = [], [], []
 
         def invoke(prompt, schema, folder, model, effort, timeout, **options):
@@ -147,7 +197,8 @@ class NativeExecutorTests(unittest.TestCase):
                 stream.write((b'' if resumed else fixture(workspace)) + records(workspace)[1])
             if child is not None:
                 (sessions / ('rollout-fixture-' + CHILD + '.jsonl')).write_bytes(
-                    child_rollout(CHILD, THREAD, child, cwd=workspace))
+                    child_rollout(CHILD, THREAD, child, cwd=workspace)
+                    + (b'' if child_records is None else child_records(workspace)))
             result = {'response': RESPONSE, 'usage': stream_usage, 'usage_complete': True, 'error': None,
                       'protocol_valid': True, 'parse_error': None, 'execution_status': 'succeeded',
                       'terminal_received': True, 'stream_complete': True, 'wall_seconds': .1, 'returncode': 0,
@@ -166,6 +217,8 @@ class NativeExecutorTests(unittest.TestCase):
                             if key != 'native_capabilities'}
                 dispatching = {**dispatching, 'metadata': {**metadata, **(
                     {'native_capabilities': settings} if settings is not None else {})}}
+            if alter is not None:
+                dispatching, raw = alter(dispatching, raw)
             try:
                 receipts.append(roles.CodexExecutor(store.root / 'calls')(dispatching, raw))
             except ValueError as exc:
@@ -222,6 +275,25 @@ class NativeExecutorTests(unittest.TestCase):
     def test_packet_and_effect_settings_must_agree(self):
         with self.assertRaisesRegex(ValueError, 'Unsupported exact model request envelope'):
             self.execute(settings=TERMINAL, packet_settings=SEARCH)
+
+    def test_the_executor_compares_the_request_form(self):
+        full = {**WITH_TOOL_SERVERS, 'tool_servers': {**TOOL_SERVERS, 'chem': here(CHEM)}}
+        # A packet carrying the Effect's full settings instead of their request form is refused.
+        with self.assertRaisesRegex(ValueError, 'Unsupported exact model request envelope'):
+            self.execute(settings=full, alter=carrying(full))
+        self.assertEqual(self.calls, [])
+        # The packet as the Runtime prepared it, with the request form, is sent with the Effect's full settings.
+        with patch.dict(os.environ, {'CHEM_API_KEY': 'invented-secret-4f1c', 'PAPERS_TOKEN': 'invented-token-7d2a'}):
+            receipt = self.execute(settings=full)
+        self.assertEqual(receipt['status'], 'succeeded', receipt['error'])
+        self.assertEqual(self.calls[0]['native'], full)
+        self.assertEqual(receipt['native_capabilities'], native.receipt_form(full))
+        # carrying rebuilds that packet byte for byte, so the refusal above is the settings', not the rebuilding's.
+        raw = self.store.read_blob(self.effect['packet_ref'])
+        self.assertEqual(carrying(native.request_form(full))(self.effect, raw)[1], raw)
+        # With everything off the packet may not name native settings at all.
+        with self.assertRaisesRegex(ValueError, 'Unsupported exact model request envelope'):
+            self.execute(settings=None, alter=carrying(None))
 
     def test_surviving_descendants_block_quiescence(self):
         self.assertFalse(self.execute(settings=TERMINAL, transport_extra={'descendants_stopped': False})['native_writer_quiesced'])
@@ -446,6 +518,226 @@ class NativeExecutorTests(unittest.TestCase):
         self.assertEqual(receipt['status'], 'succeeded', receipt['error'])
         self.assertEqual(len(self.calls), 1)
 
+    def assert_refused(self, receipt, *phrases):
+        """The call was refused by the executor's preflight: never dispatched, its Effect settled as a definite
+        failure with its reservations released, and its error holding each of ``phrases``."""
+        self.assertEqual((receipt['status'], receipt['never_dispatched']), ('failed_definite', True))
+        self.assertTrue(receipt['error'].startswith('Persistent session preflight failed: '), receipt['error'])
+        for phrase in phrases:
+            self.assertIn(phrase, receipt['error'])
+        self.assertEqual(self.calls, [])
+        self.assertEqual(receipt['actual_costs'], {name: 0 for name in RESERVATION})
+        self.assertEqual(self.effect['status'], 'failed_definite')
+        for name in RESERVATION:
+            budget = self.store.get('r', 'budget', name)
+            self.assertEqual((budget['reserved'], budget['spent']), (0, 0), name)
+
+    def workspace(self):
+        """The workspace of the session of the last call ``execute`` made."""
+        return self.store.root / 'agents' / self.effect['metadata']['agent_session_id'] / 'workspace'
+
+    @staticmethod
+    def put_skill_files(store):
+        for raw in (SKILL_MD, CHECK_PY):
+            store.put_blob(raw)
+
+    @staticmethod
+    def agents_notes(workspace):
+        (workspace / '.agents').mkdir()
+        (workspace / '.agents' / 'notes.md').write_text('Notes left in .agents.', encoding='utf-8')
+
+    def files_in_workspace(self):
+        workspace = self.workspace()
+        return sorted(str(path.relative_to(workspace)) for path in workspace.rglob('*') if path.is_file())
+
+    def test_a_call_with_skills_writes_them_and_replaces_agents(self):
+        receipt = self.execute(settings=WITH_SKILLS, arrange=self.put_skill_files, workspace_files=[self.agents_notes],
+                               rollout=listing(DECLARED))
+        self.assertEqual(receipt['status'], 'succeeded', receipt['error'])
+        self.assertTrue(receipt['protocol_valid'], receipt['error'])
+        self.assertEqual(receipt['native_activity']['skills_shown'], ['plot-check'])
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.calls[0]['native'], WITH_SKILLS)
+        self.assertEqual(Path(self.calls[0]['session']['workspace']), self.workspace())
+        self.assertEqual(self.files_in_workspace(), ['.agents/skills/plot-check/SKILL.md',
+                                                     '.agents/skills/plot-check/scripts/check.py'])
+        self.assertEqual((self.workspace() / '.agents/skills/plot-check/SKILL.md').read_bytes(), SKILL_MD)
+        self.assertEqual((self.workspace() / '.agents/skills/plot-check/scripts/check.py').read_bytes(), CHECK_PY)
+
+    def test_a_resumed_turn_with_every_new_key_is_prepared_read_and_settled_with_the_full_settings(self):
+        # The first turn's call wrote the skills and was shown the list when the thread began; the resumed turn gets
+        # no new list, as Codex writes one again only when the skills change.
+        settings = {**WITH_SKILLS, 'view_image': True, 'tool_servers': {'chem': here(CHEM)}}
+
+        def resumed(profile, cwd):
+            return (skills_list([str(cwd / '.agents' / 'skills')], DECLARED, after=ROLE_LESS_PARTS)
+                    + turn_context('t1', profile, cwd=cwd) + usage_row(THREAD, 't1', 't1', 54394, 5524),
+                    turn_context('t2', profile, cwd=cwd) + usage_row(THREAD, 't2', 't2', 102016, 5155))
+
+        def first_calls_skills(workspace):
+            # What the first turn's call left in .agents: an older copy of the skill, with a file since removed.
+            skill = workspace / '.agents' / 'skills' / 'plot-check'
+            skill.mkdir(parents=True)
+            (skill / 'SKILL.md').write_bytes(SKILL_MD.replace(b'Open the plot', b'Open the old plot'))
+            (skill / 'old.py').write_bytes(b'print("old")\n')
+        reads = []
+
+        def recording(read):
+            def read_and_record(*arguments, **options):
+                reads.append(options.get('native'))
+                return read(*arguments, **options)
+            return read_and_record
+        with patch.dict(os.environ, {'CHEM_API_KEY': 'invented-secret-4f1c'}), \
+                patch('rsi_lab.runtime.read_native_snapshot', recording(read_native_snapshot)), \
+                patch('rsi_lab.session_context.read_native_snapshot', recording(read_native_snapshot)):
+            receipt = self.execute(settings=settings, resumed=True, rollout=resumed, arrange=self.put_skill_files,
+                                   workspace_files=[first_calls_skills])
+        self.assertEqual((receipt['status'], receipt['error']), ('succeeded', None))
+        self.assertTrue(receipt['protocol_valid'])
+        # Prepared, sent and settled with the Effect's full settings, never their request form: the Runtime read the
+        # session's snapshot with them to prepare the call, and the executor before and after it.
+        self.assertEqual(self.effect['metadata']['native_capabilities'], settings)
+        self.assertEqual(self.calls[0]['native'], settings)
+        self.assertEqual(reads, [settings] * 3)
+        self.assertEqual(receipt['native_capabilities'], native.receipt_form(settings))
+        self.assertEqual((receipt['token_source'], receipt['actual_costs']['tokens']), ('ledger', 102016 + 5155))
+        # The first call's .agents was replaced by the frozen skills.
+        self.assertEqual(self.files_in_workspace(), ['.agents/skills/plot-check/SKILL.md',
+                                                     '.agents/skills/plot-check/scripts/check.py'])
+        self.assertEqual((self.workspace() / '.agents/skills/plot-check/SKILL.md').read_bytes(), SKILL_MD)
+        # A resumed lead shown no new list is valid and records no skills_shown; its other records are there.
+        activity = receipt['native_activity']
+        self.assertNotIn('skills_shown', activity)
+        self.assertNotIn('skills_unexpected', activity)
+        self.assertEqual((activity['tool_server_calls'], activity['images_viewed']['count']), ([], 0))
+        self.assertNotIn('invented-secret-4f1c', json.dumps(receipt, ensure_ascii=False))
+
+    def test_a_list_other_than_the_declared_one_makes_the_call_invalid(self):
+        receipt = self.execute(settings=WITH_SKILLS, arrange=self.put_skill_files, rollout=listing(DECLARED, SECRET))
+        self.assertEqual(receipt['status'], 'succeeded')
+        self.assertFalse(receipt['protocol_valid'])
+        self.assertEqual(receipt['error'], 'Codex showed skills other than the declared ones: ' + THREAD
+                         + ': 1 unexpected from ' + OWNERS)
+        self.assertEqual((receipt['token_source'], receipt['actual_costs']['tokens']), ('ledger', 11))
+        self.assertEqual(self.effect['actual_costs']['tokens'], 11)
+        self.assertEqual(receipt['native_activity']['skills_shown'], ['plot-check'])
+        self.assertEqual(receipt['native_activity']['skills_unexpected'], {'count': 1, 'folders': [OWNERS]})
+        self.assertNotIn('secret-notes', json.dumps(receipt))
+        # Joined with the other findings of the settlement.
+        receipt = self.execute(settings=WITH_SKILLS, arrange=self.put_skill_files, rollout=listing(DECLARED, SECRET),
+                               profile=lambda *places: None)
+        self.assertFalse(receipt['protocol_valid'])
+        self.assertEqual(receipt['error'], 'Permission profile was not in force; Codex showed skills other than the '
+                                           'declared ones: ' + THREAD + ': 1 unexpected from ' + OWNERS)
+        # A fresh thread with no list at all.
+        receipt = self.execute(settings=WITH_SKILLS, arrange=self.put_skill_files)
+        self.assertFalse(receipt['protocol_valid'])
+        self.assertEqual(receipt['error'], 'Codex showed skills other than the declared ones: ' + THREAD + ': no list')
+        # A role without skills is shown none, whether something else is on or everything is off.
+        for settings in (TERMINAL, None):
+            with self.subTest(settings=settings):
+                receipt = self.execute(settings=settings, rollout=listing(SECRET))
+                self.assertEqual(receipt['status'], 'succeeded')
+                self.assertFalse(receipt['protocol_valid'])
+                self.assertEqual(receipt['error'], 'Codex showed a skills list to a role without skills: ' + THREAD
+                                 + ': 1 skills from ' + OWNERS)
+                self.assertEqual(receipt['actual_costs']['tokens'], 11)
+                self.assertNotIn('secret-notes', json.dumps(receipt))
+                self.assertNotIn('skills_shown', json.dumps(receipt))
+
+    def test_a_role_sub_agents_list_is_read_from_the_second_part_of_its_message(self):
+        # As Codex 0.170.0 writes them: the lead's list first in its developer message, then the permissions and
+        # collaboration parts; a sub-agent started with a declared role gets the role's instructions first.
+        def lead(*skills):
+            def rollout(profile, cwd):
+                return b'', (skills_list([str(cwd / '.agents' / 'skills')], *skills, after=ROLE_LESS_PARTS)
+                             + turn_context('t1', profile, cwd=cwd) + sub_agent_started(CHILD, '/root/local')
+                             + usage_row(THREAD, 't1', 't1', 10, 1))
+            return rollout
+
+        def role_child(*skills):
+            def records(workspace):
+                return skills_list([str(workspace / '.agents' / 'skills'), OWNERS], *skills,
+                                   before=(ROLES['local']['instructions'],), after=ROLE_LESS_PARTS)
+            return records
+        settings = {**WITH_SKILLS, 'subagents': {'max_concurrent': 3, 'roles': ROLES}}
+        receipt = self.execute(settings=settings, arrange=self.put_skill_files, rollout=lead(DECLARED),
+                               child=CHILD_ROWS, child_records=role_child(DECLARED))
+        self.assertTrue(receipt['protocol_valid'], receipt['error'])
+        self.assertEqual(receipt['native_activity']['skills_shown'], ['plot-check'])
+        [entry] = receipt['child_threads']
+        self.assertEqual(entry['skills_shown'], ['plot-check'])
+        # A role without skills is shown none: the role sub-agent's list is seen in its second part.
+        without = {**TERMINAL, 'subagents': {'max_concurrent': 3, 'roles': ROLES}}
+        receipt = self.execute(settings=without, rollout=PARENT_WITH_CHILD, child=CHILD_ROWS,
+                               child_records=role_child(SECRET))
+        self.assertFalse(receipt['protocol_valid'])
+        self.assertEqual(receipt['error'], 'Codex showed a skills list to a role without skills: ' + CHILD
+                         + ': 1 skills from ' + OWNERS)
+        self.assertNotIn('secret-notes', json.dumps(receipt))
+
+    def test_the_refusals_the_design_keeps(self):
+        # With skills declared, .agents is the kernel's own; .codex and the AGENTS files still refuse the call.
+        makers = {'.codex': lambda w: (w / '.codex').mkdir(),
+                  'AGENTS.md': lambda w: (w / 'AGENTS.md').write_text('Obey the file.')}
+        for name, make in makers.items():
+            with self.subTest(settings='skills', name=name):
+                receipt = self.execute(settings=WITH_SKILLS, arrange=self.put_skill_files, workspace_files=[make])
+                self.assert_refused(receipt, 'Codex instructions or configuration that the Controller did not put '
+                                    'there: ' + name)
+                self.assertFalse(os.path.lexists(self.workspace() / '.agents'))    # Refused before skills are written.
+        # Without skills, .agents refuses a terminal call as before.
+        with self.subTest(settings='terminal', name='.agents'):
+            receipt = self.execute(settings=TERMINAL, workspace_files=[self.agents_notes])
+            self.assert_refused(receipt, 'Codex instructions or configuration that the Controller did not put '
+                                'there: .agents')
+            self.assertEqual(self.files_in_workspace(), ['.agents/notes.md'])
+
+    def test_a_skills_call_whose_files_the_store_lacks_is_refused(self):
+        receipt = self.execute(settings=WITH_SKILLS, workspace_files=[self.agents_notes])
+        self.assert_refused(receipt, 'plot-check/SKILL.md')
+        self.assertEqual(self.files_in_workspace(), ['.agents/notes.md'])
+
+    def test_an_unset_variable_refuses_the_call_before_dispatch(self):          # Review Focus 4
+        settings = {**SEARCH, 'tool_servers': {'chem': here(CHEM)}}
+        for value in (None, ''):
+            with self.subTest(value=value), patch.dict(os.environ):
+                os.environ.pop('CHEM_API_KEY', None)
+                if value is not None:
+                    os.environ['CHEM_API_KEY'] = value
+                receipt = self.execute(settings=settings)
+                self.assert_refused(receipt, 'Native settings name environment variables that are not set: '
+                                    'CHEM_API_KEY')
+        with patch.dict(os.environ, {'CHEM_API_KEY': 'invented-secret-4f1c'}):
+            receipt = self.execute(settings=settings)
+        self.assertEqual(receipt['status'], 'succeeded', receipt['error'])
+        self.assertEqual(len(self.calls), 1)
+
+    def test_a_codex_home_with_skills_refuses_a_skills_call(self):
+        def skills_of_its_own(store):
+            # Made after the Runtime started, which would have refused to start in such a home.
+            self.put_skill_files(store)
+            (self.codex_home / 'skills' / 'x').mkdir(parents=True)
+        receipt = self.execute(settings=WITH_SKILLS, arrange=skills_of_its_own)
+        self.assert_refused(receipt, 'separate Codex home', str(self.codex_home / 'skills') + ' holds entries')
+        self.assertNotIn("'x'", receipt['error'])
+        self.assertFalse(os.path.lexists(self.workspace() / '.agents'))
+        # A call without skills goes ahead in the same home.
+        receipt = self.execute(settings=TERMINAL)
+        self.assertEqual(receipt['status'], 'succeeded', receipt['error'])
+
+    @unittest.skipIf(os.geteuid() == 0, 'root lists a folder whatever its mode')
+    def test_a_skills_folder_that_cannot_be_listed_refuses_a_skills_call(self):
+        folder = self.codex_home / 'skills'
+
+        def unreadable(store):
+            self.put_skill_files(store)
+            folder.mkdir(mode=0o000)
+            self.addCleanup(folder.chmod, 0o700)
+        receipt = self.execute(settings=WITH_SKILLS, arrange=unreadable)
+        self.assert_refused(receipt, 'Permission denied', str(folder))
+        self.assertFalse(os.path.lexists(self.workspace() / '.agents'))
+
     def test_executor_writes_role_files_and_names_them(self):
         # The real transport runs; a local process stands in for Codex, as in tests/v2/test_native_recovery.py.
         store, controller, runtime = open_run(self, config={'native_capabilities': {'lab': config_form(WITH_ROLES)}})
@@ -480,6 +772,7 @@ class NativeExecutorTests(unittest.TestCase):
                 raise
             return receipts[-1]
         with patch.dict(os.environ, {'CODEX_HOME': str(codex_home)}), \
+                patch.object(transport, 'codex_version', return_value='0.170.0'), \
                 patch.object(transport.subprocess, 'Popen', side_effect=spawn):
             controller.dispatch_effect('r', effect['id'], executor)
         self.assertEqual(raised, [])
@@ -540,6 +833,106 @@ class NativeExecutorTests(unittest.TestCase):
                                   'effort': None, 'requests': 1, 'input_tokens': 22828, 'output_tokens': 37,
                                   'cached_input_tokens': 0, 'role': None, 'forked_history': True, 'searches': [],
                                   'searches_omitted': 0})
+
+    def test_receipts_carry_the_records_only_for_roles_that_have_the_tool(self):
+        servers = {'chem': here(CHEM)}
+        script = 'text(await tools.mcp__chem__lookup({query:"CCO"}));'
+
+        def lead(*, child=False, call=False, image=False):
+            def rollout(profile, cwd):
+                return b'', (turn_context('t1', profile, cwd=cwd)
+                             + (sub_agent_started(CHILD, '/root/a') if child else b'')
+                             + (tool_call('c1', script) + mcp_call('exec-1111', 'chem', 'lookup', {'query': 'CCO'},
+                                                                   turn='t1') if call else b'')
+                             + (viewed_image('exec-2222', str(cwd / 'plot.png'), PNG, turn='t1') if image else b'')
+                             + usage_row(THREAD, 't1', 't1', 10, 1))
+            return rollout
+
+        def child_records(workspace):
+            return (turn_context('c1', cwd=workspace)
+                    + mcp_call('exec-c1', 'chem', 'lookup', {'query': 'CCO'}, turn='c1', thread=CHILD)
+                    + viewed_image('exec-c2', str(workspace / 'fit.png'), PNG, turn='c1', thread=CHILD))
+        arguments = json.dumps({'query': 'CCO'}, ensure_ascii=False, sort_keys=True)
+
+        def called(call_id):
+            return {'server': 'chem', 'tool': 'lookup', 'status': 'completed', 'call_id': call_id,
+                    'arguments_sha256': digest(arguments.encode()), 'arguments_excerpt': arguments,
+                    'result_bytes': len(encode(MCP_RESULT)), 'duration_seconds': 0.000439666}
+
+        def viewed(name):
+            return {'paths': ['file://' + str(self.workspace() / name)], 'paths_omitted': 0, 'count': 1, 'bytes': 68}
+        records = ('tool_server_calls', 'tool_server_calls_omitted', 'images_viewed')
+        # The viewed images are there, in the workspace.
+        images = [lambda workspace: [(workspace / name).write_bytes(b'') for name in ('plot.png', 'fit.png')]]
+        cases = {'tool servers': ({'settings': {**SEARCH, 'tool_servers': servers}, 'rollout': lead(call=True)},
+                                  records[:2]),
+                 'image viewing': ({'settings': VIEW_IMAGE, 'rollout': lead(image=True), 'workspace_files': images},
+                                   records[2:]),
+                 'neither': ({'settings': TERMINAL_AND_SUBAGENTS, 'rollout': PARENT_WITH_CHILD, 'child': CHILD_ROWS},
+                             ()),
+                 'both, with a sub-agent': ({'settings': {**TERMINAL_AND_SUBAGENTS, 'view_image': True,
+                                                          'tool_servers': servers},
+                                             'rollout': lead(child=True, call=True, image=True), 'child': CHILD_ROWS,
+                                             'child_records': child_records, 'workspace_files': images}, records)}
+        for case, (arguments_of_call, recorded) in cases.items():
+            with self.subTest(case=case), patch.dict(os.environ, {'CHEM_API_KEY': 'invented-secret-4f1c'}):
+                receipt = self.execute(**arguments_of_call)
+                self.assertEqual((receipt['status'], receipt['error']), ('succeeded', None))
+                self.assertTrue(receipt['protocol_valid'])
+                self.assertNotIn('invented-secret-4f1c', json.dumps(receipt, ensure_ascii=False))
+                activity = receipt['native_activity']
+                self.assertEqual({name for name in records if name in activity}, set(recorded))
+                if 'tool_server_calls' in recorded:
+                    self.assertEqual((activity['tool_server_calls'], activity['tool_server_calls_omitted']),
+                                     ([called('exec-1111')], 0))
+                if 'images_viewed' in recorded:
+                    self.assertEqual(activity['images_viewed'], viewed('plot.png'))
+                for entry in receipt['child_threads']:
+                    self.assertEqual({name for name in records if name in entry}, set(recorded))
+                    self.assertNotIn('image_view_paths', entry)
+                    if recorded == records:
+                        self.assertEqual((entry['tool_server_calls'], entry['tool_server_calls_omitted'],
+                                          entry['images_viewed']), ([called('exec-c1')], 0, viewed('fit.png')))
+                self.assertEqual(len(receipt['child_threads']), 1 if 'child' in arguments_of_call else 0)
+
+    def test_a_viewed_image_outside_the_folders_the_role_may_read_makes_the_call_invalid(self):
+        def viewing(where):
+            def rollout(profile, cwd):
+                return b'', (turn_context('t1', profile, cwd=cwd) + viewed_image('exec-2222', str(where(cwd)), PNG,
+                                                                                  turn='t1')
+                             + usage_row(THREAD, 't1', 't1', 10, 1))
+            return rollout
+        # The session's role files lie beside its workspace, in the run root the terminal is denied.
+        outside = viewing(lambda cwd: cwd.parent / 'roles' / 'plot.png')
+        receipt = self.execute(settings=VIEW_IMAGE, rollout=outside)
+        self.assertEqual(receipt['status'], 'succeeded')
+        self.assertFalse(receipt['protocol_valid'])
+        self.assertEqual(receipt['error'], 'Codex showed images outside the folders this role may read: 1 of 1')
+        self.assertEqual((receipt['token_source'], receipt['actual_costs']['tokens']), ('ledger', 11))
+        # Joined with the other finding of the settlement.
+        receipt = self.execute(settings=VIEW_IMAGE, rollout=outside, profile=lambda *places: None)
+        self.assertFalse(receipt['protocol_valid'])
+        self.assertEqual(receipt['error'], 'Permission profile was not in force; Codex showed images outside the '
+                                           'folders this role may read: 1 of 1')
+        receipt = self.execute(settings=VIEW_IMAGE, rollout=viewing(lambda cwd: cwd / 'plot.png'),
+                               workspace_files=[lambda workspace: (workspace / 'plot.png').write_bytes(b'')])
+        self.assertTrue(receipt['protocol_valid'])
+        self.assertIsNone(receipt['error'])
+
+    def test_a_sub_agent_that_was_not_read_makes_a_viewing_call_invalid(self):
+        # The turn started CHILD, whose rollout is not there: what it viewed cannot be checked.
+        # Nor can the skills list it was shown, which a role without skills must not have.
+        unread = 'Codex showed a skills list to a role without skills: ' + CHILD + ': rollout unreadable'
+        receipt = self.execute(settings={**TERMINAL_AND_SUBAGENTS, 'view_image': True}, rollout=PARENT_WITH_CHILD)
+        self.assertFalse(receipt['protocol_valid'])
+        self.assertEqual(receipt['error'], "Codex's sub-agents could not be checked for images outside the folders "
+                                           'this role may read: 1 of 1; ' + unread)
+        self.assertEqual((receipt['token_source'], receipt['child_threads']), ('unknown', []))
+        # Without image viewing the same call is invalid for its skills alone; its usage is unknown.
+        receipt = self.execute(settings=TERMINAL_AND_SUBAGENTS, rollout=PARENT_WITH_CHILD)
+        self.assertFalse(receipt['protocol_valid'])
+        self.assertEqual(receipt['error'], unread)
+        self.assertEqual(receipt['token_source'], 'unknown')
 
     def dispatch_refused_roles(self, *, arrange=None, alter=None):
         """Dispatch a Lab call whose Effect declares ``ROLES`` through the Controller, the executor and the real

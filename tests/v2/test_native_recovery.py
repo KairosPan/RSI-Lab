@@ -11,9 +11,11 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -24,8 +26,10 @@ from rsi_lab.interruption import ATTESTATION_SCHEMA, certify_interruption
 from rsi_lab.journal import JournalWriter
 from rsi_lab.store import digest, encode
 from tests.v2.liveness_support import open_run
-from tests.v2.native_fixtures import (PLAIN, PROFILE, R, ROLES, SEARCH, TERMINAL, TERMINAL_AND_SEARCH, WITH_ROLES,
-                                      tool_call, turn_context, usage_row)
+from tests.v2.native_fixtures import (LOCAL_SERVER_ONLY, PAPERS, PLAIN, PNG, PROFILE, R, ROLE_LESS_PARTS, ROLES,
+                                      SEARCH, TERMINAL, TERMINAL_AND_SEARCH, TOOL_SERVERS, URL_SERVER_ONLY, WITH_ROLES,
+                                      WITH_SKILLS, WITH_TOOL_SERVERS, skills_list, tool_call, turn_context, usage_row,
+                                      viewed_image)
 from tests.v2.test_native_executor import RESERVATION, RESPONSE, config_form
 from tests.v2.test_native_transport import NATIVE_ACTIVITY, NATIVE_STREAM, THREAD
 from tests.v2.test_session_context import fixture
@@ -93,12 +97,14 @@ class NativeRecoveryTests(unittest.TestCase):
         return turn_context('t2', confined, cwd=self.workspace) + tool_call('c1', EXEC) + rows('t2')
 
     def write_call(self, settings, *, stream=NATIVE_STREAM, turn=None, saved=True, descendants_stopped=True,
-                   interrupted=False):
+                   interrupted=False, died=False):
         """Leave the call's folder and rollout as ``transport.invoke`` leaves them after Codex ran under ``settings``
         and wrote ``stream``. The rollout is the committed prefix, then ``turn`` (default ``this_turn()``).
 
         ``saved`` false leaves no transport result, as when the host died before writing it. ``interrupted`` leaves
         the call stopped once its turn started: the journal ends with the KeyboardInterrupt marker and no terminal.
+        ``died`` leaves it as a Controller that died once the turn started leaves it: the journal ends there, with
+        no marker, no exit record and no transport result.
         """
         if self.folder.exists():
             shutil.rmtree(self.folder)
@@ -117,19 +123,19 @@ class NativeRecoveryTests(unittest.TestCase):
                  'fence': 1, 'invocation': invocation, 'prompt_sha256': digest(self.request['prompt'].encode())}
         failed = any(event['type'] == 'turn.failed' for event in stream)
         with JournalWriter(self.folder / 'journal.jsonl', start) as journal:
-            for event in stream[:2] if interrupted else stream:
+            for event in stream[:2] if interrupted or died else stream:
                 frame = encode(event) + b'\n'
                 journal.append('stdout', frame)
                 journal.append('stdout', frame, kind='event_frame')
             if interrupted:
                 journal.append('control', b'KeyboardInterrupt: ', kind='stream_incomplete')
-            else:
+            elif not died:
                 journal.append('control', encode({'returncode': 1 if failed else 0,
                     'execution_status': 'failed_definite' if failed else 'succeeded',
                     'parse_error': None, 'error': None}), kind='attempt_finished')
             snapshot = journal.snapshot()
         self.rollout.write_bytes(self.prefix + (self.this_turn() if turn is None else turn))
-        if saved and not interrupted:
+        if saved and not interrupted and not died:
             answers = [event['item']['text'] for event in stream
                        if event['type'] == 'item.completed' and event['item']['type'] == 'agent_message']
             (self.folder / 'transport_result.json').write_bytes(encode({
@@ -213,6 +219,20 @@ class NativeRecoveryTests(unittest.TestCase):
         self.assertEqual(receipt['native_capabilities'], PLAIN)
         self.assertEqual(receipt['actual_costs']['tokens'], 107171)
 
+    def test_recovery_sees_changed_tool_servers(self):
+        # This call used no tool: its stream has no tool item and its turn no tool record.
+        self.write_call(WITH_TOOL_SERVERS, stream=TOOL_FREE_STREAM, turn=rows('t2'))
+        # The run's servers differ from those the call ran with only in one server's description.
+        changed = {**WITH_TOOL_SERVERS, 'tool_servers': {**TOOL_SERVERS, 'papers': {**PAPERS,
+                                                                                   'description': 'Other papers.'}}}
+        with self.assertRaisesRegex(RecoveryBlocked,
+                                    '^recovery_binding_mismatch: invocation native settings differ from the Effect$'):
+            self.recover(changed)
+        receipt = self.recover(WITH_TOOL_SERVERS)
+        self.assertEqual((receipt['status'], receipt['error']), ('succeeded', None))
+        self.assertEqual(receipt['actual_costs']['tokens'], 107171)
+        self.assertEqual(receipt['native_capabilities'], native.receipt_form(WITH_TOOL_SERVERS))
+
     def test_a_native_call_cannot_be_isolated(self):
         self.write_call(TERMINAL, interrupted=True)
         with self.assertRaisesRegex(RecoveryBlocked, 'native capabilities') as refused:
@@ -253,6 +273,50 @@ class NativeRecoveryTests(unittest.TestCase):
         self.assertEqual(receipt['error'], 'Permission profile was not in force')
         self.assertEqual(receipt['actual_costs']['tokens'], 107171)
 
+    def test_a_call_that_viewed_an_image_outside_its_folders_is_recovered_invalid(self):
+        settings = {**TERMINAL_AND_SEARCH, 'view_image': True}
+        outside = 'Codex showed images outside the folders this role may read: 1 of 1'
+        for where, error in ((self.workspace / 'plot.png', None), (self.root / 'plot.png', outside)):
+            with self.subTest(where=where):
+                where.write_bytes(b'')  # The viewed image is there.
+                self.write_call(settings, turn=self.this_turn() + viewed_image('exec-2222', str(where), PNG,
+                                                                                turn='t2'))
+                receipt = self.recover(settings)
+                self.assertEqual(receipt['status'], 'succeeded')
+                self.assertEqual((receipt['protocol_valid'], receipt['error']), (error is None, error))
+                self.assertEqual(receipt['native_activity']['images_viewed']['paths'], ['file://' + str(where)])
+                self.assertEqual(receipt['actual_costs']['tokens'], 107171)
+
+    def test_a_call_shown_skills_other_than_the_declared_ones_is_recovered_invalid(self):
+        settings = {**TERMINAL_AND_SEARCH, 'skills': WITH_SKILLS['skills']}
+        declared = ('plot-check', 'Checks a plot before it is reported.', 'r0/plot-check/SKILL.md')
+        secret = ('secret-notes', 'Notes of the owner.', 'r1/secret-notes/SKILL.md')
+        unexpected = ('Codex showed skills other than the declared ones: ' + THREAD
+                      + ': 1 unexpected from /u/.agents/skills')
+        # The call resumes its thread; Codex wrote the whole list again in the part the call added, first in its
+        # developer message, as it does.
+        for skills, error in (((declared,), None), ((declared, secret), unexpected)):
+            with self.subTest(skills=skills):
+                listed = skills_list([str(self.workspace / '.agents' / 'skills'), '/u/.agents/skills'], *skills,
+                                     after=ROLE_LESS_PARTS)
+                self.write_call(settings, turn=listed + self.this_turn())
+                receipt = self.recover(settings)
+                self.assertEqual(receipt['status'], 'succeeded')
+                self.assertEqual((receipt['protocol_valid'], receipt['error']), (error is None, error))
+                self.assertEqual(receipt['actual_costs']['tokens'], 107171)
+                self.assertNotIn('secret-notes', json.dumps(receipt))
+                self.assertNotIn('skills_shown', receipt['native_activity'])
+        # A role without skills is shown none, its list found in any part of a developer message.
+        self.write_call(TERMINAL_AND_SEARCH, turn=skills_list(['/u/.agents/skills'], ('secret-notes', 'x',
+                                                                                     'r0/secret-notes/SKILL.md'),
+                                                              before=('Role instructions.',), after=ROLE_LESS_PARTS)
+                        + self.this_turn())
+        receipt = self.recover(TERMINAL_AND_SEARCH)
+        self.assertFalse(receipt['protocol_valid'])
+        self.assertEqual(receipt['error'], 'Codex showed a skills list to a role without skills: ' + THREAD
+                         + ': 1 skills from /u/.agents/skills')
+        self.assertEqual(receipt['actual_costs']['tokens'], 107171)
+
     def test_a_native_writer_is_quiet_only_when_what_ran_under_it_was_stopped(self):
         for options in ({'descendants_stopped': False}, {'saved': False}):
             with self.subTest(**options):
@@ -261,6 +325,106 @@ class NativeRecoveryTests(unittest.TestCase):
                 self.assertEqual(receipt['status'], 'succeeded')
                 self.assertFalse(receipt['native_writer_quiesced'])
                 self.assertTrue(receipt['recovery_requires_fencing'])
+
+    def server(self):
+        """A process sleeping in its own session, as a local tool server a killed turn left running, and its start
+        time as the process table shows it. It is started as the process table is read (setUp patches
+        subprocess.Popen) and reaped as soon as it ends, so that once stopped no process has its pid; the test kills
+        it in any case, which does nothing once it has been reaped."""
+        process = transport._POPEN([sys.executable, '-c', 'import time; time.sleep(60)'], start_new_session=True)
+        self.addCleanup(process.wait)
+        self.addCleanup(process.kill)        # Runs first.
+        threading.Thread(target=process.wait, daemon=True).start()
+        return process, transport._process_table()[process.pid][1]
+
+    def test_recovery_stops_what_the_call_recorded(self):
+        # The Controller died after Codex ended, before it saved its result; the server it recorded still runs.
+        server, start = self.server()
+        self.write_call(LOCAL_SERVER_ONLY, stream=TOOL_FREE_STREAM, turn=rows('t2'), saved=False)
+        transport.write_tracked(self.folder, {server.pid: start})
+        receipt = self.recover(LOCAL_SERVER_ONLY)
+        self.assertEqual(server.wait(timeout=5), -signal.SIGKILL)
+        self.assertEqual((receipt['status'], receipt['error']), ('succeeded', None))
+        # No saved result says that what ran under Codex was stopped.
+        self.assertFalse(receipt['native_writer_quiesced']); self.assertTrue(receipt['recovery_requires_fencing'])
+        # With one that says so, a recorded process that is gone counts as stopped.
+        self.write_call(LOCAL_SERVER_ONLY, stream=TOOL_FREE_STREAM, turn=rows('t2'))
+        transport.write_tracked(self.folder, {server.pid: start})
+        self.assertTrue(self.recover(LOCAL_SERVER_ONLY)['native_writer_quiesced'])
+
+        # A recorded pid whose start time differs belongs to another process: it is not signalled.
+        server, start = self.server()
+        self.write_call(LOCAL_SERVER_ONLY, stream=TOOL_FREE_STREAM, turn=rows('t2'), saved=False)
+        transport.write_tracked(self.folder, {server.pid: 'Mon Jan  1 00:00:00 2001'})
+        with patch.object(transport.os, 'killpg', wraps=os.killpg) as killpg, \
+                patch.object(transport.os, 'kill', wraps=os.kill) as kill:
+            receipt = self.recover(LOCAL_SERVER_ONLY)
+        killpg.assert_not_called()
+        self.assertEqual([call.args for call in kill.call_args_list if call.args[1] != 0], [])
+        self.assertIsNone(server.poll())
+        self.assertEqual(receipt['status'], 'succeeded')
+
+        # A tracked file that cannot be read leaves the writer unconfirmed, whatever the saved result says.
+        for settings, call in ((LOCAL_SERVER_ONLY, {'stream': TOOL_FREE_STREAM, 'turn': rows('t2')}),
+                               (TERMINAL_AND_SEARCH, {})):
+            with self.subTest(settings=settings):
+                self.write_call(settings, **call)
+                # A call recorded before its processes were written to its folder has no file: as before.
+                self.assertTrue(self.recover(settings)['native_writer_quiesced'])
+                (self.folder / transport.TRACKED_FILE).write_text('{"processes": [{"pid": "4242"}]}')
+                receipt = self.recover(settings)
+                self.assertEqual((receipt['status'], receipt['error']), ('succeeded', None))
+                self.assertFalse(receipt['native_writer_quiesced']); self.assertTrue(receipt['recovery_requires_fencing'])
+
+        # The Controller died during the turn: nothing to settle yet, but what the call recorded is stopped.
+        server, start = self.server()
+        self.write_call(LOCAL_SERVER_ONLY, stream=TOOL_FREE_STREAM, turn=rows('t2'), died=True)
+        transport.write_tracked(self.folder, {server.pid: start})
+        self.assertIsNone(self.recover(LOCAL_SERVER_ONLY))
+        self.assertEqual(server.wait(timeout=5), -signal.SIGKILL)
+
+    def test_a_recorded_start_time_does_not_depend_on_who_reads_it(self):
+        # The Controller recorded the server from a shell with one locale and time zone; recovery runs from another.
+        with patch.dict(os.environ, {'LC_ALL': 'fr_FR.UTF-8', 'TZ': 'EST5'}):
+            server, start = self.server()
+        self.write_call(LOCAL_SERVER_ONLY, stream=TOOL_FREE_STREAM, turn=rows('t2'), died=True)
+        transport.write_tracked(self.folder, {server.pid: start})
+        with patch.dict(os.environ, {'LC_ALL': 'zh_CN.UTF-8', 'TZ': 'CST-8'}):
+            self.assertIsNone(self.recover(LOCAL_SERVER_ONLY))
+        self.assertEqual(server.wait(timeout=5), -signal.SIGKILL)
+
+    def tear_journal(self):
+        """Leave the journal as a Controller killed inside ``JournalWriter.append`` leaves it: a record cut short."""
+        with (self.folder / 'journal.jsonl').open('ab') as stream:
+            stream.write(b'{"seq": 6, "stream": "stdout", "kind": "stream_ch')
+
+    def test_a_torn_journal_still_has_what_the_call_recorded_stopped(self):
+        server, start = self.server()
+        self.write_call(LOCAL_SERVER_ONLY, stream=TOOL_FREE_STREAM, turn=rows('t2'), died=True)
+        self.tear_journal()
+        transport.write_tracked(self.folder, {server.pid: start})
+        # A call that is not the Effect's is refused before anything is signalled, torn journal or not.
+        with patch.object(transport.os, 'killpg', wraps=os.killpg) as killpg, \
+                patch.object(transport.os, 'kill', wraps=os.kill) as kill, \
+                self.assertRaisesRegex(RecoveryBlocked, '^recovery_binding_mismatch: '):
+            self.recover(URL_SERVER_ONLY)
+        killpg.assert_not_called(); kill.assert_not_called()
+        self.assertIsNone(server.poll())
+        # The Effect's own call: its gap is still raised, once the server it recorded has been stopped.
+        with self.assertRaisesRegex(RecoveryBlocked, '^journal_gap: '):
+            self.recover(LOCAL_SERVER_ONLY)
+        self.assertEqual(server.wait(timeout=5), -signal.SIGKILL)
+
+    def test_a_call_that_tracked_nothing_has_no_process_stopped(self):
+        # Neither the terminal nor a local tool server: the process table is not read, a tracked file not consulted.
+        for settings in (None, SEARCH, URL_SERVER_ONLY):
+            with self.subTest(settings=settings):
+                self.write_call(settings, stream=TOOL_FREE_STREAM, turn=rows('t2'))
+                (self.folder / transport.TRACKED_FILE).write_text('not json')
+                with patch.object(transport, '_process_table', side_effect=AssertionError('process table read')):
+                    receipt = self.recover(settings)
+                self.assertEqual((receipt['status'], receipt['error']), ('succeeded', None))
+                self.assertTrue(receipt['native_writer_quiesced'])
 
     def test_a_cleanly_failed_native_turn_without_a_message_keeps_the_protocol(self):
         self.write_call(TERMINAL_AND_SEARCH, stream=FAILED_STREAM)
@@ -283,6 +447,20 @@ class NativeRecoveryTests(unittest.TestCase):
 class RecoveryAgreesWithTheExecutorTests(unittest.TestCase):
     """One Lab call runs through the real Controller, executor and transport, a local process standing in for Codex;
     recovered from the folder and rollout it left, it gets the receipt the executor gave it."""
+
+    def setUp(self):
+        # An empty home and Codex home, no machine skills folder and a Codex CLI of the checked version: nothing of
+        # this machine's own Codex is asked or read, from the Runtime's start to the recovery.
+        places = Path(tempfile.mkdtemp(prefix='rsi-native-places-'))
+        self.addCleanup(shutil.rmtree, places, ignore_errors=True)
+        (places / 'home').mkdir()
+        (places / 'codex-home').mkdir()
+        homes = {'HOME': str(places / 'home'), 'CODEX_HOME': str(places / 'codex-home')}
+        for patcher in (patch.dict(os.environ, homes),
+                        patch.object(native, 'MACHINE_SKILLS', places / 'machine-skills'),
+                        patch.object(transport, 'codex_version', return_value='0.170.0')):
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def run_and_recover(self, settings, stream, turn):
         """Run the first Lab turn of a run whose Lab has ``settings``. Codex is a local process that writes

@@ -203,7 +203,7 @@ Adapter 的可选 `progress(effect, publication)` 返回 `query`、`state`、`re
 | 推荐类别与复核指引 | 运行配置 `research_policy`，至少一个字段 | `task.constraints.research_policy` |
 | Meta 调整 Lab 编排 | 运行配置里有 `orchestration` 块 | `task.constraints.orchestration`；`max_changes` 大于 0 时处置模式多出动作 `propose_lab_settings` |
 | 工具 | `Runtime(..., adapters=[...])`，命令行用 `--adapter-factory`。`requires_acceptance=True` 的适配器还要有验收记录 | `task.capability_catalog` |
-| Codex 原生工具 | 运行配置 `native_capabilities`，按角色开启网页搜索、受限终端和子 agent，子 agent 可以声明具名角色（`subagents.roles`），见[持久 Agent 说明](persistent-agents.md#codex-原生工具) | 开启了任一工具的角色：`task.constraints.native_capabilities`（声明的角色连同完整指令），提示词中说明可用工具及其限制的一段（声明了角色时列出各角色及其说明） |
+| Codex 原生工具 | 运行配置 `native_capabilities`，按角色开启网页搜索、受限终端、子 agent、查看图片（`view_image`）、工具服务（`tool_servers`）和技能（`skills`），子 agent 可以声明具名角色（`subagents.roles`），见[持久 Agent 说明](persistent-agents.md#codex-原生工具) | 开启了任一工具的角色：`task.constraints.native_capabilities`，是简写形式：声明的角色连同完整指令，每个工具服务只有名称和 `description`，技能只是名称列表；服务的命令、参数、`env` 的值、URL 和请求头，以及技能文件夹的位置和文件的 hash 不进请求包。提示词中说明可用工具及其限制的一段（声明了角色时列出各角色及其说明；开启查看图片时多一句，说明查看的图片只是线索；声明了工具服务时多一句，列出各服务及其 `description`）。技能由 Codex 自己列给模型 |
 
 两个 `research_features` 开关只认 JSON 布尔值 `true`，写成 `"true"` 或 `1` 不生效。运行配置在 `init` 时冻结，续跑沿用同一份配置，所以缺的键只能靠新建运行补上；`Runtime(...)` 的参数则每次构造都要传。
 
@@ -225,7 +225,7 @@ for work in runtime.controller.ready(run_id):      # 第一次模型调用之前
 
 | 接口 | 作用 |
 | --- | --- |
-| `runtime.feature_report()` | 报告三项功能各自是否在配置里声明（`declared`）、服务是否已创建（`service`），是否传入了可调用的身份提供者，配置里是否有 `research_policy`，已加载的适配器及其是否进入能力目录，Lab、discovery、disposition 三种模式下模型可用的动作和 `command` 之外的响应字段，以及 `native_capabilities`：`lab`、`meta`、`literature` 各自的原生工具设置，形如 `{"web_search": false, "terminal": null, "subagents": null}`，开启的终端给出解析后的 `readable_roots`，开启的子 agent 给出 `max_concurrent`，声明了角色时还有 `roles`，按名称顺序列出每个角色的 `description` 和 `instructions`；以及 `native_warnings`，一个字符串列表：有角色开启了原生工具、而实际的容量上限（`max_effective_context_bytes`，没有时取 `max_input_bytes`，再没有时为 131,072）低于 1,048,576 字节时含一条提醒，因为使用工具的一轮写下的记录会超过这个上限，之后的轮次会因容量阻塞；否则为空列表 |
+| `runtime.feature_report()` | 报告三项功能各自是否在配置里声明（`declared`）、服务是否已创建（`service`），是否传入了可调用的身份提供者，配置里是否有 `research_policy`，已加载的适配器及其是否进入能力目录，Lab、discovery、disposition 三种模式下模型可用的动作和 `command` 之外的响应字段，以及 `native_capabilities`：`lab`、`meta`、`literature` 各自的原生工具设置，形如 `{"web_search": false, "terminal": null, "subagents": null}`，开启的终端给出解析后的 `readable_roots`，开启的子 agent 给出 `max_concurrent`，声明了角色时还有 `roles`，按名称顺序列出每个角色的 `description` 和 `instructions`；开启查看图片时有 `view_image: true`；声明了工具服务时有 `tool_servers`，是完整设置，连同命令、参数、`env` 的值、URL、请求头和 `env_from`、`token_from` 的变量名，这些都打印给操作者看（`env_from` 和 `token_from` 所指变量的值不在其中）；声明了技能时有 `skills`：技能文件夹的位置，以及冻结的每个技能的 `description` 和每个文件的 SHA-256；以及 `native_warnings`，一个字符串列表：有角色开启了原生工具、而实际的容量上限（`max_effective_context_bytes`，没有时取 `max_input_bytes`，再没有时为 131,072）低于 1,048,576 字节时含一条提醒，因为使用工具的一轮写下的记录会超过这个上限，之后的轮次会因容量阻塞；否则为空列表 |
 | `runtime.preflight(expect, work_id=None)` | 逐项核对期望。全部满足时返回 `feature_report()` 的结果，给了 `work_id` 时结果里多一项 `request`；否则抛 `ValueError`，每条一行，写明缺什么、该改运行配置的哪个键或 `Runtime(...)` 的哪个参数 |
 | `runtime.request_report(work_id)` | 对一个就绪的 Lab 或 Meta Work 按真实路径构建请求包但不准备 Effect，报告请求包里实际有什么 |
 
