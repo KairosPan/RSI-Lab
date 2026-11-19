@@ -592,6 +592,28 @@ class NativeTransportTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'are not set: CHEM_API_KEY, PAPERS_TOKEN$'):
                 self.invoke(native=WITH_TOOL_SERVERS)
 
+    def test_a_skills_call_in_a_home_with_skills_is_refused_before_codex_is_asked(self):
+        codex_home = self.root / 'codex-home'
+        (codex_home / 'skills' / '.system' / 'imagegen').mkdir(parents=True)
+        # The session's Codex home is the one looked at, not CODEX_HOME, which is another, empty folder here.
+        (self.root / 'other-home').mkdir()
+        with patch.dict(os.environ, {'CODEX_HOME': str(self.root / 'other-home')}), \
+                patch.object(native, 'MACHINE_SKILLS', self.root / 'machine-skills'), \
+                patch.object(transport, 'codex_version', return_value='0.170.0') as version:
+            self.invoke(native=WITH_SKILLS, folder=self.root / 'calls' / 'system-only')   # Codex's own .system
+            self.assertEqual((len(self.commands), version.call_count), (1, 1))
+            (codex_home / 'skills' / 'secret-skill').mkdir()
+            with self.assertRaises(ValueError) as raised:
+                self.invoke(native=WITH_SKILLS)
+            self.assertEqual(str(raised.exception), 'A role with skills needs a separate Codex home with no skills '
+                             'of its own: ' + str(codex_home.resolve() / 'skills') + ' holds entries. '
+                             + native.SEPARATE_HOME_HELP)
+            self.assertEqual((len(self.commands), version.call_count), (1, 1))
+            self.assertFalse(self.folder.exists())
+            # A call without skills goes ahead in the same home.
+            self.invoke(native=TERMINAL)
+            self.assertEqual(len(self.commands), 2)
+
     def archive(self, events, invocation=None, name='archive'):
         """A call folder written before journals: ``events.jsonl`` and, unless ``None``, ``invocation.json`` text."""
         folder = self.root / name

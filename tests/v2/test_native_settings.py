@@ -11,7 +11,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from rsi_lab import native
+from rsi_lab import native, transport
 from rsi_lab.__main__ import main
 from rsi_lab.controller import Controller
 from rsi_lab.runtime import Runtime
@@ -728,7 +728,9 @@ class SkillSettingsTests(unittest.TestCase):
             'lab': {'terminal': True, 'skills': {'root': str(root)}}}}))
         ledger = str(self.tmp / 'ledger')
         printed = io.StringIO()
-        with mock.patch.dict(os.environ, {'HOME': str(home), 'CODEX_HOME': str(codex_home)}):
+        # init and every start look for skills in the Codex home, the user's and the machine's folder: all empty here.
+        with mock.patch.dict(os.environ, {'HOME': str(home), 'CODEX_HOME': str(codex_home)}), \
+                mock.patch.object(native, 'MACHINE_SKILLS', self.tmp / 'machine-skills'):
             with contextlib.redirect_stdout(io.StringIO()):
                 main(['--root', ledger, '--run', 'r', 'init', '--config', str(path)])
             (root / 'plot-check' / 'scripts' / 'check.py').write_bytes(b'print("changed")\n')
@@ -746,6 +748,137 @@ class SkillSettingsTests(unittest.TestCase):
         self.assertEqual(native.receipt_form(WITH_SKILLS)['skills'], {'plot-check': digest(PLOT_CHECK['files'])})
         self.assertEqual(native.receipt_form(WITH_SKILLS)['terminal'], TERMINAL['terminal'])
         self.assertEqual(WITH_SKILLS['skills']['frozen'], {'plot-check': PLOT_CHECK})   # The settings given are kept.
+
+
+class SkillHomeTests(unittest.TestCase):
+    """A role with skills runs only where the other folders Codex lists skills from hold nothing."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix='rsi-skill-home-'))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.user, self.codex_home, self.machine = self.tmp / 'user', self.tmp / 'codex-home', self.tmp / 'machine'
+        self.user.mkdir()
+        self.codex_home.mkdir()
+        self.machine_skills = native.MACHINE_SKILLS
+        # This machine's own home, Codex home and machine skills folder are never looked at.
+        for patcher in (mock.patch.dict(os.environ, {'HOME': str(self.user), 'CODEX_HOME': str(self.codex_home)}),
+                        mock.patch.object(native, 'MACHINE_SKILLS', self.machine)):
+            patcher.start(); self.addCleanup(patcher.stop)
+
+    def folders(self):
+        """The three folders the check lists, in the order it lists them."""
+        return [self.codex_home / 'skills', self.user / '.agents' / 'skills', self.machine]
+
+    def refusal(self, folder):
+        return ('A role with skills needs a separate Codex home with no skills of its own: ' + str(folder)
+                + ' holds entries. ' + native.SEPARATE_HOME_HELP)
+
+    def test_each_of_the_three_folders_refuses_and_no_name_is_told(self):
+        for folder in self.folders():
+            (folder / 'secret-skill').mkdir(parents=True)
+            (folder / 'secret-skill' / 'SKILL.md').write_text('---\nname: secret-skill\n---\n')
+            with self.subTest(folder=folder):
+                with self.assertRaisesRegex(ValueError, 'separate Codex home') as raised:
+                    native.check_skill_homes(self.codex_home)
+                self.assertEqual(str(raised.exception), self.refusal(folder))
+                self.assertNotIn('secret-skill', str(raised.exception))
+            shutil.rmtree(folder / 'secret-skill')
+        # Any entry counts, a hidden one too; only the Codex home's own .system is left out, and only there.
+        for folder, name in zip(self.folders(), ('.DS_Store', '.system', '.system')):
+            (folder / name).write_text('x')
+            with self.subTest(folder=folder, name=name), self.assertRaisesRegex(ValueError, 'separate Codex home'):
+                native.check_skill_homes(self.codex_home)
+            (folder / name).unlink()
+        # With all three full, the first is named.
+        for folder in self.folders():
+            (folder / 'x').mkdir()
+        with self.assertRaises(ValueError) as raised:
+            native.check_skill_homes(self.codex_home)
+        self.assertEqual(str(raised.exception), self.refusal(self.codex_home / 'skills'))
+        self.assertEqual(self.machine_skills, Path('/etc/codex/skills'))      # The value itself, never listed here.
+        self.assertEqual(native.SEPARATE_HOME_HELP, 'Create an empty folder, run codex login once with CODEX_HOME set '
+                         'to it, and start the Controller or the host with CODEX_HOME set to it. ~/.agents/skills must '
+                         'be empty whatever the Codex home is.')
+
+    def test_the_system_folder_and_missing_folders_pass(self):
+        native.check_skill_homes(self.tmp / 'no-such-home')
+        (self.codex_home / 'skills' / '.system' / 'imagegen').mkdir(parents=True)
+        native.check_skill_homes(self.codex_home)
+        (self.user / '.agents' / 'skills').mkdir(parents=True)
+        self.machine.mkdir()
+        native.check_skill_homes(self.codex_home)                       # Empty folders pass as well.
+        shutil.rmtree(self.user / '.agents')
+        (self.user / '.agents').write_text('x')                         # Then ~/.agents/skills cannot exist.
+        native.check_skill_homes(self.codex_home)
+
+    def test_a_file_where_a_skills_folder_should_be_is_refused(self):
+        (self.user / '.agents').mkdir(parents=True); (self.user / '.agents' / 'skills').write_text('x')
+        with self.assertRaisesRegex(ValueError, 'separate Codex home'):
+            native.check_skill_homes(self.codex_home)
+        (self.user / '.agents' / 'skills').unlink()
+        full, empty = self.tmp / 'full', self.tmp / 'empty'
+        (full / 'plot-check').mkdir(parents=True)
+        empty.mkdir()
+        # A file, a link to nothing and a link to a folder holding a skill are refused; a link to an empty folder
+        # is read as that folder.
+        for folder in self.folders():
+            for case, make in (('a file', lambda: folder.write_text('x')),
+                               ('a link to nothing', lambda: folder.symlink_to(self.tmp / 'nothing')),
+                               ('a link to a full folder', lambda: folder.symlink_to(full, target_is_directory=True))):
+                make()
+                with self.subTest(folder=folder, case=case), self.assertRaises(ValueError) as raised:
+                    native.check_skill_homes(self.codex_home)
+                self.assertEqual(str(raised.exception), self.refusal(folder))
+                self.assertNotIn('plot-check', str(raised.exception))
+                folder.unlink()
+            folder.symlink_to(empty, target_is_directory=True)
+            native.check_skill_homes(self.codex_home)
+            folder.unlink()
+
+    def config(self, name, lab):
+        """A run config file whose Lab block is ``lab``."""
+        path = self.tmp / (name + '.json')
+        path.write_text(json.dumps({'budgets': BUDGETS, 'native_capabilities': {'lab': lab}}))
+        return path
+
+    def init(self, ledger, config):
+        """``init`` of run r in ``ledger`` from ``config``; the ledger's store."""
+        with contextlib.redirect_stdout(io.StringIO()):
+            main(['--root', str(ledger), '--run', 'r', 'init', '--config', str(config)])
+        store = Store(ledger)
+        self.addCleanup(store.close)
+        return store
+
+    def test_init_start_and_call_check_the_home_only_for_skills(self):
+        with_skills = self.config('with-skills', {'terminal': True,
+                                                  'skills': {'root': str(skill_folder(self.tmp / 'skills'))}})
+        started = self.init(self.tmp / 'started', with_skills)
+        Runtime(started, 'r')
+        (self.codex_home / 'skills' / 'x').mkdir(parents=True)
+        # A run initialised before the folder appeared is no longer started.
+        with self.assertRaisesRegex(ValueError, '^A role with skills needs a separate Codex home'):
+            Runtime(started, 'r')
+        # init refuses the config and creates no run.
+        refused = self.tmp / 'refused'
+        with self.assertRaisesRegex(ValueError, '^A role with skills needs a separate Codex home'):
+            main(['--root', str(refused), '--run', 'r', 'init', '--config', str(with_skills)])
+        store = Store(refused)
+        self.addCleanup(store.close)
+        with self.assertRaises(KeyError):
+            store.run('r')
+        # A call is refused before Codex is asked for its version or started.
+        session = {'session_id': 's', 'workspace': str(self.tmp / 'workspace'), 'provider_thread_id': None,
+                   'codex_home': str(self.codex_home)}
+        call = self.tmp / 'call'
+        with mock.patch.object(transport, 'codex_version', return_value='0.170.0') as version, \
+                mock.patch.object(transport.subprocess, 'Popen', side_effect=AssertionError('Codex started')):
+            with self.assertRaisesRegex(ValueError, '^A role with skills needs a separate Codex home'):
+                transport.invoke('p', {'type': 'object'}, call, 'm', 'low', session=session, native=WITH_SKILLS,
+                                 run_root=str(self.tmp / 'started'))
+        version.assert_not_called()
+        self.assertFalse(call.exists())
+        # A config with only the terminal initialises and starts with the same folder full.
+        Runtime(self.init(self.tmp / 'plain', self.config('plain', {'terminal': True})), 'r')
 
 
 if __name__ == '__main__':

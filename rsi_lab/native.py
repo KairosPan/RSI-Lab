@@ -104,6 +104,13 @@ SHARED_TEMP_FOLDERS = ('/tmp', '/private/tmp', '/var/tmp', '/private/var/tmp')
 # Names in a session's workspace that Codex reads as instructions or configuration.
 # The terminal may not write them, and a terminal call is not sent while any exists.
 WORKSPACE_INSTRUCTIONS = ('.codex', '.agents', 'AGENTS.md', 'AGENTS.override.md')
+# The machine's skills folder, which Codex lists skills from beside the Codex home's and the user's (check_skill_homes).
+MACHINE_SKILLS = Path('/etc/codex/skills')
+# The Codex home's entry Codex installs its own skills in; the command of a role with skills keeps them out of the list.
+CODEX_SYSTEM_SKILLS = '.system'
+SEPARATE_HOME_HELP = ('Create an empty folder, run codex login once with CODEX_HOME set to it, and start the '
+                      'Controller or the host with CODEX_HOME set to it. ~/.agents/skills must be empty whatever the '
+                      'Codex home is.')
 PREAMBLE = (
     "Return one JSON object matching the supplied response schema as your final message. "
     "You may use the tools available in this session before answering.\n\n"
@@ -529,6 +536,38 @@ def check_roots(by_role, *, run_root, codex_home):
                    for folder in shared):
                 raise ValueError('native_capabilities.' + role + '.terminal.readable_roots entries may not be '
                                  'a shared temporary folder, which the terminal is denied: ' + root)
+
+
+def check_skill_homes(codex_home):
+    """Refuse a call with skills while another folder Codex lists skills from holds an entry.
+
+    Besides the workspace's ``.agents/skills`` Codex lists to the model every
+    skill in ``<codex_home>/skills``, ``$HOME/.agents/skills`` and
+    ``MACHINE_SKILLS``. A role with skills may run only where those three hold
+    nothing, so that the model is shown its declared skills alone. The Codex
+    home's ``.system`` entry, Codex's own skills, is not counted: the command
+    keeps them out of the list. The first folder that holds an entry, or that
+    exists and is not a directory (a dangling link included), raises
+    ``ValueError`` naming that folder; a missing folder passes. Only the
+    folders' entries are listed, never what they hold, and no entry's name is
+    kept or told.
+    """
+    for folder, own in ((Path(codex_home) / 'skills', (CODEX_SYSTEM_SKILLS,)),
+                        (Path.home() / '.agents' / 'skills', ()), (MACHINE_SKILLS, ())):
+        if _holds_entries(folder, own):
+            raise ValueError('A role with skills needs a separate Codex home with no skills of its own: '
+                             + str(folder) + ' holds entries. ' + SEPARATE_HOME_HELP)
+
+
+def _holds_entries(folder, ignored):
+    """Whether ``folder`` exists and is not a directory, or lists an entry whose name is not in ``ignored``."""
+    if not os.path.lexists(folder):
+        return False
+    try:
+        with os.scandir(folder) as entries:
+            return any(entry.name not in ignored for entry in entries)
+    except (FileNotFoundError, NotADirectoryError):
+        return True
 
 
 def _inside(path, folder):

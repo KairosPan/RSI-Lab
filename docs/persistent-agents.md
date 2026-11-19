@@ -277,6 +277,32 @@ Codex 按 YAML 读取 front matter，内核没有 YAML 解析器。运行配置�
 
 此后修改、增删甚至删除这个文件夹，都影响不到这次运行，运行用的是存下的副本。Runtime 只接受这种冻结后的形式：没有 `frozen` 的 `skills`（例如不经 `init`、直接交给 Controller 的运行配置）在启动时被拒绝，错误中写明 `must be frozen with the run`。运行配置里已经写了 `frozen` 时，`init` 仍从 `root` 重新读取，读到的必须与之完全相同，否则拒绝，错误中写明 `changed since it was frozen`。回执里的 `skills` 只记每个技能的名称和它的文件表（路径到 SHA-256 的对象）的 hash。
 
+### 独立的 Codex 主目录
+
+Codex 向模型列出的技能，不只来自会话工作目录里的 `.agents/skills`，还来自另外三个文件夹：调用所用 Codex 主目录（`CODEX_HOME`，默认 `~/.codex`）下的 `skills`、`$HOME/.agents/skills` 和本机的 `/etc/codex/skills`。日常使用的 `~/.codex/skills` 里通常放着主人自己的个人技能。声明了技能的角色必须只看到声明的技能，所以它只能在这三个文件夹都没有任何内容的地方运行。Codex 主目录的 `skills/.system` 不算在内：那是 Codex 自己安装的技能，这样的角色的命令带 `-c skills.bundled.enabled=false`，不列出它们（见[Codex 命令的变化](#codex-命令的变化)）。
+
+内核在三个时刻检查：`init` 时和每次 Runtime 启动时（`recover` 也包括在内）用 `CODEX_HOME` 所指的目录（没有设置时为 `~/.codex`），每次调用之前用该会话实际使用的 Codex 主目录，在询问 Codex 版本、写下任何调用文件之前。只有运行配置里某个角色声明了技能（调用时则是这次调用的设置声明了技能）才检查；其他运行不受影响。检查只列出这三个文件夹的直接条目，不读条目里的内容，也不记下条目的名称。任何一个文件夹里有条目（以 `.` 开头的也算），或者它存在却不是目录（例如一个文件，或指向不存在之处的符号链接），就拒绝：`init` 不建立运行，Runtime 不启动，调用不发出，Codex 不会启动。文件夹不存在则通过；指向某个目录的符号链接按那个目录检查。错误信息只写出文件夹，不写其中的内容：
+
+```
+A role with skills needs a separate Codex home with no skills of its own: <文件夹> holds entries. Create an empty folder, run codex login once with CODEX_HOME set to it, and start the Controller or the host with CODEX_HOME set to it. ~/.agents/skills must be empty whatever the Codex home is.
+```
+
+所以声明了技能的运行要用一个独立的 Codex 主目录，即主人自选的一个空文件夹。在那里登录一次，之后启动 Controller 或宿主时都把 `CODEX_HOME` 设为它；内核本来就使用 `CODEX_HOME`：
+
+```sh
+mkdir /data/separate-codex-home
+CODEX_HOME=/data/separate-codex-home codex login
+CODEX_HOME=/data/separate-codex-home python3 -m rsi_lab --root runs/my-task --run main \
+  init --config runs/my-task/run-config.json
+CODEX_HOME=/data/separate-codex-home python3 -m rsi_lab --root runs/my-task --run main run-until-wait --max-steps 20
+```
+
+- 内核不创建这个目录，也从不把凭证复制或链接进去；登录由主人自己完成。内核也从不写 Codex 的配置文件。
+- 一个运行一直使用它开始时的 Codex 主目录：它的 thread 存在那里，恢复和续接都要在那里找到它们。运行中途不要改变 `CODEX_HOME`。
+- 任何运行都可以使用独立的主目录，只有声明了技能的运行必须使用。这样做时它的 thread 也不会出现在日常 Codex 的历史里。开启终端时，权限配置除了禁止访问调用所用的 Codex 主目录，也禁止访问日常的 `~/.codex`，所以这样的角色读不到日常 Codex 的凭证、会话和技能。
+- 限制：独立的主目录帮不了 `$HOME/.agents/skills`，不论 Codex 主目录是哪个，Codex 都会搜索它。只要它里面有任何内容，声明了技能的运行就一律被拒绝，`init`、每次启动和每次调用都是如此。
+- 检查是在每次启动和每次调用时重新做的：已经建立的运行，在这三个文件夹之一出现条目之后也会被拒绝启动，直到把它清空。
+
 ### Codex 命令的变化
 
 某个角色全部关闭时，命令比引入原生工具之前多三处：`-c agents.enabled=false` 和 `--disable skill_mcp_dependency_install`，见下面的“Codex 版本”；以及 `-c skills.include_instructions=false`。没有声明技能的角色，不论开启了哪些工具，每次调用都带最后这一项，紧跟在 `-c agents.enabled=false` 之后（开启子 agent 时紧跟在 `-c suppress_unstable_features_warning=true` 之后）。Codex 因此不向模型列出任何技能：日常 Codex 里的个人技能和 Codex 自带的技能都不出现。这改变了全部关闭的运行的命令和模型看到的内容，是“什么都不开启的运行保持不变”唯一一处有意的例外。开启后：

@@ -710,6 +710,10 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
     variables, before anything is written or Codex is asked for its version.
     The command and the records name such variables only, never their values.
 
+    Settings that declare skills raise ``ValueError`` before Codex is asked for
+    its version while the session's Codex home, ``$HOME/.agents/skills`` or the
+    machine's skills folder holds an entry (``native.check_skill_homes``).
+
     The result's ``descendants_stopped`` says whether every process seen under
     the call was stopped by its end. With the terminal on, the process table
     is sampled every ``TRACK_SECONDS`` while Codex runs, and whatever was seen
@@ -753,6 +757,10 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
     if unset:
         raise ValueError('Native settings name environment variables that are not set: ' + ', '.join(unset))
     binding = _session_options(session)
+    if native_tools.declared_skills(settings):
+        # Codex would list the skills of the session's own Codex home, the user's and the machine's beside the
+        # declared ones. binding is set: skills need the terminal, and native settings that are on a session.
+        native_tools.check_skill_homes(binding['codex_home'])
     version = codex_version()
     check_codex_version(version)
     if declared_roles:

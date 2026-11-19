@@ -79,6 +79,8 @@ class Runtime:
         model_failure_retries(self.config)
         self.native = native.capabilities(self.config)
         native.check_roots(self.native, run_root=store.root, codex_home=native.default_codex_home())
+        if any(native.declared_skills(settings) for settings in self.native.values()):
+            native.check_skill_homes(native.default_codex_home())
         orchestration = orchestration_config(self.config)
         self.research_policy = normalize_research_policy(self.config.get('research_policy'))
         self.agents = AgentState(store, run_id)
