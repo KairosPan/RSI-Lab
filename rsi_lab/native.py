@@ -227,8 +227,10 @@ def read_skills(root, where='native_capabilities.skills'):
     1 to ``MAX_SKILLS`` directories named by ``SKILL_NAME``, each holding
     ``SKILL.md`` at its top and nowhere else, and any supporting files:
     regular files only, at most ``MAX_SKILL_FILES`` of them and
-    ``MAX_SKILL_BYTES`` bytes in all, with no symbolic link anywhere. ``SKILL.md`` begins with front matter whose ``name``
-    is the folder's and whose ``description`` ``_is_skill_description`` accepts
+    ``MAX_SKILL_BYTES`` bytes in all, with no symbolic link anywhere, every
+    name printable and no two paths ``_refuse_clashing_paths`` refuses.
+    ``SKILL.md`` begins with front matter whose ``name`` is the folder's and
+    whose ``description`` ``_is_skill_description`` accepts
     (``_front_matter``). Skills are in name order, files in path order, each
     path relative with ``/`` between its parts.
 
@@ -249,6 +251,8 @@ def read_skills(root, where='native_capabilities.skills'):
             raise ValueError(where + ' folder names must match ' + SKILL_NAME.pattern + ': ' + repr(entry.name))
         skill_where = where + '.' + entry.name
         files = _skill_files(entry.path, skill_where)
+        # A volume that tells letter case apart can hold paths that a case-insensitive workspace cannot.
+        _refuse_clashing_paths(files, skill_where)
         if SKILL_FILE not in files:
             raise ValueError(skill_where + ' must hold ' + SKILL_FILE)
         skills[entry.name] = {'description': _front_matter(files[SKILL_FILE], entry.name, skill_where),
@@ -936,10 +940,10 @@ def _skills(skills, where):
     path, no skill or more than ``MAX_SKILLS``, a name ``SKILL_NAME`` does not
     match in full, a description ``_is_skill_description`` refuses, and files
     that do not include ``SKILL.md`` or number more than ``MAX_SKILL_FILES``,
-    whose paths ``_is_skill_path`` refuses, that hold a ``SKILL.md`` below the
-    skill's top, which Codex would list as another skill, or whose hashes are
-    not 64 lowercase hexadecimal characters. Sizes are checked only when the
-    folder is read.
+    whose paths ``_is_skill_path`` refuses or ``_refuse_clashing_paths`` finds
+    clashing, that hold a ``SKILL.md`` below the skill's top, which Codex would
+    list as another skill, or whose hashes are not 64 lowercase hexadecimal
+    characters. Sizes are checked only when the folder is read.
     """
     if type(skills) is not dict or 'root' not in skills or set(skills) - {'root', 'frozen'}:
         raise ValueError(where + ' must be an object holding root, the absolute path of the skills folder')
@@ -964,13 +968,14 @@ def _skills(skills, where):
                              + ' files that includes ' + SKILL_FILE)
         for path, sha256 in files.items():
             if not _is_skill_path(path):
-                raise ValueError(skill_where + '.files paths must be relative, with no empty part and no part '
-                                 'beginning with .: ' + repr(path))
+                raise ValueError(skill_where + '.files paths must be relative, with no empty part, no part '
+                                 'beginning with . and only printable characters: ' + repr(path))
             if path != SKILL_FILE and path.rpartition('/')[2] == SKILL_FILE:
                 raise ValueError(skill_where + '.files may hold ' + SKILL_FILE + ' only at the top: ' + repr(path))
             if type(sha256) is not str or not SHA256.fullmatch(sha256):
                 raise ValueError(skill_where + '.files.' + path + ' must be a SHA-256 of 64 lowercase hexadecimal '
                                  'characters')
+        _refuse_clashing_paths(files, skill_where + '.files')
     return {'root': root,
             'frozen': {name: {'description': frozen[name]['description'],
                               'files': {path: frozen[name]['files'][path] for path in sorted(frozen[name]['files'])}}
@@ -995,21 +1000,45 @@ def _is_skill_description(text):
 
 
 def _is_skill_path(path):
-    """Whether ``path`` names a skill's file: parts joined by ``/``, none empty and none beginning with ``.``.
+    """Whether ``path`` names a skill's file: parts joined by ``/``, none empty, none beginning with ``.`` and each
+    of printable characters only.
 
-    That refuses an absolute path, ``.`` and ``..``, and hidden files and folders, which are never read.
+    That refuses an absolute path, ``.`` and ``..``, hidden files and folders,
+    which are never read, and a name holding a line break, a NUL or another
+    character that cannot be printed.
     """
-    return type(path) is str and all(part and not part.startswith('.') for part in path.split('/'))
+    return type(path) is str and all(part and not part.startswith('.') and part.isprintable()
+                                     for part in path.split('/'))
+
+
+def _refuse_clashing_paths(paths, where):
+    """Refuse, with ``ValueError`` naming ``where`` and both paths, the first two of a skill's ``paths``, in path
+    order, that one folder cannot keep apart where letter case is ignored, as on macOS's default volumes.
+
+    Those are two paths equal under ``casefold``, and two of which one is,
+    casefolded, a folder of the other. Written into the workspace, one would
+    replace the other or could not be written, and the model would be shown
+    other files than the declared ones.
+    """
+    ordered = sorted(paths)
+    for index, path in enumerate(ordered):
+        folded = path.casefold()
+        for other in ordered[index + 1:]:
+            other_folded = other.casefold()
+            if folded == other_folded or other_folded.startswith(folded + '/') or folded.startswith(other_folded + '/'):
+                raise ValueError(where + ' may not hold both ' + repr(path) + ' and ' + repr(other) + ': where '
+                                 'letter case is ignored they are one file, or a file and a folder at one path')
 
 
 def _skill_files(folder, where):
     """The files of one skill folder by relative path, in path order, each read in full.
 
-    Entries whose names begin with ``.`` are skipped. A symbolic link, anything
-    that is neither a regular file nor a directory, a ``SKILL.md`` below the
-    top (Codex lists every ``SKILL.md`` it finds as a skill), more than
-    ``MAX_SKILL_FILES`` files or more than ``MAX_SKILL_BYTES`` bytes is refused.
-    No file is read beyond the bytes left.
+    Entries whose names begin with ``.`` are skipped. A name that is not all
+    printable characters, a symbolic link, anything that is neither a regular
+    file nor a directory, a ``SKILL.md`` below the top (Codex lists every
+    ``SKILL.md`` it finds as a skill), more than ``MAX_SKILL_FILES`` files or
+    more than ``MAX_SKILL_BYTES`` bytes is refused. No file is read beyond the
+    bytes left.
     """
     paths, pending = [], ['']
     while pending:
@@ -1019,6 +1048,8 @@ def _skill_files(folder, where):
                 if entry.name.startswith('.'):
                     continue
                 path = prefix + entry.name
+                if not entry.name.isprintable():
+                    raise ValueError(where + ' may hold only names of printable characters: ' + repr(path))
                 if entry.is_symlink():
                     raise ValueError(where + ' may not hold a symbolic link: ' + repr(path))
                 if entry.is_dir(follow_symlinks=False):

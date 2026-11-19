@@ -717,6 +717,26 @@ class NativeTransportTests(unittest.TestCase):
                     transport.write_skills(self.workspace, skills, objects)
                 self.assertEqual(self.files_under(self.root), before)
 
+    def test_skill_paths_that_clash_or_cannot_be_printed_write_nothing(self):
+        # A hand-made mapping the settings would refuse: on a volume that ignores letter case one file would replace
+        # the other, or a file would stand where a folder must.
+        objects = self.stored(self.root, SKILL_MD, CHECK_PY)
+        self.stale_agents(self.workspace)
+        files, blob = PLOT_CHECK['files'], PLOT_CHECK['files']['scripts/check.py']
+        cases = {'skill.md': "Skill plot-check may not hold both 'SKILL.md' and 'skill.md': where letter case is "
+                             'ignored they are one file, or a file and a folder at one path',
+                 'Scripts': "Skill plot-check may not hold both 'Scripts' and 'scripts/check.py'",
+                 'scripts/check.py/x': "Skill plot-check may not hold both 'scripts/check.py' and 'scripts/check.py/x'",
+                 'a\nb': "Invalid path of skill plot-check: 'a\\nb'",
+                 'a\x00b': "Invalid path of skill plot-check: 'a\\x00b'"}
+        for path, message in cases.items():
+            with self.subTest(path=path):
+                with self.assertRaises(ValueError) as raised:
+                    transport.write_skills(self.workspace, {'plot-check': {**PLOT_CHECK, 'files': {**files, path: blob}}},
+                                           objects)
+                self.assertTrue(str(raised.exception).startswith(message), str(raised.exception))
+                self.assertEqual(self.files_under(self.workspace), ['.agents/skills/old/SKILL.md', '.agents/stale.md'])
+
     def test_a_symlinked_agents_folder_is_replaced_not_followed(self):
         objects = self.stored(self.root, SKILL_MD, CHECK_PY)
         outside = self.root / 'outside'

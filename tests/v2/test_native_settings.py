@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import sys
 import tempfile
@@ -711,6 +712,64 @@ class SkillSettingsTests(unittest.TestCase):
         for skills in bad:
             with self.subTest(skills=skills), self.assertRaisesRegex(ValueError, '^native_capabilities.skills'):
                 native.validate({**TERMINAL, 'skills': skills})
+
+    def test_frozen_paths_that_clash_or_cannot_be_printed_are_refused(self):
+        # Written into a workspace on a volume that ignores letter case, one file would replace the other, or a file
+        # would stand where a folder must: the model would be shown other files than the declared ones.
+        def with_files(*paths):
+            files = {**PLOT_CHECK['files'], **{path: sha(b'x') for path in paths}}
+            return {**TERMINAL, 'skills': {'root': '/data/research-skills',
+                                           'frozen': {'plot-check': {**PLOT_CHECK, 'files': files}}}}
+        where = r'^native_capabilities\.skills\.frozen\.plot-check\.files '
+        clashes = {('skill.md',): ('SKILL.md', 'skill.md'), ('A', 'a'): ('A', 'a'), ('x', 'x/y'): ('x', 'x/y'),
+                   ('X', 'x/y'): ('X', 'x/y'), ('Scripts',): ('Scripts', 'scripts/check.py'),
+                   ('scripts/check.py/x',): ('scripts/check.py', 'scripts/check.py/x')}
+        for paths, (first, second) in clashes.items():
+            with self.subTest(paths=paths), self.assertRaisesRegex(
+                    ValueError, where + 'may not hold both ' + re.escape(repr(first) + ' and ' + repr(second))
+                    + ': where letter case is ignored'):
+                native.validate(with_files(*paths))
+        for path in ('a\nb', 'a\x00b', 'docs/a b', 'a\x85b', 'a\tb'):
+            with self.subTest(path=path), self.assertRaisesRegex(
+                    ValueError, where + 'paths must be relative, with no empty part, no part beginning with . and '
+                    'only printable characters: ' + re.escape(repr(path))):
+                native.validate(with_files(path))
+        # Paths that differ in more than letter case, or share only the start of a name, are kept apart.
+        self.assertEqual(len(native.validate(with_files('scripts-old/check.py', 'scripts.py', 'a b'))['skills']
+                             ['frozen']['plot-check']['files']), 5)
+
+    def test_a_folder_whose_paths_clash_where_case_is_ignored_is_refused(self):
+        # Read where letter case is told apart, a folder can hold paths that a case-insensitive workspace cannot.
+        root = skill_folder(self.tmp / 'cased')
+        scripts = root / 'plot-check' / 'scripts'
+        (scripts / 'A.py').write_bytes(b'a = 1\n')
+        (scripts / 'a.py').write_bytes(b'a = 2\n')
+        if sorted(path.name for path in scripts.iterdir()) != ['A.py', 'a.py', 'check.py']:
+            self.skipTest('this volume ignores letter case: one folder cannot hold both a.py and A.py')
+        stored = []
+        with self.assertRaisesRegex(ValueError, r"^native_capabilities\.lab\.skills\.plot-check may not hold both "
+                                                r"'scripts/A\.py' and 'scripts/a\.py'"):
+            native.freeze_skills({'lab': {'terminal': True, 'skills': {'root': str(root)}}},
+                                 lambda raw: stored.append(raw) or sha(raw))
+        self.assertEqual(stored, [])
+
+    def test_the_folder_reader_refuses_paths_that_clash_or_cannot_be_printed(self):
+        # What a volume that tells letter case apart would give the reader, on any volume.
+        read, stored = native._skill_files, []
+        with mock.patch.object(native, '_skill_files', side_effect=lambda folder, where: {
+                **read(folder, where), 'scripts/A.py': b'a = 1\n', 'scripts/a.py': b'a = 2\n'}):
+            with self.assertRaisesRegex(ValueError, r"^native_capabilities\.lab\.skills\.plot-check may not hold both "
+                                                    r"'scripts/A\.py' and 'scripts/a\.py'"):
+                native.freeze_skills({'lab': {'terminal': True, 'skills': {'root': str(skill_folder(self.tmp / 'any'))}}},
+                                     lambda raw: stored.append(raw) or sha(raw))
+        self.assertEqual(stored, [])
+        root = skill_folder(self.tmp / 'unprintable')
+        (root / 'plot-check' / 'scripts' / 'a\nb.py').write_bytes(b'x = 1\n')
+        with self.assertRaisesRegex(ValueError, r'^native_capabilities\.lab\.skills\.plot-check may hold only names of '
+                                                r"printable characters: 'scripts/a\\nb\.py'"):
+            native.freeze_skills({'lab': {'terminal': True, 'skills': {'root': str(root)}}},
+                                 lambda raw: stored.append(raw) or sha(raw))
+        self.assertEqual(stored, [])
 
     def test_declared_skills_are_read_from_normal_form_settings(self):
         self.assertEqual(native.declared_skills(WITH_SKILLS), {'plot-check': PLOT_CHECK})

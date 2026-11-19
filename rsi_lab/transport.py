@@ -709,7 +709,9 @@ def write_skills(workspace, skills, objects):
     Refused with ``ValueError`` before anything is deleted or written: a blob
     that is missing, is not a regular file or holds other bytes; a skill name,
     file path or SHA-256 the settings would not hold (a path must not leave its
-    skill's folder); and a workspace that is a symlink.
+    skill's folder, ``native._is_skill_path``, and no two paths of a skill may
+    clash where letter case is ignored, ``native._refuse_clashing_paths``); and
+    a workspace that is a symlink.
     """
     workspace = Path(workspace)
     contents = {}
@@ -718,12 +720,12 @@ def write_skills(workspace, skills, objects):
             raise ValueError('Invalid skill name: ' + repr(name))
         contents[name] = {}
         for path, sha256 in skill['files'].items():
-            # As native validates them: relative, no empty part, none beginning with '.'.
-            if not isinstance(path, str) or not all(part and not part.startswith('.') for part in path.split('/')):
+            if not native_tools._is_skill_path(path):
                 raise ValueError('Invalid path of skill ' + name + ': ' + repr(path))
             if not isinstance(sha256, str) or not native_tools.SHA256.fullmatch(sha256):
                 raise ValueError('Invalid SHA-256 of skill file ' + name + '/' + path + ': ' + repr(sha256))
             contents[name][path] = _stored_skill_file(objects, sha256, name + '/' + path)
+        native_tools._refuse_clashing_paths(contents[name], 'Skill ' + name)
     if workspace.is_symlink():
         raise ValueError('Session workspace cannot be a symlink')
     workspace.mkdir(parents=True, exist_ok=True)
