@@ -29,7 +29,7 @@ import re
 import urllib.parse
 
 from . import native as native_tools, transport
-from .session_context import THREAD_ID, TOOL_OUTPUT_KINDS, VIEWED_IMAGE_URL
+from .session_context import THREAD_ID, VIEWED_IMAGE_OUTPUT, VIEWED_IMAGE_URL
 from .store import digest, encode
 
 COUNTERS = ('input_tokens', 'output_tokens', 'cached_input_tokens')
@@ -209,8 +209,8 @@ def _image_bytes(image):
 
 
 def _tools_and_images(items, outputs):
-    """The tool server calls and viewed images of a thread in one call, from its completed ``items`` and its tool
-    ``outputs`` that count.
+    """The tool server calls and viewed images of a thread in one call, from its completed ``items`` and the
+    outputs of its exec tool that count, the only tool output Codex returns a viewed image in.
 
     ``tool_server_calls`` records the first ``MAX_TOOL_SERVER_CALLS`` ``McpToolCall`` items, the rest counted in
     ``tool_server_calls_omitted``. ``images_viewed`` keeps the ``path`` of the first ``MAX_IMAGE_PATHS``
@@ -271,10 +271,10 @@ def read_turn(path, *, thread_id, prefix_bytes):
     ``rate_limits`` snapshot and ``profile`` the ``permission_profile`` of the last ``turn_context``, each
     ``None`` when absent. ``tool_server_calls``, ``tool_server_calls_omitted``, ``images_viewed`` and every viewed
     image's path (``IMAGE_PATHS``) are those of ``_tools_and_images``, from the ``item_completed`` events and the
-    tool outputs after the prefix. ``skills_lists`` are the texts of the skills lists Codex wrote after the prefix
-    and ``earlier_skills_lists`` those within it (``_earlier_skills_lists``). These serve only to excuse the copies a
-    sub-agent started with the lead's history carries, so the prefix is read only when the turn started a sub-agent;
-    otherwise ``earlier_skills_lists`` is empty.
+    exec tool's outputs (``VIEWED_IMAGE_OUTPUT``) after the prefix. ``skills_lists`` are the texts of the skills
+    lists Codex wrote after the prefix and ``earlier_skills_lists`` those within it (``_earlier_skills_lists``).
+    These serve only to excuse the copies a sub-agent started with the lead's history carries, so the prefix is read
+    only when the turn started a sub-agent; otherwise ``earlier_skills_lists`` is empty.
 
     ``LedgerUnavailable`` is raised when the bytes after the prefix are not whole JSON records starting on a
     record boundary, or a usage row belongs to another thread or session, names no turn or has invalid counters.
@@ -307,7 +307,7 @@ def read_turn(path, *, thread_id, prefix_bytes):
             tool_calls += 1
             if len(tool_inputs) < MAX_TOOL_INPUTS:
                 tool_inputs.append(_tool_input(payload))
-        elif kind == 'response_item' and payload.get('type') in TOOL_OUTPUT_KINDS:
+        elif kind == 'response_item' and payload.get('type') == VIEWED_IMAGE_OUTPUT:
             outputs.append(payload.get('output'))
         elif kind == 'event_msg' and payload.get('type') == 'token_count':
             if isinstance(payload.get('rate_limits'), dict):
@@ -376,10 +376,10 @@ def read_child(codex_home, child_thread_id, *, parent_thread_id, root_turn_ids):
     are kept, each cut to ``EXCERPT_CHARS`` characters, and the rest are counted in ``searches_omitted``.
     ``tool_server_calls``, ``tool_server_calls_omitted``, ``images_viewed`` and every viewed image's path
     (``IMAGE_PATHS``) are those of ``_tools_and_images``, from the ``item_completed`` events whose ``turn_id`` is
-    such a turn and from the tool outputs, which carry no turn id, that lie after a ``turn_context`` of such a turn
-    and before the next ``turn_context``. ``skills_lists`` are the texts of the skills lists in its whole rollout:
-    the list Codex built when it started, any written since, and, when it started with the parent's history, the
-    copies of the parent's. None of these makes the rollout unreadable.
+    such a turn and from the exec tool's outputs, which carry no turn id, that lie after a ``turn_context`` of such
+    a turn and before the next ``turn_context``. ``skills_lists`` are the texts of the skills lists in its whole
+    rollout: the list Codex built when it started, any written since, and, when it started with the parent's
+    history, the copies of the parent's. None of these makes the rollout unreadable.
     """
     _identity(child_thread_id, 'the sub-agent thread')
     _identity(parent_thread_id, 'the parent thread')
@@ -406,7 +406,7 @@ def read_child(codex_home, child_thread_id, *, parent_thread_id, root_turn_ids):
         elif kind == 'turn_context' and isinstance(turn, str) and turn in turns:
             context = payload
     outputs = [payload.get('output') for kind, payload in _in_turns(records, turns)
-               if kind == 'response_item' and payload.get('type') in TOOL_OUTPUT_KINDS]
+               if kind == 'response_item' and payload.get('type') == VIEWED_IMAGE_OUTPUT]
     role, forked = meta.get('agent_role'), meta.get('forked_from_id')
     return {'thread_id': child_thread_id, 'rollout_ref': str(rollout.resolve()), 'rollout_sha256': digest(raw),
             'requests': len(rows), **{name: sum(row[name] for row in rows) for name in COUNTERS},

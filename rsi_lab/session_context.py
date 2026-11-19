@@ -39,6 +39,9 @@ TOOL_DEFINITION_KIND = 'additional_tools'
 # How an image a role views with its image tool begins in the tool's output: a data: URL of an image type.
 # Its data is never decoded; it counts in the text history like the rest of the output.
 VIEWED_IMAGE_URL = re.compile(r'data:image/[A-Za-z0-9.+-]+;base64,')
+# The one tool output a viewed image is returned in: the exec tool's. A function_call_output carries results
+# between agents, and an image there is refused, never counted as viewed.
+VIEWED_IMAGE_OUTPUT = 'custom_tool_call_output'
 
 
 class ContextUnavailable(ValueError):
@@ -163,12 +166,14 @@ def snapshot_from_bytes(raw, *, expected_thread_id, expected_cwd, expected_prefi
     records and the last full ``world_state`` before it; ``None`` when there
     is none and the whole file counts. Everything off reads exactly as before.
 
-    With ``view_image`` on, a tool output may also hold the images the role
-    viewed (``_text_output``). They are not decoded, are not ``image_inputs``
-    and do not count in ``observable_image_bytes``, which hold only the images
-    a request attached; their bytes stay in the text history. The snapshot
-    then also carries ``viewed_image_count`` and ``viewed_image_encoded_bytes``,
-    the characters after the comma of their URLs, over the whole file.
+    With ``view_image`` on, the exec tool's output (``VIEWED_IMAGE_OUTPUT``)
+    may also hold the images the role viewed (``_text_output``); an image in
+    a ``function_call_output`` is still refused. They are not decoded, are not
+    ``image_inputs`` and do not count in ``observable_image_bytes``, which hold
+    only the images a request attached; their bytes stay in the text history.
+    The snapshot then also carries ``viewed_image_count`` and
+    ``viewed_image_encoded_bytes``, the characters after the comma of their
+    URLs, over the whole file.
     """
     _identity(expected_thread_id)
     settings = native_tools.validate(native)
@@ -229,9 +234,10 @@ def snapshot_from_bytes(raw, *, expected_thread_id, expected_cwd, expected_prefi
         elif kind == 'response_item':
             item_kind = payload.get('type')
             if item_kind in kinds['response']:
-                if item_kind in TOOL_OUTPUT_KINDS and not _text_output(payload.get('output'), images=viewing):
+                images = viewing and item_kind == VIEWED_IMAGE_OUTPUT
+                if item_kind in TOOL_OUTPUT_KINDS and not _text_output(payload.get('output'), images=images):
                     unsupported.append({'record': number, 'kind': 'unsupported_tool_output'})
-                elif item_kind in TOOL_OUTPUT_KINDS and viewing and isinstance(payload['output'], list):
+                elif images and isinstance(payload['output'], list):
                     # Viewed images stay in the text history; they are counted apart from attached images.
                     for item in filter(_viewed_image, payload['output']):
                         viewed_count += 1

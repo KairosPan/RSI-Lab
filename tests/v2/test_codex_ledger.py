@@ -473,6 +473,20 @@ class CodexLedgerTests(unittest.TestCase):
         # Every path is kept for the check of the folders it lies in, never for a receipt.
         self.assertEqual(len(turn['image_view_paths']), 34)
 
+    def test_an_image_in_a_result_between_agents_is_not_counted_as_viewed(self):
+        # Codex returns a viewed image only in its exec tool's output; a function_call_output carries results between
+        # agents, and the rollout reader refuses an image there.
+        between = frame('response_item', {'type': 'function_call_output', 'call_id': 'c9', 'output': [
+            {'type': 'input_text', 'text': 'Found it.'}, {'type': 'input_image', 'image_url': JPEG}]})
+        raw = fixture(self.cwd) + between + viewed_image('exec-2221', '/w/plot.png', PNG, turn='t1')
+        turn = codex_ledger.read_turn(self.write(raw), thread_id=THREAD, prefix_bytes=0)
+        self.assertEqual(turn['images_viewed'], {'paths': ['file:///w/plot.png'], 'paths_omitted': 0, 'count': 1,
+                                                 'bytes': 68})
+        self.write_child(sub_agent_meta(CHILD, THREAD) + turn_context('c1') + between.replace(b'c9', b'c8')
+                         + usage_row(CHILD, 'c1', 't1', 5, 1, session=THREAD))
+        child = codex_ledger.read_child(self.home, CHILD, parent_thread_id=THREAD, root_turn_ids=['t1'])
+        self.assertEqual(child['images_viewed'], NO_IMAGES)
+
     def test_a_child_records_only_this_calls_turns(self):
         def turn_of(turn, tag, thread=CHILD):
             return (turn_context(turn) + mcp_call('exec-' + tag, 'chem', 'lookup', {'query': tag}, turn=turn,

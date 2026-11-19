@@ -310,6 +310,23 @@ class NativeSessionTests(unittest.TestCase):
             with self.subTest(url=url), self.assertRaisesRegex(ContextUnavailable, 'unsupported_tool_output'):
                 self.read(fixture(self.cwd) + viewed_image('c', '/w/p', url, turn='turn-1'), VIEW_IMAGE)
 
+    def test_an_image_in_a_result_between_agents_is_refused_with_image_viewing_too(self):
+        # Codex returns a viewed image only in its exec tool's output. A function_call_output carries results between
+        # agents, and an image there is neither accepted nor counted as viewed.
+        settings = {**TERMINAL_AND_SUBAGENTS, 'view_image': True}
+        image = {'type': 'input_image', 'image_url': JPEG}
+        cases = {'an image alone': [image],
+                 'text and an image': [{'type': 'input_text', 'text': 'Found it.'}, {**image, 'detail': 'original'}]}
+        for case, output in cases.items():
+            tail = frame('response_item', {'type': 'function_call_output', 'call_id': 'c1', 'output': output})
+            with self.subTest(case=case), self.assertRaisesRegex(ContextUnavailable, 'unsupported_tool_output'):
+                self.read(fixture(self.cwd) + tail, settings)
+        # Text there is read as before, and the same image in the exec tool's output is a viewed one.
+        text = frame('response_item', {'type': 'function_call_output', 'call_id': 'c1',
+                                       'output': [{'type': 'input_text', 'text': 'Found it.'}]})
+        viewed = frame('response_item', {'type': 'custom_tool_call_output', 'call_id': 'c2', 'output': [image]})
+        self.assertEqual(self.read(fixture(self.cwd) + text + viewed, settings)['viewed_image_count'], 1)
+
     def test_only_an_image_item_of_the_shape_codex_writes_is_a_viewed_image(self):
         text = {'type': 'input_text', 'text': 'Script completed\n'}
         image = {'type': 'input_image', 'image_url': JPEG}
