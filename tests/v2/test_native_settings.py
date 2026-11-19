@@ -407,7 +407,11 @@ class ToolServerSettingsTests(unittest.TestCase):
                {'x': {**url, 'url': 'https://user:pw@papers.example.org/mcp'}},
                {'x': {**url, 'url': 'https:///mcp'}}, {'x': {**url, 'headers': {'Authorization': 'Bearer t'}}},
                {'x': {**url, 'headers': {'authorization': 't'}}}, {'x': {**url, 'headers': {'X-A': 'a\nb'}}},
-               {'x': {**url, 'token_from': 'not a name'}}]
+               {'x': {**url, 'token_from': 'not a name'}},
+               # Spellings an older urlsplit reads as another host than Codex does: refused on every interpreter.
+               {'x': {**url, 'url': 'http://evil.example\\[::1]/mcp'}},
+               {'x': {**url, 'url': 'https://papers.example.org\\mcp'}},
+               {'x': {**url, 'url': 'http://evil.example[::1]/mcp'}}, {'x': {**url, 'url': 'http://[localhost]/mcp'}}]
         for servers in bad:
             with self.subTest(servers=servers), self.assertRaisesRegex(ValueError,
                                                                       '^native_capabilities.lab.tool_servers'):
@@ -416,6 +420,8 @@ class ToolServerSettingsTests(unittest.TestCase):
     def test_loopback_http_and_the_limits_are_accepted(self):
         for host in ('localhost', '127.0.0.1', '[::1]'):
             lab_from({'tool_servers': {'x': {'description': 'd', 'url': 'http://' + host + ':8080/mcp'}}})
+        for address in ('http://[::1]/mcp', 'http://[::1]', 'https://[2001:db8::1]:8443/mcp'):
+            lab_from({'tool_servers': {'x': {'description': 'd', 'url': address}}})
         lab_from({'tool_servers': {'s%d' % i: {'description': 'd' * 300, 'command': sys.executable,
                                                'tool_timeout_seconds': 3600} for i in range(8)}})
 

@@ -33,6 +33,7 @@ A run without the block, and a role absent from it, has everything off.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -553,13 +554,28 @@ def _is_server_url(url):
     """Whether a URL server may be reached at ``url``: ``https`` with a host, or ``http`` with a host in
     ``LOOPBACK_HOSTS``, with no user name or password.
 
-    urlsplit drops tabs and line breaks before it parses, so a URL holding them,
-    a space or another unprintable character is refused rather than checked in
-    a form other than the one stored.
+    The URL must name the same host to urlsplit, whatever its release, as to
+    Codex, which parses URLs as browsers do. So spellings they read differently
+    are refused before urlsplit sees them:
+
+    - a backslash, which browsers read as a slash and older urlsplit releases
+      as part of the host;
+    - brackets anywhere but around an IPv6 address that begins the authority
+      and is followed by a port, a path or nothing (older releases took the
+      host from a bracket wherever it stood);
+    - tabs, line breaks, spaces and other unprintable characters (urlsplit drops
+      tabs and line breaks before it parses).
     """
-    if type(url) is not str or not url.isprintable() or ' ' in url:
+    if type(url) is not str or not url.isprintable() or ' ' in url or '\\' in url:
+        return False
+    rest = url.partition('://')[2]
+    close = rest.find(']')
+    if ('[' in url or ']' in url) and (url.count('[') != 1 or url.count(']') != 1 or not rest.startswith('[')
+                                       or rest[close + 1:close + 2] not in ('', ':', '/')):
         return False
     try:
+        if rest.startswith('['):
+            ipaddress.IPv6Address(rest[1:close])    # Raises ValueError unless the brackets hold an IPv6 address.
         parts = urllib.parse.urlsplit(url)
         parts.port                                  # Raises ValueError on a port that is not a number in range.
     except ValueError:

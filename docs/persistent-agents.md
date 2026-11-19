@@ -209,7 +209,7 @@ Scientific Memory 的领域身份及经验解释继续通过 `scientific_identit
 工具服务有两种，每个只能是其中一种：
 
 - 本地服务写 `command`，由 Codex 在调用时启动。`command` 是可执行文件的绝对路径，`init` 和每次 Runtime 启动时都检查它存在、是普通文件且可执行；按写的原样保存，不解析符号链接（虚拟环境里的解释器就是符号链接，必须保持原样）。`args` 是字符串列表，`env` 是不保密的固定环境变量值，`env_from` 列出变量名，其值在调用时取自 Controller 所在进程的环境。同一个变量不能既在 `env` 又在 `env_from` 中。
-- URL 服务写 `url`，由 Codex 连接。`url` 以 `https://` 开头并带主机名；只有主机是 `localhost`、`127.0.0.1` 或 `[::1]` 时可以用 `http://`；不能带用户名或密码。`token_from` 可选，指定一个环境变量，Codex 把它的值作为 bearer token 发送。`headers` 是不保密的固定请求头，名称最多 64 个 HTTP token 字符，值为 1 到 1,024 个可打印 ASCII 字符；不能有 `Authorization`（不分大小写），token 用 `token_from` 给出。
+- URL 服务写 `url`，由 Codex 连接。`url` 以 `https://` 开头并带主机名；只有主机是 `localhost`、`127.0.0.1` 或 `[::1]` 时可以用 `http://`；不能带用户名或密码，不能含反斜杠，方括号只能括住位于开头的 IPv6 主机地址（各种 URL 解析器对其他写法读出的主机不一致）。`token_from` 可选，指定一个环境变量，Codex 把它的值作为 bearer token 发送。`headers` 是不保密的固定请求头，名称最多 64 个 HTTP token 字符，值为 1 到 1,024 个可打印 ASCII 字符；不能有 `Authorization`（不分大小写），token 用 `token_from` 给出。
 
 两种共同的规则：名称匹配 `[a-z][a-z0-9_]{0,31}` 且不以 `codex` 开头，每个角色最多 8 个；`description` 是一行 1 到 300 个字符、不全是空白；`tool_timeout_seconds` 可选，1 到 3,600 秒，没有默认值；变量名匹配 `[A-Za-z_][A-Za-z0-9_]{0,127}`。
 
