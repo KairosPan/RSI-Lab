@@ -177,7 +177,7 @@ Scientific Memory 的领域身份及经验解释继续通过 `scientific_identit
 
 ### 可读目录
 
-`readable_roots` 的每一项必须是已存在目录的绝对路径，按解析后的路径保存，重复的只保留第一次出现的位置。位于运行根目录或 Codex 配置目录（`CODEX_HOME`，默认 `~/.codex`）之内的目录会被拒绝；是否位于其中按文件身份判断，所以符号链接或改写大小写都绕不过去。目录本身就是共享临时目录（`/tmp`、`/private/tmp`、`/var/tmp`、`/private/var/tmp`）时也拒绝，位于其中的子目录可以。`init` 之后被删除的目录会使每次 Runtime 启动失败，`recover` 也包括在内，直到重新创建该目录。
+`readable_roots` 的每一项必须是已存在目录的绝对路径，按解析后的路径保存，重复的只保留第一次出现的位置。位于运行根目录或 Codex 配置目录（`CODEX_HOME`，默认 `~/.codex`）之内的目录会被拒绝。位于日常使用的 Codex 配置目录 `~/.codex`（按 `$HOME` 取）之内的目录也一律拒绝，即使 `CODEX_HOME` 指向另一个目录，错误中写明 `the everyday Codex home`：这时终端的权限配置同样禁止访问 `~/.codex`（见[Codex 命令的变化](#codex-命令的变化)），可读目录不能在其中开口子。是否位于其中按文件身份判断，所以符号链接或改写大小写都绕不过去。目录本身就是共享临时目录（`/tmp`、`/private/tmp`、`/var/tmp`、`/private/var/tmp`）时也拒绝，位于其中的子目录可以。`init` 之后被删除的目录会使每次 Runtime 启动失败，`recover` 也包括在内，直到重新创建该目录。
 
 列出哪些目录由宿主负责：评测的私有代码或答案不能放在可读目录下。可读目录的路径会写进发给该角色的请求。
 
@@ -214,7 +214,7 @@ Scientific Memory 的领域身份及经验解释继续通过 `scientific_identit
 
 两种共同的规则：名称匹配 `[a-z][a-z0-9_]{0,31}` 且不以 `codex` 开头，每个角色最多 8 个；`description` 是一行 1 到 300 个字符、不全是空白；`tool_timeout_seconds` 可选，1 到 3,600 秒，没有默认值；变量名匹配 `[A-Za-z_][A-Za-z0-9_]{0,127}`。
 
-`env_from` 和 `token_from` 只保存变量名：运行配置、Effect、请求包、调用记录、回执和命令行里都没有它们的值。回执里本地服务的 `env` 换成 `env_names`，只记变量名。调用时这样的变量没有设置或为空，调用被拒绝，Codex 不会启动。
+`env_from` 和 `token_from` 只保存变量名：运行配置、Effect、请求包、调用记录、回执和命令行里都没有它们的值，Codex 从它继承的环境里读取。回执里本地服务的 `env` 换成 `env_names`，只记变量名。调用时这样的变量没有设置或为空，调用被拒绝，Codex 不会启动：在写下任何调用文件、询问 Codex 版本之前，错误 `Native settings name environment variables that are not set: <变量名>` 按名称顺序列出这些变量。
 
 通过工具服务得到的结果和其他原生工具一样，只是线索，不是证据。
 
@@ -279,12 +279,29 @@ Codex 按 YAML 读取 front matter，内核没有 YAML 解析器。运行配置�
 
 ### Codex 命令的变化
 
-某个角色全部关闭时，命令比引入原生工具之前多两处，见下面的“Codex 版本”：`-c agents.enabled=false` 和 `--disable skill_mcp_dependency_install`。开启后：
+某个角色全部关闭时，命令比引入原生工具之前多三处：`-c agents.enabled=false` 和 `--disable skill_mcp_dependency_install`，见下面的“Codex 版本”；以及 `-c skills.include_instructions=false`。没有声明技能的角色，不论开启了哪些工具，每次调用都带最后这一项，紧跟在 `-c agents.enabled=false` 之后（开启子 agent 时紧跟在 `-c suppress_unstable_features_warning=true` 之后）。Codex 因此不向模型列出任何技能：日常 Codex 里的个人技能和 Codex 自带的技能都不出现。这改变了全部关闭的运行的命令和模型看到的内容，是“什么都不开启的运行保持不变”唯一一处有意的例外。开启后：
 
 - 网页搜索：`web_search` 设为 `"live"`。
-- 终端：不再传 `--sandbox read-only`，改用名为 `rsi_agent` 的权限配置。其中依次为：Codex 的最小平台目录集合可读；运行根目录、Codex 配置目录和本机存在的各个共享临时目录禁止访问；该会话的工作目录 `agents/<session_id>/workspace/` 可读写，但其中的 `.codex`、`.agents`、`AGENTS.md` 和 `AGENTS.override.md` 只读；每个可读目录只读。网络显式关闭。命令只继承核心环境变量，`TMPDIR` 与 `TMPPREFIX` 指向工作目录下的 `.tmp`。项目文档与 exec-policy 规则不加载（`project_doc_max_bytes=0`、`--ignore-rules`），所以模型写进工作目录的文件不会在下一轮变成指令或配置。
+- 终端：不再传 `--sandbox read-only`，改用名为 `rsi_agent` 的权限配置。其中依次为：Codex 的最小平台目录集合可读；运行根目录、Codex 配置目录和本机存在的各个共享临时目录禁止访问，调用用的 Codex 配置目录不是日常使用的 `~/.codex`（每次调用时按 `$HOME` 取，两者按解析后的路径比较）而 `~/.codex` 作为目录存在时，它也禁止访问，按解析后的路径紧跟在调用的 Codex 配置目录之后，所以在另一个 Codex 配置目录里运行的角色读不到日常 Codex 的凭证、会话和技能；该会话的工作目录 `agents/<session_id>/workspace/` 可读写，但其中的 `.codex`、`.agents`、`AGENTS.md` 和 `AGENTS.override.md` 只读；每个可读目录只读。网络显式关闭。命令只继承核心环境变量，`TMPDIR` 与 `TMPPREFIX` 指向工作目录下的 `.tmp`。项目文档与 exec-policy 规则不加载（`project_doc_max_bytes=0`、`--ignore-rules`），所以模型写进工作目录的文件不会在下一轮变成指令或配置。
 - 子 agent：深度为 1，子 agent 不能再派生；同时运行的数量不超过 `max_concurrent`；子 agent 默认使用父调用的模型和 effort。声明了角色时，每次调用前都按冻结的设置重新写出角色文件，每个角色一个：`<运行根目录>/agents/<session_id>/roles/<name>.toml`，其中只有 `name`、`description` 和 `developer_instructions`（即角色的 `instructions`）；该目录里其他的 `.toml` 文件被删除。命令按角色名的顺序为每个角色加上 `-c agents.<name>.description=…` 和 `-c agents.<name>.config_file=…`。这个目录在运行根目录之内，终端命令无权访问，Codex 自己仍读得到。角色文件写不出来时（例如目录或文件是符号链接），调用被拒绝，什么也不发送，Effect 结算为 `failed_definite`，回执标记 `never_dispatched`。
-- 始终不开启：apps、plugins、浏览器与电脑控制、图像生成、图像查看、skill 搜索、hooks、goals、sleep 工具、第二套多 agent 实现，以及让 skill 自行安装它所依赖的 MCP 服务器的功能（`skill_mcp_dependency_install`）。命令带 `--ignore-user-config`，用户配置的 MCP 服务器不会加载；事件流里出现 `mcp_tool_call` 时，调用按禁用工具失败。
+- 查看图片：`view_image` 为 `true` 时不再传 `--disable view_image`。
+- 工具服务：按名称顺序，每个服务带若干 `-c mcp_servers.<name>.…`。本地服务依次是 `command`、`args`、`env`、`env_vars`（`env_from` 的变量名），URL 服务依次是 `url`、`bearer_token_env_var`（`token_from` 的变量名）、`http_headers`；空列表、空对象和没写的项不出现。两种服务随后都有 `tool_timeout_sec`（整数秒，只在写了 `tool_timeout_seconds` 时出现）和 `default_tools_approval_mode="approve"`，没有后者 Codex 会拒绝每个没有标为只读的工具。命令行上只有变量名，没有值。上面例子里的两个服务是：
+
+  ```
+  -c mcp_servers.chem.command="/opt/tools/bin/python"
+  -c mcp_servers.chem.args=["-m","chem_server"]
+  -c mcp_servers.chem.env={"CHEM_MODE"="fast"}
+  -c mcp_servers.chem.env_vars=["CHEM_API_KEY"]
+  -c mcp_servers.chem.tool_timeout_sec=300
+  -c mcp_servers.chem.default_tools_approval_mode="approve"
+  -c mcp_servers.papers.url="https://papers.example.org/mcp"
+  -c mcp_servers.papers.bearer_token_env_var="PAPERS_TOKEN"
+  -c mcp_servers.papers.http_headers={"X-Client"="rsi-lab"}
+  -c mcp_servers.papers.default_tools_approval_mode="approve"
+  ```
+- 技能：声明了技能的角色带 `-c skills.bundled.enabled=false` 和 `-c project_root_markers=[]`，Codex 既不列出它自带的技能，也不列出工作目录之上各级文件夹里的技能；这样的角色不带 `-c skills.include_instructions=false`。这两项不取决于技能文件夹在哪里，每次调用都相同。
+- 以上各项的 `-c` 值依次为：终端、子 agent、工具服务、技能。
+- 始终不开启：apps、plugins、浏览器与电脑控制、图像生成、skill 搜索、hooks、goals、sleep 工具、第二套多 agent 实现，以及让 skill 自行安装它所依赖的 MCP 服务器的功能（`skill_mcp_dependency_install`）；图像查看只在 `view_image` 为 `true` 时开启。命令带 `--ignore-user-config`，用户自己配置的 MCP 服务器不会加载，加载的只有角色声明的工具服务。事件流里出现 `mcp_tool_call` 时，调用仍按禁用工具失败。
 
 ### Codex 版本
 
@@ -368,11 +385,11 @@ rollout 读取器只在角色设置允许时接受工具记录和压缩记录，
 
 ### 恢复与隔离
 
-从调用日志恢复时，使用 Effect 中冻结的设置；日志记录的设置与之不同的调用拒绝恢复。恢复与执行器用同一段代码结算，得到相同的结算结果。开启了原生工具、却没有保存传输结果的调用报告为未确认停止。操作员隔离暂停调用（`Controller.quarantine_interrupted_model`）对开启了任一原生工具的调用一律拒绝，因为无法证明其中没有发生工具活动。
+从调用日志恢复时，使用 Effect 中冻结的设置；日志记录的设置与之不同的调用拒绝恢复。恢复与执行器用同一段代码结算，得到相同的结算结果。开启了原生工具、却没有保存传输结果的调用报告为未确认停止。操作员隔离暂停调用（`Controller.quarantine_interrupted_model`）对开启了任一原生工具的调用一律拒绝，因为无法证明其中没有发生工具活动。隔离时重建调用的命令并与记录比对，只接受完全相同的命令；唯一的例外是在没有技能的角色都带上 `-c skills.include_instructions=false` 之前记录的调用：记录的命令恰好是重建的命令在原位置去掉这一项时，同样接受，所以这之前中断的全部关闭的调用仍然可以隔离。
 
 ### 尚不支持
 
-PABLO 宿主和文献评测脚本自己生成运行配置，目前不能开启这个块。终端联网、外部 MCP 服务器，以及前端对原生活动的展示，都不在这次改动的范围内。
+PABLO 宿主和文献评测脚本自己生成运行配置，目前不能开启这个块。终端联网、plugins、浏览器与电脑控制、账户连接器（Codex 的 apps）、图像生成、用户自己的 hooks，以及前端对原生活动的展示，都不在这次改动的范围内。
 
 ## 工作记忆更新
 

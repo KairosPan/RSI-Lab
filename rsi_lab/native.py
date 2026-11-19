@@ -335,8 +335,10 @@ def command_parts(settings, *, workspace, run_root, codex_home, model, effort, r
     ``sandbox`` replaces ``--sandbox read-only``: with the terminal on, the
     permission profile confines commands instead. ``flags`` follow
     ``--ignore-user-config``. ``config`` holds the values each passed after its
-    own ``-c``. ``enabled`` names the features that are no longer disabled.
-    The web search value is set by the caller.
+    own ``-c``: the terminal's, the sub-agents', the tool servers' and the
+    skills', in that order. ``enabled`` names the features that are no longer
+    disabled. The web search value and the switch that hides skills from a role
+    without them are set by the caller.
 
     Each declared sub-agent role adds its description and the path of its role
     file, ``<roles_dir>/<name>.toml``, after the agent limits, in name order.
@@ -347,7 +349,14 @@ def command_parts(settings, *, workspace, run_root, codex_home, model, effort, r
     to the workspace's ``.tmp``), and nothing written in the workspace becomes
     instructions, config, skills or rules on a later turn: project docs and
     rules are ignored, and the workspace's ``.codex``, ``.agents`` and
-    ``AGENTS`` files stay read-only.
+    ``AGENTS`` files stay read-only. When the everyday Codex home
+    (``everyday_codex_home``) exists as a directory and is not the call's Codex
+    home, both resolved, it is denied too, by its resolved path, right after
+    the call's Codex home. With image viewing on, the image tool is enabled.
+
+    Each tool server, in name order, is named by its ``mcp_servers.<name>``
+    values (``_server_values``). A role with skills lists neither Codex's
+    bundled skills nor skills in folders above the workspace.
     """
     settings = validate(settings)
     sandbox, flags, config, enabled = ['--sandbox', 'read-only'], [], [], set()
@@ -355,6 +364,10 @@ def command_parts(settings, *, workspace, run_root, codex_home, model, effort, r
         sandbox, flags = [], ['--ignore-rules']
         temporary = os.path.join(workspace, '.tmp')
         entries = [(':minimal', 'read'), (run_root, 'deny'), (codex_home, 'deny')]
+        # Under a separate Codex home the everyday one, with its credentials, sessions and skills, is denied as well.
+        everyday = everyday_codex_home()
+        if everyday.is_dir() and everyday.resolve() != Path(codex_home).resolve():
+            entries.append((str(everyday.resolve()), 'deny'))
         # A folder already denied as the run root or the Codex home is named once.
         entries += [(folder, 'deny') for folder in SHARED_TEMP_FOLDERS
                     if os.path.isdir(folder) and folder not in (run_root, codex_home)]
@@ -370,6 +383,8 @@ def command_parts(settings, *, workspace, run_root, codex_home, model, effort, r
                    'shell_environment_policy.set=' + toml_table(environment),
                    'project_doc_max_bytes=0']
         enabled |= {'shell_tool', 'unified_exec'}
+    if 'view_image' in settings:
+        enabled.add('view_image')
     if settings['subagents'] is not None:
         config += ['agents.max_depth=1',
                    'agents.max_concurrent_threads_per_session=' + str(settings['subagents']['max_concurrent']),
@@ -382,7 +397,37 @@ def command_parts(settings, *, workspace, run_root, codex_home, model, effort, r
             config += ['agents.' + name + '.description=' + toml_string(role['description']),
                        'agents.' + name + '.config_file=' + toml_string(os.path.join(roles_dir, name + '.toml'))]
         enabled |= {'multi_agent'}
+    for name, server in tool_servers(settings).items():
+        config += ['mcp_servers.' + name + '.' + key + '=' + value for key, value in _server_values(server)]
+    if 'skills' in settings:
+        config += ['skills.bundled.enabled=false', 'project_root_markers=[]']
     return {'sandbox': sandbox, 'flags': flags, 'config': config, 'enabled': enabled}
+
+
+def _server_values(server):
+    """The command values of one normal-form tool server as ``(key, TOML value)`` pairs, each key to follow
+    ``mcp_servers.<name>.``.
+
+    A local server gives ``command``, then ``args``, ``env`` and ``env_vars``
+    (its ``env_from``), each only when not empty; a URL server ``url``, then
+    ``bearer_token_env_var`` (its ``token_from``) when given and
+    ``http_headers`` when not empty. Both then give ``tool_timeout_sec``, a bare
+    integer, when given, and ``default_tools_approval_mode="approve"``, without
+    which Codex refuses every tool not marked read-only. Variables are named,
+    never their values.
+    """
+    if 'command' in server:
+        values = [('command', toml_string(server['command']))]
+        values += [('args', toml_array(server['args']))] if server['args'] else []
+        values += [('env', toml_table(server['env'].items()))] if server['env'] else []
+        values += [('env_vars', toml_array(server['env_from']))] if server['env_from'] else []
+    else:
+        values = [('url', toml_string(server['url']))]
+        values += [('bearer_token_env_var', toml_string(server['token_from']))] if 'token_from' in server else []
+        values += [('http_headers', toml_table(server['headers'].items()))] if server['headers'] else []
+    if 'tool_timeout_seconds' in server:
+        values.append(('tool_timeout_sec', str(server['tool_timeout_seconds'])))
+    return values + [('default_tools_approval_mode', toml_string('approve'))]
 
 
 def role_file_text(name, role):
@@ -442,23 +487,36 @@ def toml_table(pairs):
     return '{' + ','.join(toml_string(key) + '=' + toml_string(value) for key, value in pairs) + '}'
 
 
+def toml_array(items):
+    """A TOML array of the strings ``items``, in the given order."""
+    return '[' + ','.join(toml_string(item) for item in items) + ']'
+
+
+def everyday_codex_home():
+    """The owner's everyday Codex home, ``~/.codex``, read from ``HOME`` at each call; it may not exist."""
+    return Path.home() / '.codex'
+
+
 def default_codex_home():
     """The Codex home a call uses unless its session names another: ``CODEX_HOME``, else ``~/.codex``."""
-    return Path(os.environ.get('CODEX_HOME') or Path.home() / '.codex')
+    return Path(os.environ.get('CODEX_HOME') or everyday_codex_home())
 
 
 def check_roots(by_role, *, run_root, codex_home):
-    """Refuse a readable root equal to or inside the run root or the Codex home.
+    """Refuse a readable root equal to or inside the run root, the Codex home or the everyday Codex home.
 
     There the root's read entry would be more specific than the denial of
     those directories and would override it. A root that merely contains them
-    is allowed: the denial covers what lies beneath.
+    is allowed: the denial covers what lies beneath. The everyday Codex home
+    (``everyday_codex_home``) is refused even when it is not the Codex home:
+    the terminal's profile then denies it too.
 
     A root that is itself one of the existing shared temporary folders is
     refused too: it would contradict that folder's denial. A root inside one
     is allowed, as its more specific entry.
     """
-    denied = (('the run root', Path(run_root).resolve()), ('the Codex home', Path(codex_home).resolve()))
+    denied = (('the run root', Path(run_root).resolve()), ('the Codex home', Path(codex_home).resolve()),
+              ('the everyday Codex home', everyday_codex_home().resolve()))
     shared = [Path(folder) for folder in SHARED_TEMP_FOLDERS if os.path.isdir(folder)]
     for role, settings in by_role.items():
         for root in (settings['terminal'] or {}).get('readable_roots', ()):

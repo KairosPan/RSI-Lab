@@ -39,6 +39,10 @@ class NativeSettingsTests(unittest.TestCase):
         self.missing = self.root / 'missing'
         self.a_file = self.root / 'file.txt'
         self.a_file.write_text('not a directory')
+        # An empty home: check_roots looks for the everyday Codex home there, never in this machine's own home.
+        (self.root / 'home').mkdir()
+        home = mock.patch.dict(os.environ, {'HOME': str(self.root / 'home')})
+        home.start(); self.addCleanup(home.stop)
 
     def initialise(self, run_id, block):
         """A ledger holding run ``run_id`` whose config carries ``block`` as its native_capabilities."""
@@ -170,6 +174,18 @@ class NativeSettingsTests(unittest.TestCase):
         native.check_roots({**{r: native.OFF for r in native.ROLES}, 'lab': {'web_search': False,
             'terminal': {'readable_roots': [str(self.run_root.parent)]}, 'subagents': None}},
             run_root=self.run_root, codex_home=self.codex_home)
+
+    def test_a_readable_root_in_the_everyday_home_is_refused(self):
+        home = self.root / 'user'
+        (home / '.codex' / 'memories').mkdir(parents=True)
+        link = self.root / 'into-everyday'
+        link.symlink_to(home / '.codex' / 'memories', target_is_directory=True)
+        with mock.patch.dict(os.environ, {'HOME': str(home)}):
+            for root in (home / '.codex', home / '.codex' / 'memories', link):
+                with self.subTest(root=root), self.assertRaisesRegex(
+                        ValueError, '^native_capabilities.lab.terminal.readable_roots.*the everyday Codex home'):
+                    self.check_lab_roots(root)
+            self.check_lab_roots(home)                   # Containing it stays allowed: the profile denies it.
 
     def test_validate_checks_the_normal_form_without_the_filesystem(self):
         self.assertEqual(native.validate(None), native.OFF)

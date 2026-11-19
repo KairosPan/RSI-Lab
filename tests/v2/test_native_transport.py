@@ -20,16 +20,25 @@ from unittest.mock import patch
 
 from rsi_lab import native, transport
 from rsi_lab.journal import read_journal
-from tests.v2.native_fixtures import (PLAIN, R, ROLES, SEARCH, SUBAGENTS, TERMINAL, TERMINAL_AND_SEARCH,
-                                      TERMINAL_AND_SUBAGENTS, WITH_ROLES)
+from tests.v2.native_fixtures import (LOCAL_SERVER_ONLY, PLAIN, R, ROLES, SEARCH, SUBAGENTS, TERMINAL,
+                                      TERMINAL_AND_SEARCH, TERMINAL_AND_SUBAGENTS, TOOL_SERVERS, VIEW_IMAGE,
+                                      WITH_ROLES, WITH_SKILLS, WITH_TOOL_SERVERS)
 from tests.v2.test_journal_transport import THREAD, frames
 
 TODAY = ['codex', '--no-daemon', '--ask-for-approval', 'never', 'exec', '--sandbox', 'read-only', '-C', '/w',
          '--ignore-user-config', '--model', 'm', '--skip-git-repo-check', '--json', '--output-schema', '/f/schema.json',
          '-c', 'model_reasoning_effort="low"', '-c', 'web_search="disabled"',
-         '-c', 'suppress_unstable_features_warning=true', '-c', 'agents.enabled=false']
+         '-c', 'suppress_unstable_features_warning=true', '-c', 'agents.enabled=false',
+         '-c', 'skills.include_instructions=false']
 # ... followed by '--disable', X for every X in transport.DISABLED_FEATURES, then
 # '--enable', 'skip_host_skill_discovery', the thread id when resuming, and '-'.
+# The command values of TOOL_SERVERS, in server name order.
+SERVER_VALUES = [
+    'mcp_servers.chem.command="/opt/tools/bin/python"', 'mcp_servers.chem.args=["-m","chem_server"]',
+    'mcp_servers.chem.env={"CHEM_MODE"="fast"}', 'mcp_servers.chem.env_vars=["CHEM_API_KEY"]',
+    'mcp_servers.chem.tool_timeout_sec=300', 'mcp_servers.chem.default_tools_approval_mode="approve"',
+    'mcp_servers.papers.url="https://papers.example.org/mcp"', 'mcp_servers.papers.bearer_token_env_var="PAPERS_TOKEN"',
+    'mcp_servers.papers.http_headers={"X-Client"="rsi-lab"}', 'mcp_servers.papers.default_tools_approval_mode="approve"']
 
 NATIVE_STREAM = [
     {'type': 'thread.started', 'thread_id': THREAD}, {'type': 'turn.started'},
@@ -69,11 +78,19 @@ class NativeTransportTests(unittest.TestCase):
         self.workspace = self.root / 'agents' / 's' / 'workspace'
         self.real_popen = subprocess.Popen
         self.commands = []
+        # An empty home: no everyday Codex home to deny, whatever this machine's own home holds.
+        (self.root / 'home').mkdir()
+        home = patch.dict(os.environ, {'HOME': str(self.root / 'home')})
+        home.start(); self.addCleanup(home.stop)
 
     def command(self, settings, thread=None):
         session = {'provider_thread_id': thread, 'codex_home': '/home/.codex'}
         return transport._command(Path('/f'), 'm', 'low', '/r/agents/s/workspace', session,
                                   native=settings, run_root='/r')
+
+    def parts(self, settings, codex_home='/h'):
+        return native.command_parts(settings, workspace='/w', run_root='/r', codex_home=codex_home, model='m',
+                                    effort='low')
 
     def config_value(self, command, prefix):
         """The one ``-c`` value that starts with ``prefix``, without the prefix."""
@@ -309,6 +326,9 @@ class NativeTransportTests(unittest.TestCase):
             self.assertEqual(tomllib.loads('t = ' + native.toml_string(text))['t'], text)
         self.assertEqual(tomllib.loads('t = ' + native.toml_table([('a b', '"x"'), ('/c', 'd')]))['t'],
                          {'a b': '"x"', '/c': 'd'})
+        items = ['-m', 'a b', 'quote"back\\slash', 'line\nbreak', '数据', '']
+        self.assertEqual(tomllib.loads('t = ' + native.toml_array(items))['t'], items)
+        self.assertEqual(native.toml_array([]), '[]')
 
     def test_a_table_with_a_repeated_key_is_refused(self):
         with self.assertRaisesRegex(ValueError, 'repeated'):
@@ -437,17 +457,19 @@ class NativeTransportTests(unittest.TestCase):
                   '-c', 'agents.default_subagent_model="m"', '-c', 'agents.default_subagent_reasoning_effort="low"']
         tail = [part for f in transport.DISABLED_FEATURES if f != 'multi_agent' for part in ('--disable', f)] + [
             '--enable', 'skip_host_skill_discovery', '-']
+        # Sub-agents on: no agents.enabled=false, and the skills switch follows the unstable features warning.
+        head = TODAY[:-4] + ['-c', 'skills.include_instructions=false']
         # Without roles a folder for them changes nothing: the command is the one built at the base.
         for roles_dir in (None, '/r/agents/s/roles'):
             self.assertEqual(transport._command(Path('/f'), 'm', 'low', '/w', session, native=PLAIN, run_root='/r',
-                                                roles_dir=roles_dir), TODAY[:-2] + limits + tail)
+                                                roles_dir=roles_dir), head + limits + tail)
         command = transport._command(Path('/f'), 'm', 'low', '/w', session, native=WITH_ROLES, run_root='/r',
                                      roles_dir='/r/agents/s/roles')
         roles = ['-c', 'agents.challenge.description="Argues against the \\"leading\\" series."',
                  '-c', 'agents.challenge.config_file="/r/agents/s/roles/challenge.toml"',
                  '-c', 'agents.local.description="Advances the leading series."',
                  '-c', 'agents.local.config_file="/r/agents/s/roles/local.toml"']
-        self.assertEqual(command, TODAY[:-2] + limits + roles + tail)
+        self.assertEqual(command, head + limits + roles + tail)
         self.assertEqual(tomllib.loads('t = ' + self.config_value(command, 'agents.challenge.description='))['t'],
                          ROLES['challenge']['description'])
         with self.assertRaisesRegex(ValueError, 'roles_dir'):
@@ -475,6 +497,100 @@ class NativeTransportTests(unittest.TestCase):
                 self.assertFalse(self.folder.exists())
         self.assertEqual(list(elsewhere.iterdir()), [])
         self.assertFalse(roles_dir.exists())
+
+    def test_tool_servers_are_named_in_name_order(self):
+        self.assertEqual(self.parts(WITH_TOOL_SERVERS)['config'], SERVER_VALUES)
+        self.assertEqual(self.parts(WITH_TOOL_SERVERS)['sandbox'], ['--sandbox', 'read-only'])
+        command = self.command(WITH_TOOL_SERVERS)
+        for value in SERVER_VALUES + ['skills.include_instructions=false']:
+            self.assertEqual(command[command.index(value) - 1], '-c')
+        # Read as TOML, as Codex reads each -c value, they give the servers' tables; the timeout is an integer.
+        self.assertEqual(tomllib.loads('\n'.join(SERVER_VALUES)), {'mcp_servers': {
+            'chem': {'command': '/opt/tools/bin/python', 'args': ['-m', 'chem_server'], 'env': {'CHEM_MODE': 'fast'},
+                     'env_vars': ['CHEM_API_KEY'], 'tool_timeout_sec': 300, 'default_tools_approval_mode': 'approve'},
+            'papers': {'url': 'https://papers.example.org/mcp', 'bearer_token_env_var': 'PAPERS_TOKEN',
+                       'http_headers': {'X-Client': 'rsi-lab'}, 'default_tools_approval_mode': 'approve'}}})
+
+    def test_values_not_given_are_left_out(self):
+        bare = {'web_search': False, 'terminal': None, 'subagents': None, 'tool_servers': {
+            'a': {'description': 'd', 'command': '/bin/s', 'args': [], 'env': {}, 'env_from': []},
+            'b': {'description': 'd', 'url': 'http://localhost:9/mcp', 'headers': {}}}}
+        self.assertEqual(self.parts(bare)['config'], [
+            'mcp_servers.a.command="/bin/s"', 'mcp_servers.a.default_tools_approval_mode="approve"',
+            'mcp_servers.b.url="http://localhost:9/mcp"', 'mcp_servers.b.default_tools_approval_mode="approve"'])
+
+    def test_image_viewing_is_no_longer_disabled(self):
+        command = self.command(VIEW_IMAGE)
+        self.assertNotIn('view_image', command)
+        self.assertEqual(command[command.index('image_generation') - 1], '--disable')
+        self.assertEqual(self.parts(VIEW_IMAGE)['enabled'], {'shell_tool', 'unified_exec', 'view_image'})
+        without = self.command(TERMINAL)
+        self.assertEqual(without[without.index('view_image') - 1], '--disable')
+
+    def test_skills_settings_on_the_command(self):
+        self.assertEqual(self.parts(WITH_SKILLS)['config'][-2:], ['skills.bundled.enabled=false', 'project_root_markers=[]'])
+        command = self.command(WITH_SKILLS)
+        self.assertNotIn('skills.include_instructions=false', command)
+        moved = {**WITH_SKILLS, 'skills': {**WITH_SKILLS['skills'], 'root': '/elsewhere'}}
+        self.assertEqual(self.command(moved), command)                         # Nothing depends on the owner's folders.
+        for settings in (None, SEARCH, TERMINAL, PLAIN, WITH_TOOL_SERVERS):
+            self.assertIn('skills.include_instructions=false', self.command(settings))
+        # Everything in order: terminal values, sub-agent values, tool server values, skills values.
+        everything = {**WITH_SKILLS, 'subagents': {'max_concurrent': 2}, 'tool_servers': TOOL_SERVERS}
+        config = self.parts(everything)['config']
+        self.assertEqual(config[-12:], SERVER_VALUES + ['skills.bundled.enabled=false', 'project_root_markers=[]'])
+        self.assertEqual(config[-16:-12], ['agents.max_depth=1', 'agents.max_concurrent_threads_per_session=2',
+                                           'agents.default_subagent_model="m"',
+                                           'agents.default_subagent_reasoning_effort="low"'])
+        self.assertEqual(config[-17], 'project_doc_max_bytes=0')
+
+    def test_a_separate_home_also_denies_the_everyday_one(self):
+        home = self.root / 'user'; (home / '.codex').mkdir(parents=True)
+        everyday = str((home / '.codex').resolve())
+        with patch.dict(os.environ, {'HOME': str(home)}):
+            table = tomllib.loads('t = ' + self.config_value(self.command(TERMINAL), 'permissions.rsi_agent.filesystem='))['t']
+            self.assertEqual(list(table)[2:4], ['/home/.codex', everyday]); self.assertEqual(table[everyday], 'deny')
+            same = self.parts(TERMINAL, codex_home=everyday)['config']
+            self.assertEqual(sum(value.count(json.dumps(everyday)) for value in same), 1)
+            # Named through a link, the everyday home is still the call's own (both are compared resolved): it gets
+            # no second entry.
+            link = self.root / 'home-link'
+            link.symlink_to(home / '.codex', target_is_directory=True)
+            linked = self.parts(TERMINAL, codex_home=str(link))['config']
+            self.assertEqual(sum(value.count(json.dumps(everyday)) for value in linked), 0)
+            # Without the terminal there is no profile, and the everyday home is not named.
+            self.assertNotIn(everyday, ''.join(self.command(WITH_TOOL_SERVERS)))
+        with patch.dict(os.environ, {'HOME': str(self.root / 'nobody')}):
+            self.assertNotIn('nobody', ''.join(self.command(TERMINAL)))
+
+    def test_secret_values_reach_no_record_and_no_command(self):                  # Review Focus 4
+        secret = 'invented-secret-4f1c'
+        with patch.dict(os.environ, {'CHEM_API_KEY': secret, 'PAPERS_TOKEN': secret + '-url'}), \
+                patch.object(transport, 'codex_version', return_value='0.170.0'):
+            result = self.invoke(native={**LOCAL_SERVER_ONLY, 'tool_servers': TOOL_SERVERS})
+        self.assertTrue(result['protocol_valid'], result['error'])
+        for path in self.folder.rglob('*'):
+            if path.is_file():
+                self.assertNotIn(secret.encode(), path.read_bytes(), path.name)
+        self.assertFalse(any(secret in part for part in self.commands[0]))
+        self.assertIn('mcp_servers.chem.env_vars=["CHEM_API_KEY"]', self.commands[0])
+
+    def test_an_unset_or_empty_variable_refuses_before_codex_starts(self):        # Review Focus 4
+        for token in (None, ''):
+            with self.subTest(token=token), patch.dict(os.environ, {'CHEM_API_KEY': 'x'}), \
+                    patch.object(transport, 'codex_version', side_effect=AssertionError('asked')):
+                os.environ.pop('PAPERS_TOKEN', None)
+                if token is not None:
+                    os.environ['PAPERS_TOKEN'] = token
+                with self.assertRaisesRegex(ValueError, 'not set: PAPERS_TOKEN$'):
+                    self.invoke(native=WITH_TOOL_SERVERS)
+                self.assertEqual(self.commands, []); self.assertFalse(self.folder.exists())
+                self.assertFalse(self.workspace.exists())
+        with patch.dict(os.environ, {}), patch.object(transport, 'codex_version', side_effect=AssertionError('asked')):
+            for name in ('CHEM_API_KEY', 'PAPERS_TOKEN'):
+                os.environ.pop(name, None)
+            with self.assertRaisesRegex(ValueError, 'are not set: CHEM_API_KEY, PAPERS_TOKEN$'):
+                self.invoke(native=WITH_TOOL_SERVERS)
 
     def archive(self, events, invocation=None, name='archive'):
         """A call folder written before journals: ``events.jsonl`` and, unless ``None``, ``invocation.json`` text."""

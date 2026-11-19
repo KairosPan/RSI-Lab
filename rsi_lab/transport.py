@@ -31,6 +31,8 @@ DISABLED_FEATURES = (
     "multi_agent", "multi_agent_v2", "image_generation", "skill_search", "hooks",
     "view_image", "goals", "sleep_tool", "skill_mcp_dependency_install",
 )
+# The command value, after its own -c, on which Codex writes no skills list: passed for every role without skills.
+NO_SKILLS_LIST = 'skills.include_instructions=false'
 # The Codex CLI versions this kernel's command, stream audit and rollout reader were checked against with real
 # calls. Codex changes what its flags do between versions (0.170.0 stopped honouring the multi_agent features
 # as an off switch), so a call is not sent on any other version. RSI_LAB_ALLOW_CODEX_VERSION names one more
@@ -530,7 +532,8 @@ def write_role_files(roles_dir, roles):
 def _command(folder, model, effort, cwd, session, image_paths=(), native=None, run_root=None, roles_dir=None):
     # Everything off is today's command; native settings that are on need the
     # session's Codex home and the run root for the permission profile, and
-    # declared sub-agent roles the folder of their files.
+    # declared sub-agent roles the folder of their files. A role without skills,
+    # everything off included, is shown none: not the owner's, nor Codex's own.
     settings = native_tools.validate(native)
     parts = {'sandbox': ['--sandbox', 'read-only'], 'flags': [], 'config': [], 'enabled': set()}
     if native_tools.any_on(settings):
@@ -549,6 +552,8 @@ def _command(folder, model, effort, cwd, session, image_paths=(), native=None, r
     if settings['subagents'] is None:
         # From Codex 0.170.0 this, not the multi_agent features, is what takes the sub-agent tools away.
         command.extend(['-c', 'agents.enabled=false'])
+    if not native_tools.declared_skills(settings):
+        command.extend(['-c', NO_SKILLS_LIST])
     for value in parts['config']:
         command.extend(['-c', value])
     if session is None:
@@ -700,6 +705,11 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
     and the command names them by their resolved paths. Whatever about them
     cannot work raises ``ValueError`` before Codex is started.
 
+    A tool server's ``env_from`` or ``token_from`` variable that is unset or
+    empty in this process's environment raises ``ValueError``, naming the
+    variables, before anything is written or Codex is asked for its version.
+    The command and the records name such variables only, never their values.
+
     The result's ``descendants_stopped`` says whether every process seen under
     the call was stopped by its end. With the terminal on, the process table
     is sampled every ``TRACK_SECONDS`` while Codex runs, and whatever was seen
@@ -737,6 +747,11 @@ def invoke(prompt: str, schema: dict, folder: Path, model: str, effort: str, tim
         run_root = str(Path(run_root).resolve())
     if declared_roles and roles_dir is None:
         raise ValueError('Declared sub-agent roles need roles_dir, the folder of their role files')
+    # Codex reads the tool servers' variables from the environment it inherits; one unset or empty would leave a
+    # server without its secret.
+    unset = native_tools.unset_variables(settings, os.environ)
+    if unset:
+        raise ValueError('Native settings name environment variables that are not set: ' + ', '.join(unset))
     binding = _session_options(session)
     version = codex_version()
     check_codex_version(version)
