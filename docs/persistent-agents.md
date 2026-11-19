@@ -88,7 +88,7 @@
 
 其他取值会使 Runtime 拒绝启动该运行。
 
-可选的 `native_capabilities` 也写在顶层，为每个角色打开 Codex 自身的工具：网页搜索、受限终端和子 agent。它按角色分别设置，键只能是 `lab`、`meta` 和 `literature`；没有这个块，或块里没有写某个角色时，该角色全部关闭。没有这个块的运行发出的 Codex 命令、提示词和请求包与没有这项功能时逐字节相同。有这个块时，全部关闭的角色发出的 Codex 命令仍然相同；提示词和请求包只有运行配置的 hash（`decision_dependencies.config_hash` 及由它生成的 token，它们随任务数据写在提示词里）不同，因为运行配置本身不同。完整的运行配置示例见 [`examples/native-capabilities-run.json`](../examples/native-capabilities-run.json)，它在上面的模板上加了这个块，把 `model_timeout_seconds` 设为 1800、`max_effective_context_bytes` 设为 4,194,304，并为使用工具的轮次放大了预算：`model_reservation` 预约 200,000 tokens 和 1800 秒（与超时相同），`budgets.tokens` 为 20,000,000，`budgets.wall_seconds` 为 36,000。块的写法如下，其中的目录是占位符：
+可选的 `native_capabilities` 也写在顶层，为每个角色打开 Codex 自身的工具：网页搜索、受限终端和子 agent，以及[查看图片（`view_image`）、工具服务（`tool_servers`）](#工具服务与查看图片)和[技能（`skills`）](#技能)。它按角色分别设置，键只能是 `lab`、`meta` 和 `literature`；没有这个块，或块里没有写某个角色时，该角色全部关闭。没有这个块的运行发出的提示词和请求包与没有这项功能时逐字节相同；Codex 命令则多了[Codex 命令的变化](#codex-命令的变化)列出的几项：适配 Codex 0.170.0 的两项（`-c agents.enabled=false` 和 `--disable skill_mcp_dependency_install`），以及 `-c skills.include_instructions=false`。有这个块时，全部关闭的角色发出的 Codex 命令与没有这个块时相同；提示词和请求包只有运行配置的 hash（`decision_dependencies.config_hash` 及由它生成的 token，它们随任务数据写在提示词里）不同，因为运行配置本身不同。完整的运行配置示例见 [`examples/native-capabilities-run.json`](../examples/native-capabilities-run.json)，它在上面的模板上加了这个块，把 `model_timeout_seconds` 设为 1800、`max_effective_context_bytes` 设为 4,194,304，并为使用工具的轮次放大了预算：`model_reservation` 预约 200,000 tokens 和 1800 秒（与超时相同），`budgets.tokens` 为 20,000,000，`budgets.wall_seconds` 为 36,000。块的写法如下，其中的目录是占位符：
 
 ```json
 "native_capabilities": {
@@ -101,6 +101,9 @@
 - `web_search`：`true` 或 `false`，打开 Codex 的实时网页搜索。
 - `terminal`：`false`、`true` 或 `{"readable_roots": [...]}`。打开后模型可以在自己会话的工作目录里运行命令和编辑文件，不能联网；`readable_roots` 列出它另外可以只读的目录，`true` 表示没有这样的目录。
 - `subagents`：`false`、`true` 或 `{"max_concurrent": N}`。打开后模型可以在一轮内派出子 agent，`N` 是同时运行的上限，取 1 到 8 的整数，`true` 取默认值 3。对象里还可以写 `roles`，声明具名的子 agent 角色。
+- `view_image`：`true` 或 `false`，让模型查看图片文件，只在开启终端时接受，见[工具服务与查看图片](#工具服务与查看图片)。
+- `tool_servers`：Codex 在调用中可以使用的工具服务（MCP 服务器），本地启动或按 URL 连接，见[工具服务与查看图片](#工具服务与查看图片)。
+- `skills`：`{"root": "<技能文件夹的绝对路径>"}`，`init` 时冻结进运行的一组技能，只在开启终端时接受，见[技能](#技能)。
 
 `roles` 的每个键是角色名，值恰好含 `description` 和 `instructions` 两项。下面的文字是占位示例：
 
@@ -172,7 +175,7 @@ Scientific Memory 的领域身份及经验解释继续通过 `scientific_identit
 
 ## Codex 原生工具
 
-运行配置的 `native_capabilities`（写法见[运行入口](#运行入口)）为每个角色打开 Codex 自身的网页搜索、受限终端和子 agent。这些工具由 Codex 在一轮内自行调用，Controller 不逐次准入；调用结束后，系统从事件流和 rollout 记下它们做了什么，并按 Codex 自己的用量记录结算 token。已注册的科学工具不受影响，仍由 Controller 准入、执行和登记。设计与取舍见[设计文档](superpowers/specs/2026-11-17-native-codex-capabilities-design.md)。
+运行配置的 `native_capabilities`（写法见[运行入口](#运行入口)）为每个角色打开 Codex 自身的网页搜索、受限终端和子 agent，以及[查看图片（`view_image`）、工具服务（`tool_servers`）](#工具服务与查看图片)和[技能（`skills`）](#技能)。这些工具由 Codex 在一轮内自行调用，Controller 不逐次准入；调用结束后，系统从事件流和 rollout 记下它们做了什么，并按 Codex 自己的用量记录结算 token。已注册的科学工具不受影响，仍由 Controller 准入、执行和登记。设计与取舍见[设计文档](superpowers/specs/2026-11-17-native-codex-capabilities-design.md)。
 
 通过这些工具得到的内容只是线索，不是证据。命令引用的证据 ID 必须来自本轮请求；要让某项内容可以引用，仍须通过已注册能力取得并交付。
 
@@ -474,9 +477,11 @@ rollout 读取器只在角色设置允许时接受工具记录和压缩记录，
 
 所以恢复不能在另一个进程仍在执行同一调用时运行：它会终止那个调用正在使用的工具服务和终端命令。PABLO 宿主运行期间持有运行根目录下 `host.lock` 的锁，并在锁内恢复，保证了这一点。内核 CLI 的 `recover` 不取任何锁，`reconcile` 和 `run-until-wait` 也会先执行同样的恢复；宿主或另一个命令仍可能在执行这个运行的调用时，不要运行它们。操作员隔离暂停调用（`Controller.quarantine_interrupted_model`）对开启了任一原生工具的调用一律拒绝，因为无法证明其中没有发生工具活动。隔离时重建调用的命令并与记录比对，只接受完全相同的命令；唯一的例外是在没有技能的角色都带上 `-c skills.include_instructions=false` 之前记录的调用：记录的命令恰好是重建的命令在原位置去掉这一项时，同样接受，所以这之前中断的全部关闭的调用仍然可以隔离。
 
+升级内核之前，先让进行中的调用结束。旧代码派出、开始一个新 thread 的调用（会话的第一轮）由这一版本恢复时，会被技能检查报告为无效：旧代码的命令没有 `-c skills.include_instructions=false`，Codex 确实向它列出了一份技能列表。
+
 ### 尚不支持
 
-PABLO 宿主和文献评测脚本自己生成运行配置，目前不能开启这个块。终端联网、plugins、浏览器与电脑控制、账户连接器（Codex 的 apps）、图像生成、用户自己的 hooks，以及前端对原生活动的展示，都不在这次改动的范围内。
+PABLO 宿主只在 `--team` 运行中开启这个块，见 [`experiments/pablo/TEAM_V1.md`](../experiments/pablo/TEAM_V1.md)；文献评测脚本自己生成运行配置，不能开启它。终端联网、plugins、浏览器与电脑控制、账户连接器（Codex 的 apps）、图像生成、用户自己的 hooks，以及前端对原生活动的展示，都不在这次改动的范围内。
 
 ## 工作记忆更新
 
