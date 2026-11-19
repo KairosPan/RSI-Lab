@@ -48,6 +48,22 @@ class NativeSessionTests(unittest.TestCase):
     def read(self, raw, settings, **extra):
         return snapshot_from_bytes(raw, expected_thread_id=THREAD, expected_cwd=self.cwd, native=settings, **extra)
 
+    def test_tool_definitions_written_by_codex_are_read_under_any_settings(self):
+        # Codex 0.170.0 writes a thread's tool definitions into its rollout, whatever is switched on.
+        tools = frame('response_item', {'type': 'additional_tools', 'id': 'at_1', 'role': 'developer',
+                                        'tools': [{'type': 'namespace', 'name': 'functions', 'tools': []}]})
+        base = fixture(self.cwd)
+        for settings in (None, native.OFF, SEARCH, TERMINAL_AND_SUBAGENTS):
+            snapshot = self.read(base + tools, settings)
+            self.assertEqual(snapshot['prefix_bytes'], len(base + tools))
+            self.assertEqual(snapshot['observable_history_bytes'], len(base + tools))
+            self.assertEqual(snapshot['messages'], self.read(base, settings)['messages'])
+        for payload in ({'type': 'additional_tools', 'role': 'user', 'tools': []},
+                        {'type': 'additional_tools', 'role': 'developer', 'tools': 'x'},
+                        {'type': 'additional_tools', 'role': 'developer'}):
+            with self.assertRaisesRegex(ContextUnavailable, 'unsupported_tool_definitions'):
+                self.read(base + frame('response_item', payload), None)
+
     def test_tool_records_are_accepted_only_under_matching_settings(self):          # Review Focus 4
         base = fixture(self.cwd)
         cases = [(tool_call('c1', 'text(await tools.exec_command({cmd:"ls"}))'), SEARCH, True),

@@ -27,7 +27,7 @@ from tests.v2.test_journal_transport import THREAD, frames
 TODAY = ['codex', '--no-daemon', '--ask-for-approval', 'never', 'exec', '--sandbox', 'read-only', '-C', '/w',
          '--ignore-user-config', '--model', 'm', '--skip-git-repo-check', '--json', '--output-schema', '/f/schema.json',
          '-c', 'model_reasoning_effort="low"', '-c', 'web_search="disabled"',
-         '-c', 'suppress_unstable_features_warning=true']
+         '-c', 'suppress_unstable_features_warning=true', '-c', 'agents.enabled=false']
 # ... followed by '--disable', X for every X in transport.DISABLED_FEATURES, then
 # '--enable', 'skip_host_skill_discovery', the thread id when resuming, and '-'.
 
@@ -140,6 +140,64 @@ class NativeTransportTests(unittest.TestCase):
             '--enable', 'skip_host_skill_discovery', '-']
         for settings in (None, native.OFF):
             self.assertEqual(transport._command(Path('/f'), 'm', 'low', '/w', session, native=settings, run_root='/r'), expected)
+
+    def test_sub_agents_are_switched_off_by_the_agents_setting_unless_they_are_on(self):
+        # Codex 0.170.0 ignores the multi_agent features as an off switch.
+        for settings in (None, SEARCH, TERMINAL, TERMINAL_AND_SEARCH):
+            command = transport._command(Path('/f'), 'm', 'low', '/w', {'provider_thread_id': None, 'codex_home': '/h'},
+                                         native=settings, run_root='/r')
+            self.assertEqual(command[command.index('agents.enabled=false') - 1], '-c')
+        for settings in (SUBAGENTS, TERMINAL_AND_SUBAGENTS):
+            command = transport._command(Path('/f'), 'm', 'low', '/w', {'provider_thread_id': None, 'codex_home': '/h'},
+                                         native=settings, run_root='/r')
+            self.assertNotIn('agents.enabled=false', command)
+
+    def test_a_skill_may_not_install_the_tool_servers_it_names(self):
+        self.assertIn('skill_mcp_dependency_install', transport.DISABLED_FEATURES)
+
+    def test_a_codex_version_that_was_not_checked_is_refused(self):
+        transport.check_codex_version(None)
+        for version in transport.SUPPORTED_CODEX_VERSIONS:
+            transport.check_codex_version(version)
+        with patch.dict('os.environ', {}, clear=False):
+            os.environ.pop('RSI_LAB_ALLOW_CODEX_VERSION', None)
+            with self.assertRaisesRegex(ValueError, 'Codex CLI 0.163.0 is not a version'):
+                transport.check_codex_version('0.163.0')
+            os.environ['RSI_LAB_ALLOW_CODEX_VERSION'] = '0.163.0'
+            transport.check_codex_version('0.163.0')
+            with self.assertRaises(ValueError):
+                transport.check_codex_version('0.999.0')
+
+    def test_the_codex_version_is_read_from_what_the_cli_prints(self):
+        def cli(text, status=0):
+            code = 'import sys; sys.stdout.write(' + repr(text) + '); sys.exit(' + str(status) + ')'
+            return lambda command, **kwargs: subprocess.Popen([sys.executable, '-c', code], **kwargs)
+        for text, status, expected in (('codex-cli 0.170.0\n', 0, '0.170.0'), ('codex-cli 0.171.0-alpha.2\n', 0, '0.171.0-alpha.2'),
+                                       ('codex-cli 0.170.0\n', 1, None), ('something else 1.2.3\n', 0, None), ('', 0, None)):
+            with self.subTest(text=text, status=status), patch.object(transport, '_POPEN', cli(text, status)):
+                self.assertEqual(transport.codex_version(), expected)
+        with patch.object(transport, '_POPEN', side_effect=FileNotFoundError('codex')):
+            self.assertIsNone(transport.codex_version())
+
+    def test_a_call_records_the_codex_version_it_ran_on(self):
+        wire = ''.join(json.dumps(event) + '\n' for event in frames(thread=THREAD)).encode()
+        code = 'import sys; sys.stdin.read(); sys.stdout.buffer.write(' + repr(wire) + '); sys.stdout.buffer.flush()'
+        real_popen = subprocess.Popen
+        with tempfile.TemporaryDirectory() as tmp, patch.object(transport, 'codex_version', return_value='0.170.0'), \
+                patch.object(transport.subprocess, 'Popen', side_effect=lambda command, **kwargs:
+                             real_popen([sys.executable, '-u', '-c', code], **kwargs)):
+            folder = Path(tmp) / 'call'
+            result = transport.invoke('Inspect this task', {'type': 'object'}, folder, 'm', 'low', timeout=10)
+            self.assertEqual(result['codex_version'], '0.170.0')
+            self.assertEqual(json.loads((folder / 'invocation.json').read_text())['codex_version'], '0.170.0')
+            self.assertEqual(json.loads((folder / 'transport_result.json').read_text())['codex_version'], '0.170.0')
+
+    def test_invoke_sends_nothing_on_an_unchecked_codex_version(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(transport, 'codex_version', return_value='0.1.0'), \
+                patch.object(subprocess, 'Popen', side_effect=AssertionError('Codex must not be started')):
+            with self.assertRaisesRegex(ValueError, 'not a version this kernel was checked against'):
+                transport.invoke('p', {'type': 'object'}, Path(tmp) / 'call', 'm', 'low')
+            self.assertFalse((Path(tmp) / 'call').exists())
 
     def test_search_only_keeps_the_sandbox_and_the_disabled_shell(self):
         command = self.command({'web_search': True, 'terminal': None, 'subagents': None})
@@ -382,14 +440,14 @@ class NativeTransportTests(unittest.TestCase):
         # Without roles a folder for them changes nothing: the command is the one built at the base.
         for roles_dir in (None, '/r/agents/s/roles'):
             self.assertEqual(transport._command(Path('/f'), 'm', 'low', '/w', session, native=PLAIN, run_root='/r',
-                                                roles_dir=roles_dir), TODAY + limits + tail)
+                                                roles_dir=roles_dir), TODAY[:-2] + limits + tail)
         command = transport._command(Path('/f'), 'm', 'low', '/w', session, native=WITH_ROLES, run_root='/r',
                                      roles_dir='/r/agents/s/roles')
         roles = ['-c', 'agents.challenge.description="Argues against the \\"leading\\" series."',
                  '-c', 'agents.challenge.config_file="/r/agents/s/roles/challenge.toml"',
                  '-c', 'agents.local.description="Advances the leading series."',
                  '-c', 'agents.local.config_file="/r/agents/s/roles/local.toml"']
-        self.assertEqual(command, TODAY + limits + roles + tail)
+        self.assertEqual(command, TODAY[:-2] + limits + roles + tail)
         self.assertEqual(tomllib.loads('t = ' + self.config_value(command, 'agents.challenge.description='))['t'],
                          ROLES['challenge']['description'])
         with self.assertRaisesRegex(ValueError, 'roles_dir'):

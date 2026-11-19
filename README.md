@@ -49,7 +49,7 @@ python3 -m rsi_lab --root runs/tabular-demo --run tabular-portability status
 4. 用 `lab-start` 提交初始 Lab 工作，再用 `run-until-wait` 推进已注册的 Lab/Meta/工具处理器。
 5. 重启后使用相同运行身份执行 `recover`，先核对已登记结果、费用与未知调用，再继续就绪工作。会话重建保留工作记忆，不重做已完成工具动作。
 
-真实模型运行需要自行配置 Codex CLI 与模型访问。配置模板见[持久 Agent 使用说明](docs/persistent-agents.md)，环境与文件管理见[安装与运行](docs/publication-and-reproduction.md)。
+真实模型运行需要自行配置 Codex CLI 与模型访问。内核只在实测过的 Codex CLI 版本上发起调用，目前是 0.170.0，其他版本会被拒绝并说明原因。配置模板见[持久 Agent 使用说明](docs/persistent-agents.md)，环境与文件管理见[安装与运行](docs/publication-and-reproduction.md)。
 
 文献阅读可使用 [运行配置](examples/literature-reading-run.json) 与 [工具配置](examples/literature-tools.json)。前者分别限制单次文本输入、持久会话历史和图片容量，适用于连续的请求页面、看图与回传结果；先按任务修改目标并在工具配置登记本地论文。初始化本身不调用模型：
 

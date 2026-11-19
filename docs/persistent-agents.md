@@ -50,7 +50,7 @@
 
 ## 运行入口
 
-先配置已登录的 Codex CLI、明确的模型/effort、运行预算、任务输入和受信适配器。真实模型调用要求运行配置的 `execution_mode` 为 `live` 或 `role_recall`；合成测试不需要模型凭证。
+先配置已登录的 Codex CLI、明确的模型/effort、运行预算、任务输入和受信适配器。Codex CLI 必须是内核实测过的版本，见“Codex 版本”。真实模型调用要求运行配置的 `execution_mode` 为 `live` 或 `role_recall`；合成测试不需要模型凭证。
 
 以下是最小运行配置模板。先把 `YOUR_MODEL_ID` 改为自己账户可用且任务明确选择的模型，并将 `goal` 改为实际任务；预算数值只是工程示例，不代表某项科研任务足够。将文件保存为 `runs/my-task/run-config.json`，该目录已被 Git 忽略。
 
@@ -185,12 +185,25 @@ Scientific Memory 的领域身份及经验解释继续通过 `scientific_identit
 
 ### Codex 命令的变化
 
-某个角色全部关闭时，命令与以前逐字节相同。开启后：
+某个角色全部关闭时，命令比引入原生工具之前多两处，见下面的“Codex 版本”：`-c agents.enabled=false` 和 `--disable skill_mcp_dependency_install`。开启后：
 
 - 网页搜索：`web_search` 设为 `"live"`。
 - 终端：不再传 `--sandbox read-only`，改用名为 `rsi_agent` 的权限配置。其中依次为：Codex 的最小平台目录集合可读；运行根目录、Codex 配置目录和本机存在的各个共享临时目录禁止访问；该会话的工作目录 `agents/<session_id>/workspace/` 可读写，但其中的 `.codex`、`.agents`、`AGENTS.md` 和 `AGENTS.override.md` 只读；每个可读目录只读。网络显式关闭。命令只继承核心环境变量，`TMPDIR` 与 `TMPPREFIX` 指向工作目录下的 `.tmp`。项目文档与 exec-policy 规则不加载（`project_doc_max_bytes=0`、`--ignore-rules`），所以模型写进工作目录的文件不会在下一轮变成指令或配置。
 - 子 agent：深度为 1，子 agent 不能再派生；同时运行的数量不超过 `max_concurrent`；子 agent 默认使用父调用的模型和 effort。声明了角色时，每次调用前都按冻结的设置重新写出角色文件，每个角色一个：`<运行根目录>/agents/<session_id>/roles/<name>.toml`，其中只有 `name`、`description` 和 `developer_instructions`（即角色的 `instructions`）；该目录里其他的 `.toml` 文件被删除。命令按角色名的顺序为每个角色加上 `-c agents.<name>.description=…` 和 `-c agents.<name>.config_file=…`。这个目录在运行根目录之内，终端命令无权访问，Codex 自己仍读得到。角色文件写不出来时（例如目录或文件是符号链接），调用被拒绝，什么也不发送，Effect 结算为 `failed_definite`，回执标记 `never_dispatched`。
-- 始终不开启：apps、plugins、浏览器与电脑控制、图像生成、图像查看、skill 搜索、hooks、goals、sleep 工具和第二套多 agent 实现。命令带 `--ignore-user-config`，用户配置的 MCP 服务器不会加载；事件流里出现 `mcp_tool_call` 时，调用按禁用工具失败。
+- 始终不开启：apps、plugins、浏览器与电脑控制、图像生成、图像查看、skill 搜索、hooks、goals、sleep 工具、第二套多 agent 实现，以及让 skill 自行安装它所依赖的 MCP 服务器的功能（`skill_mcp_dependency_install`）。命令带 `--ignore-user-config`，用户配置的 MCP 服务器不会加载；事件流里出现 `mcp_tool_call` 时，调用按禁用工具失败。
+
+### Codex 版本
+
+内核的命令、事件流审计和 rollout 读取器只在实测过的 Codex CLI 版本上使用，目前是 0.170.0（`transport.SUPPORTED_CODEX_VERSIONS`）。每次调用之前，内核运行 `codex --version` 读出版本，写进 `invocation.json` 和 `transport_result.json` 的 `codex_version`。版本不在列表中时，调用被拒绝，什么也不发送，错误信息给出读到的版本。读不出版本时（例如没有安装 CLI）不在这里拒绝，随后启动 Codex 会自行失败。
+
+这样做是因为 Codex 会自行升级，而同一个参数在不同版本上的含义会变。2026-11-19 的实测中，0.163.0 升级到 0.170.0 之后有两处变化：
+
+- `--disable multi_agent` 和 `--disable multi_agent_v2` 不再去掉子 agent 工具，没有开启子 agent 的角色也会拿到它们和一段多 agent 说明。去掉它们的是 `-c agents.enabled=false`，所以角色没有开启子 agent 时命令带这一项。
+- 每个 thread 的 rollout 里多了一种记录，`response_item` 中类型为 `additional_tools` 的条目，写的是该 thread 的工具定义，工具有变化时再写一次。读取器接受 `role` 为 `developer`、`tools` 为列表的这种记录，把它计入历史字节，不赋予任何读取权限；形状不符的仍然拒绝。
+
+要在未实测的版本上运行，把环境变量 `RSI_LAB_ALLOW_CODEX_VERSION` 设为那个版本号，表示接受它未经检查。升级内核支持的版本之前，先让进行中的运行结束：恢复一次被中断的调用时要重建它的命令并与记录比对，命令变了就对不上。
+
+即使全部关闭，0.170.0 仍会向模型提供 code-mode 的 `exec` 工具和向用户提问的工具，`--disable shell_tool` 和 `--disable unified_exec` 去不掉它们。模型若调用它们，rollout 里会出现该角色设置不允许的工具记录，读取器拒绝，带会话的调用以无效告终。
 
 ### 请求的变化
 
@@ -225,7 +238,7 @@ Scientific Memory 的领域身份及经验解释继续通过 `scientific_identit
 
 rollout 读取器只在角色设置允许时接受工具记录和压缩记录，其余仍按以前拒绝。存在带替换历史（`replacement_history`）的 `compacted` 记录时，会话历史从最后一条这样的记录起计入容量，另加在它之前的 `session_meta` 记录和最后一条完整的 `world_state` 记录：压缩替换的是对话，不是会话说明和环境。上下文清单的 `history_token_method` 这时标为 `rollout-bytes-since-last-compaction-estimate-v1`；否则仍按整个文件计算。使用工具会让 rollout 很快变大，开启原生工具的运行应把 `max_effective_context_bytes` 设得足够大，让 Codex 自己的压缩先于这项容量检查发生；否则 Work 会因容量阻塞，需要用 `agent-rebuild` 换新会话。示例设为 4 MiB。有角色开启了原生工具、而实际的容量上限（`max_effective_context_bytes`，没有时取 `max_input_bytes`，再没有时为 131,072）低于 1,048,576 字节时，`features` 输出的 `native_warnings` 会给出一条提醒；否则它是空列表。
 
-读取器接受的 rollout 记录种类来自 2026-11-17 用模型 `gpt-6.1-sol` 和 Codex CLI 0.163.0 做的实测：这个模型的搜索和终端调用都经过 code-mode 的 `exec` 工具。直接调用工具的模型会写出别的记录（例如 `function_call`、`web_search_call` 或 `local_shell_call`），读取器会拒绝它们，这样的每一轮都会以无效告终。开始一次较长的原生运行之前，先用该运行自己的模型做一次简短的试调用，确认它写出的记录能被接受。
+读取器接受的 rollout 记录种类来自 2026-11-17 用模型 `gpt-6.1-sol` 和 Codex CLI 0.163.0 做的实测，2026-11-19 又在 0.170.0 上用同一模型复查过：这个模型的搜索和终端调用都经过 code-mode 的 `exec` 工具。直接调用工具的模型会写出别的记录（例如 `function_call`、`web_search_call` 或 `local_shell_call`），读取器会拒绝它们，这样的每一轮都会以无效告终。开始一次较长的原生运行之前，先用该运行自己的模型做一次简短的试调用，确认它写出的记录能被接受。
 
 ### Token 与其他资源
 
