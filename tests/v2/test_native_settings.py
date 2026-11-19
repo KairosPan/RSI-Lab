@@ -551,6 +551,9 @@ class SkillSettingsTests(unittest.TestCase):
         def only_hidden(root):
             shutil.rmtree(root / 'plot-check')
             (root / '.DS_Store').write_bytes(b'x')
+        def nested_skill(root):
+            (root / 'plot-check' / 'examples' / 'x').mkdir(parents=True)
+            (root / 'plot-check' / 'examples' / 'x' / 'SKILL.md').write_bytes(skill_text('x'))
         cases = {
             'an empty folder': lambda root: shutil.rmtree(root / 'plot-check'),
             'only hidden entries': only_hidden,
@@ -563,6 +566,7 @@ class SkillSettingsTests(unittest.TestCase):
             'no name in the front matter': front(b'name: plot-check\n', b''),
             'a name given twice': front(b'name: plot-check\n', b'name: plot-check\nname: plot-check\n'),
             'no SKILL.md': lambda root: plot(root).unlink(),
+            'a SKILL.md below the top of a skill': nested_skill,
             'no front matter': lambda root: plot(root).write_bytes(b'Open the plot.\n'),
             'unclosed front matter': lambda root: plot(root).write_bytes(SKILL_MD.replace(b'\n---\nOpen', b'\nOpen')),
             'SKILL.md not UTF-8': front(b'reported.', b'reported \xff.'),
@@ -620,6 +624,45 @@ class SkillSettingsTests(unittest.TestCase):
         self.assertFalse([path for path in files if '.DS_Store' in path or '.git' in path or '.cache' in path])
         self.assertEqual(native.read_skills(str(root))['plot-check']['files']['scripts/check.py'], CHECK_PY)
 
+    def test_front_matter_values_yaml_could_read_otherwise_are_refused(self):
+        # Codex reads the front matter as YAML: each of these would give it another name or description, or none.
+        descriptions = [
+            'Checks: axes.', 'Checks axes # soon', 'Checks axes\t# soon', 'Checks axes:',     # a key, a comment
+            *[mark + 'Checks axes' for mark in '[]{}*&!@%`#,'],                              # reserved first characters
+            '- Checks axes', '? Checks axes', ': Checks axes', '-',                           # a sequence, a key
+            '"Checks axes', "'Checks axes", '"Checks" axes',                                  # an unbalanced quote
+            '"Checks \\ axes"', '"Checks \\"x\\" axes"', '"Checks "x" axes"', "'It''s a check'",  # escapes in quotes
+            '42', '1.5e3', '0x1F', '.inf', 'true', 'False', 'null', '~',                      # not text
+            'Checks a plot\n  before it is reported.',                                        # continued on a line
+            'Checks a plot\n\n\tbefore it is reported.']
+        for index, description in enumerate(descriptions):
+            root = skill_folder(self.tmp / ('case-%02d' % index))
+            (root / 'plot-check' / 'SKILL.md').write_bytes(skill_text('plot-check', description))
+            with self.subTest(description=description), self.assertRaisesRegex(
+                    ValueError, r'^native_capabilities\.lab\.skills\.plot-check\.SKILL\.md front matter'):
+                self.lab_skills(str(root))
+        root = self.tmp / 'null'
+        root.mkdir()
+        add_skill(root, 'null')                                                    # name: null is YAML's null
+        with self.assertRaisesRegex(ValueError, r'^native_capabilities\.lab\.skills\.null\.SKILL\.md front matter'):
+            self.lab_skills(str(root))
+
+    def test_front_matter_values_yaml_reads_as_written_are_accepted(self):
+        root = skill_folder(self.tmp / 'skills')
+        expected = {'"Checks: axes."': 'Checks: axes.', "'Checks # axes'": 'Checks # axes',
+                    "'Checks \\ axes'": 'Checks \\ axes', '"null"': 'null', 'Checks a plot, then its axes.': None,
+                    "It's a check of C# code, ratio 1:2, x - y, 100% sure.": None, 'v1.5 of the check': None}
+        for index, description in enumerate(expected):
+            add_skill(root, 's%02d' % index, skill_text('s%02d' % index, description))
+        add_skill(root, 'null', skill_text('"null"'))
+        add_skill(root, 'with-metadata', b'---\nname: with-metadata\ndescription: Checks a plot.\nmetadata:\n'
+                                         b'  short-description: "Plots: checked"\n\nlicense: MIT\n---\nUse it.\n')
+        frozen = self.lab_skills(str(root))['frozen']
+        for index, (description, read) in enumerate(expected.items()):
+            self.assertEqual(frozen['s%02d' % index]['description'], read or description)
+        self.assertEqual(frozen['null']['description'], PLOT_CHECK['description'])
+        self.assertEqual(frozen['with-metadata']['description'], 'Checks a plot.')
+
     def test_the_frozen_form_is_checked_without_the_filesystem(self):
         self.assertEqual(native.validate(WITH_SKILLS), WITH_SKILLS)          # The root need not exist.
         other = {'description': 'Another.', 'files': {'scripts/z.py': sha(b'z'), 'SKILL.md': sha(b'a')}}
@@ -645,6 +688,7 @@ class SkillSettingsTests(unittest.TestCase):
                with_skill(description='d' * 301), with_skill(description=7),
                with_skill(files={}), with_skill(files=[]), with_skill(files={'scripts/check.py': sha(CHECK_PY)}),
                with_files(**{'f%02d' % i: sha(b'x') for i in range(15)}),
+               with_files(**{'examples/x/SKILL.md': sha(b'x')}),
                *[with_files(**{path: sha(b'x')}) for path in ('../x', '/abs', 'a//b', './x', '.hidden', 'a/.git/x',
                                                               'a/', 'a/..', '')],
                with_files(**{'x': sha(b'x').upper()}), with_files(**{'x': sha(b'x')[:63]}), with_files(**{'x': 7})]

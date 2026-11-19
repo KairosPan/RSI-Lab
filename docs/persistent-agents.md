@@ -247,13 +247,21 @@ description: Checks a plot before it is reported.
 Open the plot and check its axes and units.
 ```
 
-front matter 中以 `name:` 和 `description:` 开头的行按 `key: value` 读取：值去掉首尾空白，再去掉一对首尾相同的引号（所以 `description: "Checks: axes."` 读作 `Checks: axes.`）；每个键只能出现一次，其余各行不读取。`name` 必须等于子文件夹的名称。`description` 是一行 1 到 300 个字符、不全是空白，不能以 `|` 或 `>` 开头（YAML 的多行写法）。
+front matter 中以 `name:` 或 `description:` 开头、冒号后紧跟空格、制表符或行尾的行，按 `key: value` 读取：值去掉首尾空白，两端是一对相同的引号时再去掉这对引号（所以 `description: "Checks: axes."` 读作 `Checks: axes.`）。每个键只能出现一次，并且只能写在一行内：紧跟其后的缩进行（YAML 会把它接到值上）被拒绝。其余各行不读取。`name` 必须等于子文件夹的名称。`description` 是一行 1 到 300 个字符、不全是空白，不能以 `|` 或 `>` 开头（YAML 的多行写法）。
+
+Codex 按 YAML 读取 front matter，内核没有 YAML 解析器。运行配置在 `init` 之后不能更改，而 Codex 列出的技能与声明的不符时调用无效，所以凡是 YAML 可能读成别的样子的写法，`init` 一律拒绝：
+
+- 不加引号的值：含 `: ` 或 ` #`（YAML 的键分隔与注释），以 `:` 结尾，以 `,[]{}#&*!|>'"%@` 或反引号之一开头，以 `-`、`?` 或 `:` 加空格开头，或者 YAML 会读成 null、布尔值或数字（例如 `null`、`true`、`42`；名为 `null` 的技能也因此要写 `name: "null"`）。这样的值加上引号即可，例如 `description: "Checks: axes."`。
+- 加了引号的值：双引号里不能有 `\` 或 `"`，单引号里不能有 `'`，YAML 会把它们读作转义。换一种引号，或改写这段文字。
+
+内核不读取的那些 front matter 行仍然可能不是合法的 YAML，这时 Codex 读不出这个技能；每次调用之后的检查会报告这种情况。
 
 限制：
 
 - 每个角色 1 到 16 个技能；空文件夹被拒绝。
 - 技能名称（即子文件夹名称）匹配 `[a-z][a-z0-9_-]{0,31}`。文件夹的顶层只能是技能子文件夹，不能有普通文件。
 - 每个技能最多 16 个文件，合计不超过 262,144 字节，`SKILL.md` 也计在内。
+- `SKILL.md` 只能在技能子文件夹的顶层；下级目录里名为 `SKILL.md` 的文件被拒绝，因为 Codex 会把它当作另一个技能列出。
 - 只能是普通文件和目录；`root` 之下任何位置出现符号链接都被拒绝，命名管道之类的特殊文件同样。
 - 名称以 `.` 开头的项在每一层都被跳过，不读取、不计数、不保存，例如 Finder 的 `.DS_Store` 或 `.git`。
 

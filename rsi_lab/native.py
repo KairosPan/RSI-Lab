@@ -89,6 +89,13 @@ MAX_SKILL_BYTES = 262144
 SKILL_FILE = 'SKILL.md'
 SKILL_DESCRIPTION_RULE = ('one line of 1 to ' + str(MAX_DESCRIPTION) + ' characters, not blank and not beginning '
                           'with | or >')
+# Codex reads a SKILL.md front matter as YAML; the kernel reads only its name and description lines, and refuses an
+# unquoted value YAML would read otherwise: one beginning with a character YAML reserves, holding a colon that ends a
+# key or a hash that begins a comment, or one YAML reads as null, a boolean or a number.
+YAML_RESERVED = ',[]{}#&*!|>\'"%@`'
+YAML_SEPARATOR = re.compile(r':(\s|$)|\s#')
+YAML_NOT_TEXT = re.compile(r'~|null|true|false|[-+]?(\.[0-9]+|[0-9][0-9_]*(\.[0-9_]*)?)(e[-+]?[0-9]+)?'
+                           r'|0x[0-9a-f_]+|0o[0-7_]+|[-+]?\.inf|\.nan', re.IGNORECASE)
 SHA256 = re.compile('[0-9a-f]{64}')
 BLOCK_REFUSAL = 'native_capabilities must be an object keyed by lab, meta or literature'
 # Shared temporary folders the terminal's commands may neither read nor write;
@@ -174,9 +181,9 @@ def read_skills(root, where='native_capabilities.skills'):
     ``root`` is the absolute path of an existing directory. Every entry whose
     name begins with ``.`` is skipped, at every level. The others at the top are
     1 to ``MAX_SKILLS`` directories named by ``SKILL_NAME``, each holding
-    ``SKILL.md`` and any supporting files: regular files only, at most
-    ``MAX_SKILL_FILES`` of them and ``MAX_SKILL_BYTES`` bytes in all, with no
-    symbolic link anywhere. ``SKILL.md`` begins with front matter whose ``name``
+    ``SKILL.md`` at its top and nowhere else, and any supporting files:
+    regular files only, at most ``MAX_SKILL_FILES`` of them and
+    ``MAX_SKILL_BYTES`` bytes in all, with no symbolic link anywhere. ``SKILL.md`` begins with front matter whose ``name``
     is the folder's and whose ``description`` ``_is_skill_description`` accepts
     (``_front_matter``). Skills are in name order, files in path order, each
     path relative with ``/`` between its parts.
@@ -748,8 +755,10 @@ def _skills(skills, where):
     path, no skill or more than ``MAX_SKILLS``, a name ``SKILL_NAME`` does not
     match in full, a description ``_is_skill_description`` refuses, and files
     that do not include ``SKILL.md`` or number more than ``MAX_SKILL_FILES``,
-    whose paths ``_is_skill_path`` refuses or whose hashes are not 64 lowercase
-    hexadecimal characters. Sizes are checked only when the folder is read.
+    whose paths ``_is_skill_path`` refuses, that hold a ``SKILL.md`` below the
+    skill's top, which Codex would list as another skill, or whose hashes are
+    not 64 lowercase hexadecimal characters. Sizes are checked only when the
+    folder is read.
     """
     if type(skills) is not dict or 'root' not in skills or set(skills) - {'root', 'frozen'}:
         raise ValueError(where + ' must be an object holding root, the absolute path of the skills folder')
@@ -776,6 +785,8 @@ def _skills(skills, where):
             if not _is_skill_path(path):
                 raise ValueError(skill_where + '.files paths must be relative, with no empty part and no part '
                                  'beginning with .: ' + repr(path))
+            if path != SKILL_FILE and path.rpartition('/')[2] == SKILL_FILE:
+                raise ValueError(skill_where + '.files may hold ' + SKILL_FILE + ' only at the top: ' + repr(path))
             if type(sha256) is not str or not SHA256.fullmatch(sha256):
                 raise ValueError(skill_where + '.files.' + path + ' must be a SHA-256 of 64 lowercase hexadecimal '
                                  'characters')
@@ -803,7 +814,8 @@ def _skill_files(folder, where):
     """The files of one skill folder by relative path, in path order, each read in full.
 
     Entries whose names begin with ``.`` are skipped. A symbolic link, anything
-    that is neither a regular file nor a directory, more than
+    that is neither a regular file nor a directory, a ``SKILL.md`` below the
+    top (Codex lists every ``SKILL.md`` it finds as a skill), more than
     ``MAX_SKILL_FILES`` files or more than ``MAX_SKILL_BYTES`` bytes is refused.
     No file is read beyond the bytes left.
     """
@@ -820,6 +832,8 @@ def _skill_files(folder, where):
                 if entry.is_dir(follow_symlinks=False):
                     pending.append(path + '/')
                 elif entry.is_file(follow_symlinks=False):
+                    if prefix and entry.name == SKILL_FILE:
+                        raise ValueError(where + ' may hold ' + SKILL_FILE + ' only at its top: ' + repr(path))
                     paths.append(path)
                 else:
                     raise ValueError(where + ' may hold only regular files and folders: ' + repr(path))
@@ -839,32 +853,61 @@ def _front_matter(raw, name, where):
     """The description the front matter of a skill's ``SKILL.md`` gives, checked; its ``name`` must be ``name``.
 
     The file begins with a line ``---`` and its front matter ends at the next.
-    The ``name`` and ``description`` lines in it are read as ``key: value``:
-    the value stripped and one pair of matching surrounding quotes removed.
-    Each may be given once.
+    A ``name`` or ``description`` line begins with the key and a colon followed
+    by a space, a tab or the end of the line; ``_yaml_text`` reads its value.
+    Each may be given once, on one line: an indented line after it, which YAML
+    would join to the value, is refused. Other lines are not read.
     """
+    where += '.' + SKILL_FILE
     try:
         lines = raw.decode('utf-8').split('\n')
     except UnicodeDecodeError:
-        raise ValueError(where + '.' + SKILL_FILE + ' must be UTF-8 text') from None
+        raise ValueError(where + ' must be UTF-8 text') from None
     ends = [index for index, line in enumerate(lines) if line.strip() == '---']
     if ends[:1] != [0] or len(ends) < 2:
-        raise ValueError(where + '.' + SKILL_FILE + ' must begin with front matter between two lines ---')
-    values = {}
+        raise ValueError(where + ' must begin with front matter between two lines ---')
+    values, last = {}, None
     for line in lines[1:ends[1]]:
+        if not line.strip():
+            continue
+        if line[0] in ' \t':
+            if last is not None:
+                raise ValueError(where + ' front matter gives ' + last + ' on more than one line')
+            continue
         key, colon, value = line.partition(':')
-        if key not in ('name', 'description') or not colon or value[:1] not in ('', ' ', '\t'):
+        last = key if key in ('name', 'description') and colon and value[:1] in ('', ' ', '\t') else None
+        if last is None:
             continue
         if key in values:
-            raise ValueError(where + '.' + SKILL_FILE + ' front matter gives ' + key + ' more than once')
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in '"\'':
-            value = value[1:-1]
-        values[key] = value
+            raise ValueError(where + ' front matter gives ' + key + ' more than once')
+        values[key] = _yaml_text(key, value.strip(), where)
     if values.get('name') != name:
-        raise ValueError(where + '.' + SKILL_FILE + ' front matter must give the name ' + name
-                         + ', the name of its folder')
+        raise ValueError(where + ' front matter must give the name ' + name + ', the name of its folder')
     if not _is_skill_description(values.get('description')):
-        raise ValueError(where + '.' + SKILL_FILE + ' front matter must give a description that is '
-                         + SKILL_DESCRIPTION_RULE)
+        raise ValueError(where + ' front matter must give a description that is ' + SKILL_DESCRIPTION_RULE)
     return values['description']
+
+
+def _yaml_text(key, value, where):
+    """The text YAML reads from ``value``, the stripped value of a front matter line ``key: value``.
+
+    One pair of matching surrounding quotes is removed. What YAML could read
+    otherwise is refused: inside double quotes a backslash or a double quote,
+    inside single quotes a single quote; unquoted, a value that begins with one
+    of ``YAML_RESERVED`` or with ``-``, ``?`` or ``:`` and then a space or
+    nothing, that ``YAML_SEPARATOR`` finds a colon or a comment in, or that
+    YAML reads as null, a boolean or a number (``YAML_NOT_TEXT``).
+    """
+    quote = value[:1]
+    if len(value) >= 2 and quote in '"\'' and value[-1] == quote:
+        inner = value[1:-1]
+        if quote in inner or (quote == '"' and '\\' in inner):
+            raise ValueError(where + ' front matter: ' + key + ' may not hold '
+                             + ('a backslash or a double quote inside double quotes' if quote == '"'
+                                else 'a single quote inside single quotes') + ', which YAML reads as an escape')
+        return inner
+    if value and (value[0] in YAML_RESERVED or (value[0] in '-?:' and value[1:2] in ('', ' ', '\t'))
+                  or YAML_SEPARATOR.search(value) or YAML_NOT_TEXT.fullmatch(value)):
+        raise ValueError(where + ' front matter must give ' + key + ' in quotes: unquoted, YAML would read it '
+                         'otherwise')
+    return value
