@@ -211,11 +211,13 @@ Scientific Memory 的领域身份及经验解释继续通过 `scientific_identit
 工具服务有两种，每个只能是其中一种：
 
 - 本地服务写 `command`，由 Codex 在调用时启动。`command` 是可执行文件的绝对路径，`init` 和每次 Runtime 启动时都检查它存在、是普通文件且可执行；按写的原样保存，不解析符号链接（虚拟环境里的解释器就是符号链接，必须保持原样）。`args` 是字符串列表，`env` 是不保密的固定环境变量值，`env_from` 列出变量名，其值在调用时取自 Controller 所在进程的环境。同一个变量不能既在 `env` 又在 `env_from` 中。
-- URL 服务写 `url`，由 Codex 连接。`url` 以 `https://` 开头并带主机名；只有主机是 `localhost`、`127.0.0.1` 或 `[::1]` 时可以用 `http://`；不能带用户名或密码，不能含反斜杠，方括号只能括住位于开头的 IPv6 主机地址（各种 URL 解析器对其他写法读出的主机不一致）。`token_from` 可选，指定一个环境变量，Codex 把它的值作为 bearer token 发送。`headers` 是不保密的固定请求头，名称最多 64 个 HTTP token 字符，值为 1 到 1,024 个可打印 ASCII 字符；不能有 `Authorization`（不分大小写），token 用 `token_from` 给出。
+- URL 服务写 `url`，由 Codex 连接。`url` 以 `https://` 开头并带主机名；只有主机是 `localhost`、`127.0.0.1` 或 `[::1]` 时可以用 `http://`；不能带用户名或密码，不能含反斜杠，方括号只能括住位于开头的 IPv6 主机地址（各种 URL 解析器对其他写法读出的主机不一致）。`token_from` 可选，指定一个环境变量，Codex 把它的值作为 bearer token 发送。`headers` 是不保密的固定请求头，名称最多 64 个 HTTP token 字符，值为 1 到 1,024 个可打印 ASCII 字符；不能有 `Authorization`、`Proxy-Authorization` 或 `Cookie` 这些携带凭证的请求头（不分大小写），token 用 `token_from` 给出；同一个名称也不能出现两次，不分大小写（HTTP 不区分请求头名称的大小写，Codex 只会发出其中一个值）。
 
 两种共同的规则：名称匹配 `[a-z][a-z0-9_]{0,31}` 且不以 `codex` 开头，每个角色最多 8 个；`description` 是一行 1 到 300 个字符、不全是空白；`tool_timeout_seconds` 可选，1 到 3,600 秒，没有默认值；变量名匹配 `[A-Za-z_][A-Za-z0-9_]{0,127}`。
 
-`env_from` 和 `token_from` 只保存变量名：运行配置、Effect、请求包、调用记录、回执和命令行里都没有它们的值，Codex 从它继承的环境里读取。回执里本地服务的 `env` 换成 `env_names`，只记变量名。调用时这样的变量没有设置或为空，调用被拒绝，Codex 不会启动：在写下任何调用文件、询问 Codex 版本之前，错误 `Native settings name environment variables that are not set: <变量名>` 按名称顺序列出这些变量。
+`env_from` 和 `token_from` 只保存变量名：运行配置、Effect、请求包、调用记录、回执和命令行里都没有它们的值，Codex 从它继承的环境里读取。回执里本地服务的 `env` 换成 `env_names`，只记变量名。
+
+反过来，`env` 和 `headers` 里直接写出的值按定义不是秘密，不要把凭证写在那里：这些值写在 Codex 的命令行上（本机的其他用户能在进程列表里看到），并保存在运行配置、Effect、调用文件夹的 `invocation.json` 和 `transport_result.json` 以及执行日志（journal）里，`headers` 的值还进入回执。凭证只能按变量名经由 `env_from` 和 `token_from` 给出。调用时这样的变量没有设置或为空，调用被拒绝，Codex 不会启动：在写下任何调用文件、询问 Codex 版本之前，错误 `Native settings name environment variables that are not set: <变量名>` 按名称顺序列出这些变量。
 
 通过工具服务得到的结果和其他原生工具一样，只是线索，不是证据。
 
@@ -331,7 +333,7 @@ CODEX_HOME=/data/separate-codex-home python3 -m rsi_lab --root runs/my-task --ru
 - 终端：不再传 `--sandbox read-only`，改用名为 `rsi_agent` 的权限配置。其中依次为：Codex 的最小平台目录集合可读；运行根目录、Codex 配置目录和本机存在的各个共享临时目录禁止访问，调用用的 Codex 配置目录不是日常使用的 `~/.codex`（每次调用时按 `$HOME` 取，两者按解析后的路径比较）而 `~/.codex` 作为目录存在时，它也禁止访问，按解析后的路径紧跟在调用的 Codex 配置目录之后，所以在另一个 Codex 配置目录里运行的角色读不到日常 Codex 的凭证、会话和技能；该会话的工作目录 `agents/<session_id>/workspace/` 可读写，但其中的 `.codex`、`.agents`、`AGENTS.md` 和 `AGENTS.override.md` 只读；每个可读目录只读。网络显式关闭。命令只继承核心环境变量，`TMPDIR` 与 `TMPPREFIX` 指向工作目录下的 `.tmp`。项目文档与 exec-policy 规则不加载（`project_doc_max_bytes=0`、`--ignore-rules`），所以模型写进工作目录的文件不会在下一轮变成指令或配置。
 - 子 agent：深度为 1，子 agent 不能再派生；同时运行的数量不超过 `max_concurrent`；子 agent 默认使用父调用的模型和 effort。声明了角色时，每次调用前都按冻结的设置重新写出角色文件，每个角色一个：`<运行根目录>/agents/<session_id>/roles/<name>.toml`，其中只有 `name`、`description` 和 `developer_instructions`（即角色的 `instructions`）；该目录里其他的 `.toml` 文件被删除。命令按角色名的顺序为每个角色加上 `-c agents.<name>.description=…` 和 `-c agents.<name>.config_file=…`。这个目录在运行根目录之内，终端命令无权访问，Codex 自己仍读得到。角色文件写不出来时（例如目录或文件是符号链接），调用被拒绝，什么也不发送，Effect 结算为 `failed_definite`，回执标记 `never_dispatched`。
 - 查看图片：`view_image` 为 `true` 时不再传 `--disable view_image`。
-- 工具服务：按名称顺序，每个服务带若干 `-c mcp_servers.<name>.…`。本地服务依次是 `command`、`args`、`env`、`env_vars`（`env_from` 的变量名），URL 服务依次是 `url`、`bearer_token_env_var`（`token_from` 的变量名）、`http_headers`；空列表、空对象和没写的项不出现。两种服务随后都有 `tool_timeout_sec`（整数秒，只在写了 `tool_timeout_seconds` 时出现）和 `default_tools_approval_mode="approve"`，没有后者 Codex 会拒绝每个没有标为只读的工具。命令行上只有变量名，没有值。上面例子里的两个服务是：
+- 工具服务：按名称顺序，每个服务带若干 `-c mcp_servers.<name>.…`。本地服务依次是 `command`、`args`、`env`、`env_vars`（`env_from` 的变量名），URL 服务依次是 `url`、`bearer_token_env_var`（`token_from` 的变量名）、`http_headers`；空列表、空对象和没写的项不出现。两种服务随后都有 `tool_timeout_sec`（整数秒，只在写了 `tool_timeout_seconds` 时出现）和 `default_tools_approval_mode="approve"`，没有后者 Codex 会拒绝每个没有标为只读的工具。`env_from` 和 `token_from` 所指的变量在命令行上只有变量名，没有值；`env` 和 `headers` 的值则原样写在命令行上。上面例子里的两个服务是：
 
   ```
   -c mcp_servers.chem.command="/opt/tools/bin/python"

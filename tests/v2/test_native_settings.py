@@ -450,6 +450,27 @@ class ToolServerSettingsTests(unittest.TestCase):
                                                                       '^native_capabilities.lab.tool_servers'):
                 lab_from({'tool_servers': servers})
 
+    def test_headers_that_carry_credentials_or_repeat_a_name_are_refused(self):
+        url = {'description': 'd', 'url': PAPERS['url']}
+        where = r'^native_capabilities\.lab\.tool_servers\.x\.headers may not '
+        for name in ('Authorization', 'authorization', 'Proxy-Authorization', 'PROXY-AUTHORIZATION', 'Cookie',
+                     'cookie', 'cOoKiE'):
+            with self.subTest(name=name), self.assertRaisesRegex(
+                    ValueError, where + 'hold ' + name + ', which carries credentials; name the variable of a bearer '
+                    'token in token_from'):
+                lab_from({'tool_servers': {'x': {**url, 'headers': {'X-Client': 'rsi-lab', name: 'invented-4f1c'}}}})
+        # Codex would send one of two values the settings give for one header, as HTTP ignores the letter case.
+        for headers, first, second in (({'X-Client': 'a', 'x-client': 'b'}, 'X-Client', 'x-client'),
+                                       ({'x-trace': 'a', 'X-Client': 'b', 'X-TRACE': 'c'}, 'x-trace', 'X-TRACE')):
+            with self.subTest(headers=headers), self.assertRaisesRegex(
+                    ValueError, where + 'name one header twice: ' + first + ' and ' + second):
+                lab_from({'tool_servers': {'x': {**url, 'headers': headers}}})
+        # Names that only hold one of those are other headers.
+        got = lab_from({'tool_servers': {'x': {**url, 'headers': {'X-Cookie-Policy': 'none', 'X-Authorization-Mode':
+                                                                  'none', 'Set-Cookie2': 'none'}}}})
+        self.assertEqual(list(got['tool_servers']['x']['headers']), ['Set-Cookie2', 'X-Authorization-Mode',
+                                                                     'X-Cookie-Policy'])
+
     def test_loopback_http_and_the_limits_are_accepted(self):
         for host in ('localhost', '127.0.0.1', '[::1]'):
             lab_from({'tool_servers': {'x': {'description': 'd', 'url': 'http://' + host + ':8080/mcp'}}})

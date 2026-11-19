@@ -85,6 +85,8 @@ ENV_NAME = re.compile('[A-Za-z_][A-Za-z0-9_]{0,127}')
 # The hosts a URL server may be reached at over plain http, spelled as urlsplit gives a hostname.
 LOOPBACK_HOSTS = ('localhost', '127.0.0.1', '::1')
 HEADER_NAME = re.compile("[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}")
+# Headers that carry credentials, refused in any letter case: a token is named by token_from, never written.
+CREDENTIAL_HEADERS = ('authorization', 'proxy-authorization', 'cookie')
 MAX_HEADER_VALUE = 1024
 # Skills: 1 to MAX_SKILLS per role, each a folder of at most MAX_SKILL_FILES files and MAX_SKILL_BYTES bytes in all.
 SKILL_NAME = re.compile('[a-z][a-z0-9_-]{0,31}')
@@ -828,9 +830,10 @@ def _url_server(server, where):
     """A URL server's ``url``, ``headers`` and, when given, ``token_from`` in normal form.
 
     ``url`` is one ``_is_server_url`` accepts; ``headers`` an object whose names
-    ``HEADER_NAME`` matches, ``Authorization`` in any case refused, and whose
-    values are 1 to ``MAX_HEADER_VALUE`` printable ASCII characters;
-    ``token_from`` a name ``ENV_NAME`` matches.
+    ``HEADER_NAME`` matches, no two the same in any letter case and none of
+    ``CREDENTIAL_HEADERS`` in any letter case, and whose values are 1 to
+    ``MAX_HEADER_VALUE`` printable ASCII characters; ``token_from`` a name
+    ``ENV_NAME`` matches.
     """
     if set(server) - set(URL_SERVER_KEYS):
         raise ValueError(where + ' with a url may only hold ' + _listing(URL_SERVER_KEYS))
@@ -843,13 +846,17 @@ def _url_server(server, where):
     for name, value in headers.items():
         if type(name) is not str or not HEADER_NAME.fullmatch(name):
             raise ValueError(where + '.headers names must match ' + HEADER_NAME.pattern + ': ' + repr(name))
-        if name.lower() == 'authorization':
-            raise ValueError(where + '.headers may not hold Authorization; name the variable of a bearer token '
-                             'in token_from')
+        if name.lower() in CREDENTIAL_HEADERS:
+            raise ValueError(where + '.headers may not hold ' + name + ', which carries credentials; name the '
+                             'variable of a bearer token in token_from')
         if type(value) is not str or not 1 <= len(value) <= MAX_HEADER_VALUE or not all(
                 ' ' <= character <= '~' for character in value):
             raise ValueError(where + '.headers.' + name + ' must be 1 to ' + str(MAX_HEADER_VALUE)
                              + ' printable ASCII characters')
+    names = sorted(headers, key=str.lower)
+    for first, second in zip(names, names[1:]):
+        if first.lower() == second.lower():
+            raise ValueError(where + '.headers may not name one header twice: ' + first + ' and ' + second)
     if 'token_from' in server and not _is_variable(server['token_from']):
         raise ValueError(where + '.token_from must be a name matching ' + ENV_NAME.pattern)
     return {'url': url, 'headers': {name: headers[name] for name in sorted(headers)},
