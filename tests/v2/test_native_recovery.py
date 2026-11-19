@@ -447,6 +447,19 @@ class RecoveryAgreesWithTheExecutorTests(unittest.TestCase):
     """One Lab call runs through the real Controller, executor and transport, a local process standing in for Codex;
     recovered from the folder and rollout it left, it gets the receipt the executor gave it."""
 
+    def setUp(self):
+        # An empty home and Codex home, no machine skills folder and a Codex CLI of the checked version: nothing of
+        # this machine's own Codex is asked or read, from the Runtime's start to the recovery.
+        places = Path(tempfile.mkdtemp(prefix='rsi-native-places-'))
+        self.addCleanup(shutil.rmtree, places, ignore_errors=True)
+        (places / 'home').mkdir()
+        (places / 'codex-home').mkdir()
+        for patcher in (patch.dict(os.environ, {'HOME': str(places / 'home'), 'CODEX_HOME': str(places / 'codex-home')}),
+                        patch.object(native, 'MACHINE_SKILLS', places / 'machine-skills'),
+                        patch.object(transport, 'codex_version', return_value='0.170.0')):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     def run_and_recover(self, settings, stream, turn):
         """Run the first Lab turn of a run whose Lab has ``settings``. Codex is a local process that writes
         ``stream``; before it starts, the thread's rollout is the base fixture and ``turn(run_root, codex_home,

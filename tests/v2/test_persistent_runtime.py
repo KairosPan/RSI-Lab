@@ -92,6 +92,9 @@ class PersistentRuntimeTests(unittest.TestCase):
         self.real_popen = subprocess.Popen
         self.process_patch = patch.object(transport.subprocess, 'Popen', side_effect=self.spawn)
         self.process_patch.start(); self.addCleanup(self.process_patch.stop)
+        # A Codex CLI of the checked version, whatever this machine has installed: the CLI is never asked.
+        version = patch.object(transport, 'codex_version', return_value='0.170.0')
+        version.start(); self.addCleanup(version.stop)
 
     def spawn(self, command, **kwargs):
         self.calls.append(command)
@@ -368,7 +371,8 @@ def abrupt_exit(writer,stream,raw,**kwargs):
   os._exit(82)
  return original_append(writer,stream,raw,**kwargs)
 store=Store(root)
-with patch.object(transport.subprocess,'Popen',side_effect=spawn),patch.object(JournalWriter,'append',abrupt_exit):
+with patch.object(transport.subprocess,'Popen',side_effect=spawn),patch.object(JournalWriter,'append',abrupt_exit),\
+  patch.object(transport,'codex_version',return_value='0.170.0'):
  Runtime(store,'run').run_lab(work_id,CodexExecutor(root/'calls'),{'model_calls':1,'tokens':1000,'wall_seconds':10})
 raise AssertionError('Crash fixture did not reach its exit boundary')
 '''

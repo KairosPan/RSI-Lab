@@ -724,6 +724,7 @@ class NativeExecutorTests(unittest.TestCase):
                 raise
             return receipts[-1]
         with patch.dict(os.environ, {'CODEX_HOME': str(codex_home)}), \
+                patch.object(transport, 'codex_version', return_value='0.170.0'), \
                 patch.object(transport.subprocess, 'Popen', side_effect=spawn):
             controller.dispatch_effect('r', effect['id'], executor)
         self.assertEqual(raised, [])

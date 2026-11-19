@@ -6,6 +6,7 @@ model, network request or credential is used.
 """
 import base64
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -386,11 +387,15 @@ class NativeSessionTests(unittest.TestCase):
         code = 'import sys; sys.stdin.read(); sys.stdout.buffer.write(' + repr(wire) + '); sys.stdout.buffer.flush()'
         real_popen = subprocess.Popen
         session = {'session_id': 's', 'workspace': str(workspace), 'provider_thread_id': None, 'codex_home': str(home)}
+        (root / 'home').mkdir()
         results = {}
         for name, settings in (('on', TERMINAL), ('off', None)):
-            # A local process that writes the event stream stands in for Codex.
-            with patch.object(transport.subprocess, 'Popen', side_effect=lambda command, **kwargs:
-                              real_popen([sys.executable, '-u', '-c', code], **kwargs)):
+            # A local process that writes the event stream stands in for Codex, of the checked version, in an empty
+            # home: nothing of this machine's own Codex is asked or read.
+            with patch.dict(os.environ, {'HOME': str(root / 'home')}), \
+                    patch.object(transport, 'codex_version', return_value='0.170.0'), \
+                    patch.object(transport.subprocess, 'Popen', side_effect=lambda command, **kwargs:
+                                 real_popen([sys.executable, '-u', '-c', code], **kwargs)):
                 results[name] = transport.invoke('Inspect this task', {'type': 'object'}, root / 'calls' / name,
                                                  'm', 'low', timeout=10, session=session, native=settings,
                                                  run_root=str(root))

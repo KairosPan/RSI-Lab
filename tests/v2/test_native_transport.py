@@ -62,6 +62,9 @@ NATIVE_ACTIVITY = {
 # The environment ps runs in when the kernel reads the process table: its start times then read the same whoever reads
 # them, whatever their locale or time zone.
 PS_ENVIRONMENT = {'LC_ALL': 'C', 'TZ': 'UTC0', 'PATH': '/usr/bin:/bin'}
+# The kernel's reader of the CLI's version, which every test of NativeTransportTests replaces; its own test calls it
+# through a replaced transport._POPEN.
+READ_CODEX_VERSION = transport.codex_version
 
 
 def record(marker):
@@ -91,6 +94,9 @@ class NativeTransportTests(unittest.TestCase):
         (self.root / 'home').mkdir()
         home = patch.dict(os.environ, {'HOME': str(self.root / 'home')})
         home.start(); self.addCleanup(home.stop)
+        # A Codex CLI of the checked version, whatever this machine has installed: the CLI is never asked.
+        version = patch.object(transport, 'codex_version', return_value='0.170.0')
+        version.start(); self.addCleanup(version.stop)
 
     def command(self, settings, thread=None):
         session = {'provider_thread_id': thread, 'codex_home': '/home/.codex'}
@@ -201,9 +207,9 @@ class NativeTransportTests(unittest.TestCase):
         for text, status, expected in (('codex-cli 0.170.0\n', 0, '0.170.0'), ('codex-cli 0.171.0-alpha.2\n', 0, '0.171.0-alpha.2'),
                                        ('codex-cli 0.170.0\n', 1, None), ('something else 1.2.3\n', 0, None), ('', 0, None)):
             with self.subTest(text=text, status=status), patch.object(transport, '_POPEN', cli(text, status)):
-                self.assertEqual(transport.codex_version(), expected)
+                self.assertEqual(READ_CODEX_VERSION(), expected)
         with patch.object(transport, '_POPEN', side_effect=FileNotFoundError('codex')):
-            self.assertIsNone(transport.codex_version())
+            self.assertIsNone(READ_CODEX_VERSION())
 
     def test_a_call_records_the_codex_version_it_ran_on(self):
         wire = ''.join(json.dumps(event) + '\n' for event in frames(thread=THREAD)).encode()
