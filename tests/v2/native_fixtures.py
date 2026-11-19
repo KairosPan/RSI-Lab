@@ -149,10 +149,19 @@ def skills_list_text(roots, *skills):
                       '</skills_instructions>'])
 
 
-def skills_list(roots, *skills):
-    """The rollout record of a skills list (``skills_list_text``): a ``developer`` message holding it."""
+def skills_list(roots, *skills, before=(), after=()):
+    """The rollout record of a skills list (``skills_list_text``): a ``developer`` message holding it as an
+    ``input_text`` part, after the parts of the texts ``before`` and followed by those of ``after``. Codex 0.170.0
+    writes the lead's and a sub-agent's without a role as ``after=ROLE_LESS_PARTS``, and a sub-agent's with a
+    declared role also with ``before=(<the role's instructions>,)``."""
+    texts = (*before, skills_list_text(roots, *skills), *after)
     return frame('response_item', {'type': 'message', 'role': 'developer', 'content': [
-        {'type': 'input_text', 'text': skills_list_text(roots, *skills)}]})
+        {'type': 'input_text', 'text': text} for text in texts]})
+
+
+# The parts Codex 0.170.0 writes after the skills list in the same developer message.
+ROLE_LESS_PARTS = ('<permissions instructions>\nFiles are read-only outside the workspace.\n</permissions instructions>',
+                   '<collaboration_mode>\nWork on your own.\n</collaboration_mode>')
 
 
 def collab(call_id, name, output):

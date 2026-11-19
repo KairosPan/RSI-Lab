@@ -24,8 +24,8 @@ from rsi_lab.interruption import ATTESTATION_SCHEMA, certify_interruption
 from rsi_lab.journal import JournalWriter
 from rsi_lab.store import digest, encode
 from tests.v2.liveness_support import open_run
-from tests.v2.native_fixtures import (PAPERS, PLAIN, PNG, PROFILE, R, ROLES, SEARCH, TERMINAL, TERMINAL_AND_SEARCH,
-                                      TOOL_SERVERS, WITH_ROLES, WITH_SKILLS, WITH_TOOL_SERVERS, skills_list, tool_call,
+from tests.v2.native_fixtures import (PAPERS, PLAIN, PNG, PROFILE, R, ROLE_LESS_PARTS, ROLES, SEARCH, TERMINAL,
+                                      TERMINAL_AND_SEARCH, TOOL_SERVERS, WITH_ROLES, WITH_SKILLS, WITH_TOOL_SERVERS, skills_list, tool_call,
                                       turn_context, usage_row, viewed_image)
 from tests.v2.test_native_executor import RESERVATION, RESPONSE, config_form
 from tests.v2.test_native_transport import NATIVE_ACTIVITY, NATIVE_STREAM, THREAD
@@ -287,10 +287,12 @@ class NativeRecoveryTests(unittest.TestCase):
         secret = ('secret-notes', 'Notes of the owner.', 'r1/secret-notes/SKILL.md')
         unexpected = ('Codex showed skills other than the declared ones: ' + THREAD
                       + ': 1 unexpected from /u/.agents/skills')
-        # The call resumes its thread; Codex wrote the whole list again in the part the call added.
+        # The call resumes its thread; Codex wrote the whole list again in the part the call added, first in its
+        # developer message, as it does.
         for skills, error in (((declared,), None), ((declared, secret), unexpected)):
             with self.subTest(skills=skills):
-                listed = skills_list([str(self.workspace / '.agents' / 'skills'), '/u/.agents/skills'], *skills)
+                listed = skills_list([str(self.workspace / '.agents' / 'skills'), '/u/.agents/skills'], *skills,
+                                     after=ROLE_LESS_PARTS)
                 self.write_call(settings, turn=listed + self.this_turn())
                 receipt = self.recover(settings)
                 self.assertEqual(receipt['status'], 'succeeded')
@@ -298,9 +300,10 @@ class NativeRecoveryTests(unittest.TestCase):
                 self.assertEqual(receipt['actual_costs']['tokens'], 107171)
                 self.assertNotIn('secret-notes', json.dumps(receipt))
                 self.assertNotIn('skills_shown', receipt['native_activity'])
-        # A role without skills is shown none.
+        # A role without skills is shown none, its list found in any part of a developer message.
         self.write_call(TERMINAL_AND_SEARCH, turn=skills_list(['/u/.agents/skills'], ('secret-notes', 'x',
-                                                                                     'r0/secret-notes/SKILL.md'))
+                                                                                     'r0/secret-notes/SKILL.md'),
+                                                              before=('Role instructions.',), after=ROLE_LESS_PARTS)
                         + self.this_turn())
         receipt = self.recover(TERMINAL_AND_SEARCH)
         self.assertFalse(receipt['protocol_valid'])

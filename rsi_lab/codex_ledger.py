@@ -48,9 +48,10 @@ IMAGE_PATHS = 'image_view_paths'
 IMAGES_OUTSIDE = 'Codex showed images outside the folders this role may read: {outside} of {viewed}'
 SUB_AGENTS_UNCHECKED = ("Codex's sub-agents could not be checked for images outside the folders this role may read: "
                         '{unchecked} of {named}')
-# Codex's skills list of a thread: a developer message whose first input_text begins with SKILLS_LIST_START and ends
-# with SKILLS_LIST_END. read_turn returns the texts of those the call added (SKILLS_LISTS[0]) and of those before it
-# (SKILLS_LISTS[1]); read_child those of the sub-agent's whole rollout (SKILLS_LISTS[0]). No receipt records them.
+# Codex's skills list of a thread: an input_text part of a developer message, in any position, whose text begins with
+# SKILLS_LIST_START and ends with SKILLS_LIST_END. read_turn returns the texts of those the call added
+# (SKILLS_LISTS[0]) and of those before it (SKILLS_LISTS[1]); read_child those of the sub-agent's whole rollout
+# (SKILLS_LISTS[0]). No receipt records them.
 SKILLS_LIST_START, SKILLS_LIST_END = '<skills_instructions>', '</skills_instructions>'
 SKILLS_LISTS = ('skills_lists', 'earlier_skills_lists')
 SKILL_ROOT = re.compile(r'- `(r\d+)` = `(.+)`')
@@ -117,19 +118,20 @@ def _loose_records(raw):
 
 
 def _skills_lists(records):
-    """The texts of the skills lists among ``records``: each ``response_item`` ``message`` whose ``role`` is
-    ``developer`` and whose first ``input_text`` is text beginning with ``SKILLS_LIST_START``."""
+    """The texts of the skills lists among ``records``: every ``input_text`` part, in any position, of a
+    ``response_item`` ``message`` whose ``role`` is ``developer``, when its text begins with ``SKILLS_LIST_START``.
+    Each such part is a list on its own, its text alone. A sub-agent started with a declared role gets the role's
+    instructions as the first part of that message and the list as the second; the lead and other sub-agents get the
+    list first, then other parts."""
     texts = []
     for kind, payload in records:
         content = payload.get('content')
         if (kind != 'response_item' or payload.get('type') != 'message' or payload.get('role') != 'developer'
                 or not isinstance(content, list)):
             continue
-        first = next((entry for entry in content if isinstance(entry, dict) and entry.get('type') == 'input_text'),
-                     {})
-        text = first.get('text')
-        if isinstance(text, str) and text.startswith(SKILLS_LIST_START):
-            texts.append(text)
+        texts += [entry['text'] for entry in content
+                  if isinstance(entry, dict) and entry.get('type') == 'input_text'
+                  and isinstance(entry.get('text'), str) and entry['text'].startswith(SKILLS_LIST_START)]
     return texts
 
 

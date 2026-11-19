@@ -24,7 +24,8 @@ from rsi_lab import input_view, native, packets, roles, transport
 from rsi_lab.session_context import read_native_snapshot
 from rsi_lab.store import digest, encode
 from tests.v2.liveness_support import Scripted, none, open_run
-from tests.v2.native_fixtures import (CHECK_PY, CHEM, MCP_RESULT, PLAIN, PNG, PROFILE, R, ROLES, SEARCH, SKILL_MD,
+from tests.v2.native_fixtures import (CHECK_PY, CHEM, MCP_RESULT, PLAIN, PNG, PROFILE, R, ROLE_LESS_PARTS, ROLES,
+                                      SEARCH, SKILL_MD,
                                       TERMINAL, TERMINAL_AND_SUBAGENTS, TOOL_SERVERS, VIEW_IMAGE, WITH_ROLES,
                                       WITH_SKILLS, WITH_TOOL_SERVERS, account, child_rollout, here, mcp_call,
                                       skills_list, sub_agent_started, tool_call, turn_context, usage_row,
@@ -595,6 +596,37 @@ class NativeExecutorTests(unittest.TestCase):
                 self.assertEqual(receipt['actual_costs']['tokens'], 11)
                 self.assertNotIn('secret-notes', json.dumps(receipt))
                 self.assertNotIn('skills_shown', json.dumps(receipt))
+
+    def test_a_role_sub_agents_list_is_read_from_the_second_part_of_its_message(self):
+        # As Codex 0.170.0 writes them: the lead's list first in its developer message, then the permissions and
+        # collaboration parts; a sub-agent started with a declared role gets the role's instructions first.
+        def lead(*skills):
+            def rollout(profile, cwd):
+                return b'', (skills_list([str(cwd / '.agents' / 'skills')], *skills, after=ROLE_LESS_PARTS)
+                             + turn_context('t1', profile, cwd=cwd) + sub_agent_started(CHILD, '/root/local')
+                             + usage_row(THREAD, 't1', 't1', 10, 1))
+            return rollout
+
+        def role_child(*skills):
+            def records(workspace):
+                return skills_list([str(workspace / '.agents' / 'skills'), OWNERS], *skills,
+                                   before=(ROLES['local']['instructions'],), after=ROLE_LESS_PARTS)
+            return records
+        settings = {**WITH_SKILLS, 'subagents': {'max_concurrent': 3, 'roles': ROLES}}
+        receipt = self.execute(settings=settings, arrange=self.put_skill_files, rollout=lead(DECLARED),
+                               child=CHILD_ROWS, child_records=role_child(DECLARED))
+        self.assertTrue(receipt['protocol_valid'], receipt['error'])
+        self.assertEqual(receipt['native_activity']['skills_shown'], ['plot-check'])
+        [entry] = receipt['child_threads']
+        self.assertEqual(entry['skills_shown'], ['plot-check'])
+        # A role without skills is shown none: the role sub-agent's list is seen in its second part.
+        without = {**TERMINAL, 'subagents': {'max_concurrent': 3, 'roles': ROLES}}
+        receipt = self.execute(settings=without, rollout=PARENT_WITH_CHILD, child=CHILD_ROWS,
+                               child_records=role_child(SECRET))
+        self.assertFalse(receipt['protocol_valid'])
+        self.assertEqual(receipt['error'], 'Codex showed a skills list to a role without skills: ' + CHILD
+                         + ': 1 skills from ' + OWNERS)
+        self.assertNotIn('secret-notes', json.dumps(receipt))
 
     def test_the_refusals_the_design_keeps(self):
         # With skills declared, .agents is the kernel's own; .codex and the AGENTS files still refuse the call.

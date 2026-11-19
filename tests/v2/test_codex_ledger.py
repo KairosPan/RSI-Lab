@@ -16,8 +16,8 @@ import urllib.parse
 
 from rsi_lab import codex_ledger, native
 from rsi_lab.store import digest, encode
-from tests.v2.native_fixtures import (MCP_RESULT, PNG, PROFILE, TERMINAL, TERMINAL_AND_SUBAGENTS, VIEW_IMAGE,
-    WITH_SKILLS, account, child_rollout, collab, compacted, frame, mcp_call, skills_list, skills_list_text,
+from tests.v2.native_fixtures import (MCP_RESULT, PNG, PROFILE, ROLE_LESS_PARTS, ROLES, TERMINAL,
+    TERMINAL_AND_SUBAGENTS, VIEW_IMAGE, WITH_SKILLS, account, child_rollout, collab, compacted, frame, mcp_call, skills_list, skills_list_text,
     sub_agent_activity, sub_agent_meta, sub_agent_started, tool_call, turn_context, usage_row, viewed_image,
     web_search)
 from tests.v2.test_session_context import OTHER, THREAD, fixture
@@ -662,20 +662,60 @@ class CodexLedgerTests(unittest.TestCase):
         def message(role, *texts):
             return frame('response_item', {'type': 'message', 'role': role,
                                             'content': [{'type': 'input_text', 'text': text} for text in texts]})
-        # Not lists: another role, a first input_text that does not begin the list, text that is not a string.
-        others = (message('user', first) + message('developer', 'Permissions.', first)
-                  + message('developer', ' ' + first)
-                  + frame('response_item', {'type': 'message', 'role': 'developer',
-                                            'content': [{'type': 'input_text', 'text': 7}]}))
+        # Not lists: another role, a part that does not begin with the list (white space is not skipped), another kind
+        # of part, text that is not a string.
+        others = (message('user', first) + message('developer', 'Permissions.', ' ' + first)
+                  + frame('response_item', {'type': 'message', 'role': 'developer', 'content': [
+                      {'type': 'output_text', 'text': first}, {'type': 'input_text', 'text': 7}]}))
         prefix = fixture(self.cwd) + message('developer', first) + b'not a record\n' + usage_row(THREAD, 't1', 't1',
                                                                                                 10, 1)
-        raw = prefix + others + message('developer', second, 'More.') + usage_row(THREAD, 't2', 't2', 10, 1)
+        # Each part that begins the list is one, wherever it stands in its message: the role's instructions first,
+        # then the list, then the permissions; or two lists in one message.
+        raw = (prefix + others + message('developer', 'You check plots.', second, '<permissions instructions>')
+               + message('developer', first, second) + usage_row(THREAD, 't2', 't2', 10, 1))
         turn = codex_ledger.read_turn(self.write(raw), thread_id=THREAD, prefix_bytes=len(prefix))
-        self.assertEqual((turn['skills_lists'], turn['earlier_skills_lists']), ([second], [first]))
+        self.assertEqual((turn['skills_lists'], turn['earlier_skills_lists']), ([second, first, second], [first]))
         # A sub-agent's are those of its whole rollout, the forked copy of its parent's included.
-        self.write_child(CHILD_ROLLOUT + message('developer', first) + others + message('developer', second))
+        self.write_child(CHILD_ROLLOUT + message('developer', first) + others
+                         + message('developer', 'You check plots.', second))
         child = codex_ledger.read_child(self.home, CHILD, parent_thread_id=THREAD, root_turn_ids=['t1'])
         self.assertEqual(child['skills_lists'], [first, second])
+
+    def test_lists_in_the_part_orders_codex_writes(self):
+        # The lead and a sub-agent without a role: the list first, then the permissions and collaboration parts. A
+        # sub-agent with a declared role: the role's instructions first, then the list, then the same parts.
+        instructions = (ROLES['local']['instructions'],)
+        roles = {'max_concurrent': 3, 'roles': ROLES}
+        lead = skills_list([self.ws_root()], DECLARED, after=ROLE_LESS_PARTS)
+        started = sub_agent_started(CHILD, '/root/local')
+
+        def role_child(*records, forked=False):
+            return child_rollout(CHILD, THREAD, [('c1', 't1', 5, 1)], role='local', forked=forked) + b''.join(records)
+        self.write_child(role_child(skills_list([self.ws_root()], DECLARED, before=instructions, after=ROLE_LESS_PARTS)))
+        got = self.settle_call(lead + started, {**WITH_SKILLS, 'subagents': roles}, workspace=self.cwd)
+        self.assertIsNone(got['skills_error'])
+        self.assertEqual(got['receipt']['native_activity']['skills_shown'], ['plot-check'])
+        [entry] = got['receipt']['child_threads']
+        self.assertEqual((entry['role'], entry['skills_shown']), ('local', ['plot-check']))
+        # Under a role without skills, the role sub-agent's list in its second part is seen, and the lead's in its
+        # first.
+        owners = ('secret-notes', 'Notes of the owner.', 'r0/secret-notes/SKILL.md')
+        self.write_child(role_child(skills_list([OWNERS], owners, before=instructions, after=ROLE_LESS_PARTS)))
+        without = {**TERMINAL, 'subagents': roles}
+        got = self.settle_call(started, without, workspace=self.cwd)
+        self.assertEqual(got['skills_error'], NOT_SKILLED + CHILD + ': 1 skills from ' + OWNERS)
+        got = self.settle_call(skills_list([OWNERS], owners, after=ROLE_LESS_PARTS), without, workspace=self.cwd)
+        self.assertEqual(got['skills_error'], NOT_SKILLED + THREAD + ': 1 skills from ' + OWNERS)
+        # A role sub-agent forked with a lead history that holds an old list carries that message as it was; its own
+        # message, without skills, holds no list.
+        old = skills_list(['/u/.codex/skills'], ('personal-notes', 'x', 'r0/personal-notes/SKILL.md'),
+                          after=ROLE_LESS_PARTS)
+        self.write_child(role_child(old, frame('response_item', {'type': 'message', 'role': 'developer', 'content': [
+            {'type': 'input_text', 'text': text} for text in instructions + ROLE_LESS_PARTS]}), forked=True))
+        got = self.settle_call(started, without, earlier=old + usage_row(THREAD, 't0', 't0', 10, 1),
+                               workspace=self.cwd)
+        self.assertIsNone(got['skills_error'])
+        self.assertNotIn('notes', json.dumps(got['receipt']))
 
     def test_a_list_as_declared_is_recorded(self):
         got = codex_ledger.compare_skills([skills_list_text([self.ws_root()], DECLARED)], declared=['plot-check'],
