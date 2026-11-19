@@ -21,9 +21,10 @@ from unittest.mock import patch
 
 from rsi_lab import native, transport
 from rsi_lab.journal import read_journal
-from tests.v2.native_fixtures import (CHECK_PY, LOCAL_SERVER_ONLY, PLAIN, PLOT_CHECK, R, ROLES, SEARCH, SKILL_MD,
-                                      SUBAGENTS, TERMINAL, TERMINAL_AND_SEARCH, TERMINAL_AND_SUBAGENTS, TOOL_SERVERS,
-                                      VIEW_IMAGE, WITH_ROLES, WITH_SKILLS, WITH_TOOL_SERVERS)
+from tests.v2.native_fixtures import (CHECK_PY, LOCAL_SERVER_ONLY, MCP_ITEM, PLAIN, PLOT_CHECK, R, ROLES, SEARCH,
+                                      SKILL_MD, SUBAGENTS, TERMINAL, TERMINAL_AND_SEARCH, TERMINAL_AND_SUBAGENTS,
+                                      TOOL_SERVERS, URL_SERVER_ONLY, VIEW_IMAGE, WITH_ROLES, WITH_SKILLS,
+                                      WITH_TOOL_SERVERS)
 from tests.v2.test_journal_transport import THREAD, frames
 
 TODAY = ['codex', '--no-daemon', '--ask-for-approval', 'never', 'exec', '--sandbox', 'read-only', '-C', '/w',
@@ -781,6 +782,49 @@ class NativeTransportTests(unittest.TestCase):
         self.assertEqual(native.stream_items(TERMINAL_AND_SUBAGENTS),
                          always | {'command_execution', 'file_change', 'collab_tool_call'})
         self.assertIsInstance(native.stream_items(SEARCH), frozenset)
+        # Tool server calls appear only with tool servers declared; image viewing adds no item type.
+        self.assertEqual(native.stream_items(WITH_TOOL_SERVERS), always | {'web_search', 'mcp_tool_call'})
+        for settings in (LOCAL_SERVER_ONLY, URL_SERVER_ONLY):
+            self.assertEqual(native.stream_items(settings), always | {'mcp_tool_call'})
+        self.assertEqual(native.stream_items(VIEW_IMAGE), native.stream_items(TERMINAL))
+
+    def test_tool_server_items_only_for_a_declared_server(self):
+        stream = [*NATIVE_STREAM[:2], {'type': 'item.completed', 'item': MCP_ITEM}, *NATIVE_STREAM[-2:]]
+        allowed = native.stream_items(WITH_TOOL_SERVERS)
+        self.assertEqual(transport._events(self.wire(stream), allowed, frozenset({'chem', 'papers'}))[3], [])
+        other = [*stream[:2], {'type': 'item.started', 'item': {**MCP_ITEM, 'server': 'other'}}, *stream[2:]]
+        self.assertIn("Undeclared tool server: 'other'",
+                      transport._events(self.wire(other), allowed, frozenset({'chem'}))[3])
+        # Without tool servers the item stays forbidden, with the one error it had before they existed.
+        for settings in (SEARCH, None):
+            with self.subTest(settings=settings):
+                self.assertEqual(transport._events(self.wire(stream), native.stream_items(settings))[3],
+                                 ["Forbidden tool or unsupported item: 'mcp_tool_call'"])
+
+    def test_a_tool_server_item_must_name_a_declared_server_exactly(self):
+        allowed = native.stream_items(LOCAL_SERVER_ONLY)
+        for server, shown in ((None, 'None'), (['chem'], "['chem']"), ('', "''"), ('Chem', "'Chem'")):
+            item = {key: value for key, value in MCP_ITEM.items() if key != 'server'}
+            if server is not None:
+                item['server'] = server
+            for kind in ('item.started', 'item.updated', 'item.completed'):
+                stream = [*NATIVE_STREAM[:2], {'type': kind, 'item': item}, *NATIVE_STREAM[-2:]]
+                with self.subTest(server=server, kind=kind):
+                    self.assertEqual(transport._events(self.wire(stream), allowed, frozenset({'chem'}))[3],
+                                     ['Undeclared tool server: ' + shown])
+
+    def test_audited_events_reads_the_declared_servers(self):
+        stream = [*NATIVE_STREAM[:2], {'type': 'item.completed', 'item': MCP_ITEM}, *NATIVE_STREAM[-2:]]
+        recorded = json.dumps({'backend': 'codex', 'native': WITH_TOOL_SERVERS})
+        self.assertEqual(transport.audited_events(self.archive(stream, recorded)),
+                         ('{"ok":true}', {'input_tokens': 20, 'output_tokens': 5}, True, []))
+        other = [*stream[:2], {'type': 'item.completed', 'item': {**MCP_ITEM, 'server': 'other'}}, *stream[3:]]
+        self.assertEqual(transport.audited_events(self.archive(other, recorded, name='other'))[3],
+                         ["Undeclared tool server: 'other'"])
+        # Settings that declare only the URL server do not cover a call to chem.
+        papers = json.dumps({'backend': 'codex', 'native': URL_SERVER_ONLY})
+        self.assertEqual(transport.audited_events(self.archive(stream, papers, name='papers'))[3],
+                         ["Undeclared tool server: 'chem'"])
 
     def test_the_last_message_is_the_response_when_tools_are_on(self):
         allowed = native.stream_items({'web_search': True, 'terminal': {'readable_roots': []}, 'subagents': None})

@@ -354,7 +354,9 @@ def stream_items(settings):
     """The event-stream item types one role's settings allow beside ``agent_message`` and ``reasoning``.
 
     Empty when everything is off, which keeps today's strict reading of the
-    stream. ``mcp_tool_call`` is never allowed.
+    stream. ``mcp_tool_call`` is allowed only when tool servers are declared,
+    and the stream audit (``transport._events``) also requires each such item
+    to name one of them. Image viewing adds no item type.
     """
     settings = validate(settings)
     if settings == OFF:
@@ -366,6 +368,8 @@ def stream_items(settings):
         items |= {'command_execution', 'file_change'}
     if settings['subagents'] is not None:
         items.add('collab_tool_call')
+    if tool_servers(settings):
+        items.add('mcp_tool_call')
     return frozenset(items)
 
 
@@ -374,13 +378,17 @@ def rollout_kinds(settings):
 
     ``response`` holds ``response_item`` types and ``outer`` record types. Both
     are empty when everything is off, which keeps today's strict reading of the
-    rollout. Any setting that is on allows a ``compacted`` record.
+    rollout. Any setting that is on allows a ``compacted`` record. The records
+    of the scripts through which the model searches, runs commands, views
+    images and calls tool servers (``custom_tool_call`` and its output) are
+    allowed with web search, the terminal, which image viewing needs, or tool
+    servers.
     """
     settings = validate(settings)
     response, outer = set(), set()
     if settings != OFF:
         outer.add('compacted')
-    if settings['web_search'] or settings['terminal'] is not None:
+    if settings['web_search'] or settings['terminal'] is not None or tool_servers(settings):
         response |= {'custom_tool_call', 'custom_tool_call_output'}
     if settings['subagents'] is not None:
         response |= {'function_call', 'function_call_output', 'agent_message'}

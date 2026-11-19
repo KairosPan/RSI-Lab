@@ -3,12 +3,14 @@
 The rollout builders return complete records shaped as the live probe of
 2026-11-17 saw them, to follow the base rollout ``fixture`` of
 tests/v2/test_session_context.py, whose ``frame`` they use and re-export.
-No Codex or model process is run.
+Those of tool server calls and viewed images follow the record shapes Codex
+0.170.0 wrote in the spikes of the round-two design. No Codex or model
+process is run.
 """
 import hashlib
 import sys
 
-from tests.v2.test_session_context import frame
+from tests.v2.test_session_context import THREAD, frame
 
 SEARCH = {'web_search': True, 'terminal': None, 'subagents': None}
 TERMINAL = {'web_search': False, 'terminal': {'readable_roots': []}, 'subagents': None}
@@ -37,6 +39,14 @@ WITH_TOOL_SERVERS = {**SEARCH, 'tool_servers': TOOL_SERVERS}
 LOCAL_SERVER_ONLY = {'web_search': False, 'terminal': None, 'subagents': None, 'tool_servers': {'chem': CHEM}}
 URL_SERVER_ONLY = {'web_search': False, 'terminal': None, 'subagents': None, 'tool_servers': {'papers': PAPERS}}
 VIEW_IMAGE = {**TERMINAL, 'view_image': True}
+
+# A tool server call as the event stream of the calling thread shows it. A refused call has a null result, an error
+# object and the status failed.
+MCP_ITEM = {'type': 'mcp_tool_call', 'server': 'chem', 'tool': 'lookup', 'arguments': {'query': 'CCO'},
+            'result': {'content': [{'type': 'text', 'text': 'similarity 0.42'}], 'structured_content': None},
+            'error': None, 'status': 'completed'}
+# The same call's result as the rollout's McpToolCall item holds it.
+MCP_RESULT = {'content': [{'type': 'text', 'text': 'similarity 0.42'}], 'isError': False}
 
 # A skills folder of one skill, plot-check, and the frozen form it gives. The root in WITH_SKILLS is invented and need
 # not exist for validate; skill_folder() writes the same skill into a temporary folder for what reads a folder.
@@ -89,6 +99,40 @@ def tool_call(call_id, script):
                                     'name': 'exec', 'input': script})
             + frame('response_item', {'type': 'custom_tool_call_output', 'call_id': call_id,
                                       'output': [{'type': 'input_text', 'text': 'done'}]}))
+
+
+def _item_completed(item, turn, thread):
+    """An ``item_completed`` event in ``thread``'s rollout under its own ``turn``, as Codex 0.170.0 writes one."""
+    return frame('event_msg', {'type': 'item_completed', 'thread_id': thread, 'turn_id': turn, 'item': item})
+
+
+def mcp_call(call_id, server, tool, arguments, *, turn, status='completed', result=MCP_RESULT, duration=(0, 439666),
+             thread=THREAD):
+    """A tool server call's ``item_completed`` event in the calling thread's rollout: an ``McpToolCall`` item whose
+    ``id`` is ``call_id``, the call id the server receives, with ``duration`` given as ``(secs, nanos)``. The script
+    that made the call is a separate ``tool_call``, such as ``text(await tools.mcp__chem__lookup({query:"CCO"}));``."""
+    secs, nanos = duration
+    return _item_completed({'type': 'McpToolCall', 'id': call_id, 'server': server, 'tool': tool,
+                            'arguments': arguments, 'readOnlyHint': True, 'status': status, 'result': result,
+                            'duration': {'secs': secs, 'nanos': nanos}}, turn, thread)
+
+
+def image_view(call_id, path, *, turn, thread=THREAD):
+    """A viewed image's ``item_completed`` event in the viewing thread's rollout: an ``ImageView`` item whose
+    ``id`` is ``call_id`` and whose ``path`` is ``file://`` followed by the absolute ``path``."""
+    return _item_completed({'type': 'ImageView', 'id': call_id, 'path': 'file://' + path}, turn, thread)
+
+
+def viewed_image(call_id, path, data_url, *, turn, thread=THREAD):
+    """An image viewed through the ``exec`` tool: the ``custom_tool_call`` of a script that views ``path``, its
+    ``image_view`` event, then the ``custom_tool_call_output``: the script's text and the image as ``data_url``."""
+    script = 'const r = await tools.view_image({path:"' + path + '"}); image(r.image_url);'
+    return (frame('response_item', {'type': 'custom_tool_call', 'status': 'completed', 'call_id': call_id,
+                                    'name': 'exec', 'input': script})
+            + image_view(call_id, path, turn=turn, thread=thread)
+            + frame('response_item', {'type': 'custom_tool_call_output', 'call_id': call_id, 'output': [
+                {'type': 'input_text', 'text': 'Script completed\n'},
+                {'type': 'input_image', 'image_url': data_url, 'detail': 'original'}]}))
 
 
 def collab(call_id, name, output):

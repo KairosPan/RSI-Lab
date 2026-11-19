@@ -103,13 +103,17 @@ def _json(text):
                       parse_constant=lambda value: (_ for _ in ()).throw(ValueError(f"Invalid JSON number: {value}")))
 
 
-def _events(stdout, allowed_items=frozenset()):
+def _events(stdout, allowed_items=frozenset(), tool_servers=frozenset()):
     """Audit the whole event stream, preserving unknown usage instead of zeroes.
 
     ``allowed_items`` are the item types a call's native settings allow beside
     ``agent_message`` and ``reasoning`` (``native.stream_items``). Empty, the
     turn must hold exactly one assistant message. Otherwise earlier messages
     are progress notes and the last completed one is the output.
+
+    ``tool_servers`` are the names of the tool servers the settings declare.
+    An allowed ``mcp_tool_call`` item, in any ``item.*`` event, whose
+    ``server`` is not one of them makes the call invalid.
 
     Lines end at ``\\n`` only, as the journal frames them: Codex leaves U+2028,
     U+2029 and U+0085 unescaped inside strings. A trailing ``\\r`` is JSON
@@ -161,6 +165,10 @@ def _events(stdout, allowed_items=frozenset()):
             item_kind = item.get("type")
             if item_kind not in allowed:
                 errors.append(f"Forbidden tool or unsupported item: {item_kind!r}")
+            elif item_kind == "mcp_tool_call":
+                server = item.get("server")
+                if not isinstance(server, str) or server not in tool_servers:
+                    errors.append(f"Undeclared tool server: {server!r}")
             if kind == "item.completed" and item_kind == "agent_message":
                 if not isinstance(item.get("text"), str):
                     errors.append("Assistant output must be text")
@@ -368,13 +376,16 @@ def _recorded_native(folder):
 def audited_events(folder):
     """Parse the durable unique provider frames, retaining all raw duplicates.
 
-    The item types allowed are those of the native settings recorded in
-    ``invocation.json``. Older one-shot archives without a journal remain
-    readable. A torn/conflicting journal cannot certify a complete invocation.
+    The item types allowed, and the tool servers a tool server call may name,
+    are those of the native settings recorded in ``invocation.json``. Older
+    one-shot archives without a journal remain readable. A torn/conflicting
+    journal cannot certify a complete invocation.
     """
     folder = Path(folder)
     stdout, capture = _provider_stdout(folder)
-    raw, usage, complete, errors = _events(stdout, native_tools.stream_items(_recorded_native(folder)))
+    settings = _recorded_native(folder)
+    raw, usage, complete, errors = _events(stdout, native_tools.stream_items(settings),
+                                           frozenset(native_tools.tool_servers(settings)))
     if capture is not None and capture['gaps']:
         errors.append('Execution journal has unresolved gaps or conflicting provider events')
         complete = False

@@ -4,6 +4,7 @@ Synthetic rollouts built from tests/v2/native_fixtures.py; the one transport
 test runs a local Python process that writes the Codex event protocol. No
 model, network request or credential is used.
 """
+import base64
 import json
 from pathlib import Path
 import subprocess
@@ -13,9 +14,11 @@ import unittest
 from unittest.mock import patch
 
 from rsi_lab import native, transport
-from rsi_lab.session_context import ContextUnavailable, build_effective_context, snapshot_from_bytes
-from tests.v2.native_fixtures import (PROFILE, SEARCH, SUBAGENTS, TERMINAL, TERMINAL_AND_SUBAGENTS, account,
-    agent_message, collab, compacted, frame, sub_agent_started, tool_call, turn_context, usage_row)
+from rsi_lab.session_context import (ContextUnavailable, build_effective_context, snapshot_from_bytes,
+                                     verify_snapshot_images)
+from tests.v2.native_fixtures import (LOCAL_SERVER_ONLY, PROFILE, SEARCH, SUBAGENTS, TERMINAL, TERMINAL_AND_SUBAGENTS,
+    URL_SERVER_ONLY, VIEW_IMAGE, WITH_TOOL_SERVERS, account, agent_message, collab, compacted, frame, mcp_call,
+    sub_agent_started, tool_call, turn_context, usage_row, viewed_image)
 from tests.v2.test_image_evidence import native_image
 from tests.v2.test_journal_transport import frames
 from tests.v2.test_session_context import THREAD, fixture
@@ -29,6 +32,10 @@ TODAYS_SNAPSHOT_KEYS = {
     'read_authority', 'compaction_supported', 'verified_parent_prefix'}
 EVERYTHING = {'web_search': True, 'terminal': {'readable_roots': []}, 'subagents': {'max_concurrent': 3}}
 CHILD = '33333333-3333-3333-3333-333333333333'
+# A viewed image of several kilobytes that is not a PNG, as the image tool returns it.
+JPEG = 'data:image/jpeg;base64,' + base64.b64encode(b'\xff\xd8\xff' + bytes(3000)).decode()
+# The keys a snapshot gains with image viewing on.
+VIEWED_KEYS = {'viewed_image_count', 'viewed_image_encoded_bytes'}
 
 
 def session_meta(cwd):
@@ -132,11 +139,17 @@ class NativeSessionTests(unittest.TestCase):
         raw = (fixture(self.cwd) + frame('world_state', {'full': True, 'state': {}})
                + usage_row(THREAD, 't1', 't1', 7, 1))
         plain = self.read(raw, None)
-        for settings in (SEARCH, TERMINAL, SUBAGENTS, EVERYTHING):
+        for settings in (SEARCH, TERMINAL, SUBAGENTS, EVERYTHING, LOCAL_SERVER_ONLY, URL_SERVER_ONLY,
+                         WITH_TOOL_SERVERS):
             with self.subTest(settings=settings):
                 self.assertEqual(self.read(raw, settings),
                                  {**plain, 'native': settings, 'compactions': 0, 'compaction_supported': True,
                                   'history_counted_from_record': None})
+        # Image viewing adds two more, which count the images viewed.
+        self.assertEqual(self.read(raw, VIEW_IMAGE),
+                         {**plain, 'native': VIEW_IMAGE, 'compactions': 0, 'compaction_supported': True,
+                          'history_counted_from_record': None, 'viewed_image_count': 0,
+                          'viewed_image_encoded_bytes': 0})
 
     def test_rollout_kinds_follow_the_settings(self):
         tools = {'custom_tool_call', 'custom_tool_call_output'}
@@ -145,7 +158,9 @@ class NativeSessionTests(unittest.TestCase):
         for settings, response, outer in ((None, set(), set()), (native.OFF, set(), set()),
                                           (SEARCH, tools, {'compacted'}), (TERMINAL, tools, {'compacted'}),
                                           (SUBAGENTS, collaboration, talk),
-                                          (TERMINAL_AND_SUBAGENTS, tools | collaboration, talk)):
+                                          (TERMINAL_AND_SUBAGENTS, tools | collaboration, talk),
+                                          (LOCAL_SERVER_ONLY, tools, {'compacted'}),
+                                          (URL_SERVER_ONLY, tools, {'compacted'}), (VIEW_IMAGE, tools, {'compacted'})):
             with self.subTest(settings=settings):
                 kinds = native.rollout_kinds(settings)
                 self.assertEqual(kinds, {'response': response, 'outer': outer})
@@ -277,6 +292,89 @@ class NativeSessionTests(unittest.TestCase):
             with self.subTest(snapshot={key: snapshot.get(key) for key in ('native', 'compaction_supported')}), \
                     self.assertRaisesRegex(ContextUnavailable, 'context_unverifiable'):
                 build_effective_context({'x': 1}, snapshot=snapshot, **arguments)
+
+    def test_a_viewed_image_is_read_only_with_image_viewing(self):              # Review Focus 5
+        raw = fixture(self.cwd) + viewed_image('call-v1', '/w/plot.jpg', JPEG, turn='turn-1')
+        snapshot = self.read(raw, VIEW_IMAGE)
+        self.assertEqual((snapshot['viewed_image_count'], snapshot['viewed_image_encoded_bytes']),
+                         (1, len(JPEG) - len('data:image/jpeg;base64,')))
+        self.assertEqual((snapshot['image_inputs'], snapshot['observable_image_bytes']), ([], 0))
+        self.assertEqual(snapshot['observable_text_history_bytes'], len(raw))
+        for settings in (TERMINAL, SEARCH, LOCAL_SERVER_ONLY, WITH_TOOL_SERVERS):
+            with self.subTest(settings=settings), self.assertRaisesRegex(ContextUnavailable, 'unsupported_tool_output'):
+                self.read(raw, settings)
+        with self.assertRaisesRegex(ContextUnavailable, 'custom_tool_call'):
+            self.read(raw, None)
+        for url in ('file:///w/plot.png', 'https://images.example.org/plot.png', 'data:text/plain;base64,eA=='):
+            with self.subTest(url=url), self.assertRaisesRegex(ContextUnavailable, 'unsupported_tool_output'):
+                self.read(fixture(self.cwd) + viewed_image('c', '/w/p', url, turn='turn-1'), VIEW_IMAGE)
+
+    def test_only_an_image_item_of_the_shape_codex_writes_is_a_viewed_image(self):
+        text = {'type': 'input_text', 'text': 'Script completed\n'}
+        image = {'type': 'input_image', 'image_url': JPEG}
+        data = len(JPEG.split(',', 1)[1])
+        svg = 'data:image/svg+xml;base64,PHN2Zz4='
+        accepted = {'an image without detail': ([text, image], 1, data),
+                    'an image with detail': ([text, {**image, 'detail': 'auto'}], 1, data),
+                    'two images': ([image, text, image], 2, 2 * data),
+                    'a subtype with + and .': ([{**image, 'image_url': svg}, {**image, 'image_url':
+                                               'data:image/vnd.example-1;base64,AAAA'}], 2, 8 + 4),
+                    'text alone': ([text], 0, 0)}
+        refused = {'another key': [{**image, 'name': 'plot'}], 'a detail that is not text': [{**image, 'detail': 1}],
+                   'another type': [{**image, 'type': 'output_image'}], 'no type': [{'image_url': JPEG}],
+                   'no URL': [{'type': 'input_image'}], 'a URL that is not text': [{**image, 'image_url': None}],
+                   'no subtype': [{**image, 'image_url': 'data:image/;base64,AAAA'}],
+                   'a parameter before base64': [{**image, 'image_url': 'data:image/png;name=a;base64,AAAA'}],
+                   'no base64 marker': [{**image, 'image_url': 'data:image/png,AAAA'}],
+                   'a text item with an image URL': [{**text, 'image_url': JPEG}], 'an item that is a string': [JPEG]}
+        for case, (output, count, encoded) in accepted.items():
+            tail = frame('response_item', {'type': 'custom_tool_call_output', 'call_id': 'c1', 'output': output})
+            with self.subTest(case=case):
+                got = self.read(fixture(self.cwd) + tail, VIEW_IMAGE)
+                self.assertEqual((got['viewed_image_count'], got['viewed_image_encoded_bytes']), (count, encoded))
+        for case, output in refused.items():
+            tail = frame('response_item', {'type': 'custom_tool_call_output', 'call_id': 'c1', 'output': output})
+            with self.subTest(case=case), self.assertRaisesRegex(ContextUnavailable, 'unsupported_tool_output'):
+                self.read(fixture(self.cwd) + tail, VIEW_IMAGE)
+
+    def test_viewed_images_count_against_the_history_limit(self):
+        raw = fixture(self.cwd) + viewed_image('call-v1', '/w/plot.jpg', JPEG, turn='turn-1')
+        snapshot = self.read(raw, VIEW_IMAGE)
+        packet = b'{"x":1}'
+        arguments = {'session_id': 's', 'owner': {'role': 'lab'}, 'snapshot': snapshot}
+        blocked = build_effective_context(packet, max_input_bytes=len(raw) + len(packet) - 1, **arguments)
+        self.assertEqual((blocked['status'], blocked['manifest']['total_image_bytes']), ('blocked_capacity', 0))
+        ready = build_effective_context(packet, max_input_bytes=len(raw) + len(packet), **arguments)
+        self.assertEqual((ready['status'], ready['manifest']['total_image_bytes']), ('ready', 0))
+
+    def test_a_viewed_image_is_never_an_attached_one(self):
+        # A Controller attachment keeps its own accounting beside a viewed image, which stays in the text history.
+        attached = native_image()
+        message = frame('response_item', {'type': 'message', 'role': 'user',
+                                          'content': [{'type': 'input_text', 'text': 'Inspect this page'}, attached]})
+        raw = fixture(self.cwd) + message + viewed_image('call-v1', '/w/plot.jpg', JPEG, turn='turn-1')
+        got = self.read(raw, VIEW_IMAGE)
+        self.assertEqual(len(got['image_inputs']), 1)
+        self.assertEqual(got['observable_image_bytes'], got['image_inputs'][0]['bytes'])
+        self.assertEqual(got['observable_text_history_bytes'], len(raw) - len(attached['image_url'].split(',', 1)[1]))
+        self.assertEqual(got['viewed_image_count'], 1)
+        # A request that attached no image still matches a session in which an image was viewed.
+        viewed_only = self.read(fixture(self.cwd) + viewed_image('c', '/w/p', JPEG, turn='turn-1'), VIEW_IMAGE)
+        self.assertEqual(verify_snapshot_images(viewed_only, [])['native_image_count'], 0)
+
+    def test_tool_server_records_are_read_under_a_server_alone(self):
+        raw = (fixture(self.cwd) + tool_call('c1', 'text(await tools.mcp__chem__lookup({query:"CCO"}));')
+               + mcp_call('exec-1', 'chem', 'lookup', {'query': 'CCO'}, turn='turn-1'))
+        for settings in (LOCAL_SERVER_ONLY, URL_SERVER_ONLY, WITH_TOOL_SERVERS):
+            with self.subTest(settings=settings):
+                got = self.read(raw, settings)
+                self.assertEqual((got['native'], got['observable_text_history_bytes']), (settings, len(raw)))
+                self.assertFalse(VIEWED_KEYS & set(got))
+        for settings in (None, native.OFF, SUBAGENTS):
+            with self.subTest(settings=settings), self.assertRaisesRegex(ContextUnavailable, 'custom_tool_call'):
+                self.read(raw, settings)
+        # Snapshots of settings without image viewing gain no key.
+        self.assertFalse(VIEWED_KEYS & set(self.read(fixture(self.cwd) + tool_call('c1', 'x'), TERMINAL)))
 
     def test_invoke_reads_its_rollout_under_the_call_settings(self):
         root = Path(self.cwd)

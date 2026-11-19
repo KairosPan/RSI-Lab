@@ -335,7 +335,7 @@ CODEX_HOME=/data/separate-codex-home python3 -m rsi_lab --root runs/my-task --ru
   ```
 - 技能：声明了技能的角色带 `-c skills.bundled.enabled=false` 和 `-c project_root_markers=[]`，Codex 既不列出它自带的技能，也不列出工作目录之上各级文件夹里的技能；这样的角色不带 `-c skills.include_instructions=false`。这两项不取决于技能文件夹在哪里，每次调用都相同。
 - 以上各项的 `-c` 值依次为：终端、子 agent、工具服务、技能。
-- 始终不开启：apps、plugins、浏览器与电脑控制、图像生成、skill 搜索、hooks、goals、sleep 工具、第二套多 agent 实现，以及让 skill 自行安装它所依赖的 MCP 服务器的功能（`skill_mcp_dependency_install`）；图像查看只在 `view_image` 为 `true` 时开启。命令带 `--ignore-user-config`，用户自己配置的 MCP 服务器不会加载，加载的只有角色声明的工具服务。事件流里出现 `mcp_tool_call` 时，调用仍按禁用工具失败。
+- 始终不开启：apps、plugins、浏览器与电脑控制、图像生成、skill 搜索、hooks、goals、sleep 工具、第二套多 agent 实现，以及让 skill 自行安装它所依赖的 MCP 服务器的功能（`skill_mcp_dependency_install`）；图像查看只在 `view_image` 为 `true` 时开启。命令带 `--ignore-user-config`，用户自己配置的 MCP 服务器不会加载，加载的只有角色声明的工具服务。没有声明工具服务的角色，事件流里出现 `mcp_tool_call` 时调用仍按禁用工具失败；声明了的，只接受声明过的服务，见[记录了什么](#记录了什么)。
 
 ### Codex 版本
 
@@ -394,6 +394,12 @@ Tool servers for this session, called as tools named mcp__<server>__<tool>: chem
 子 agent 的 rollout 读不出来时，它不在 `child_threads` 里，调用的用量记为未知（见下文）。
 
 rollout 读取器只在角色设置允许时接受工具记录和压缩记录，其余仍按以前拒绝。存在带替换历史（`replacement_history`）的 `compacted` 记录时，会话历史从最后一条这样的记录起计入容量，另加在它之前的 `session_meta` 记录和最后一条完整的 `world_state` 记录：压缩替换的是对话，不是会话说明和环境。上下文清单的 `history_token_method` 这时标为 `rollout-bytes-since-last-compaction-estimate-v1`；否则仍按整个文件计算。使用工具会让 rollout 很快变大，开启原生工具的运行应把 `max_effective_context_bytes` 设得足够大，让 Codex 自己的压缩先于这项容量检查发生；否则 Work 会因容量阻塞，需要用 `agent-rebuild` 换新会话。示例设为 4 MiB。有角色开启了原生工具、而实际的容量上限（`max_effective_context_bytes`，没有时取 `max_input_bytes`，再没有时为 131,072）低于 1,048,576 字节时，`features` 输出的 `native_warnings` 会给出一条提醒；否则它是空列表。
+
+声明了工具服务的角色，事件流里可以有 `mcp_tool_call` 条目，但只能属于声明过的服务：任何一个这样的条目（`item.started`、`item.updated` 或 `item.completed`）的 `server` 不是声明的服务名称时，调用无效，错误为 `Undeclared tool server: '<名称>'`。没有声明工具服务的角色，这样的条目和以前一样按禁用工具拒绝，错误为 `Forbidden tool or unsupported item: 'mcp_tool_call'`。审计按调用记录 `invocation.json` 中保存的设置进行。
+
+模型通过 code-mode 的 `exec` 工具调用工具服务和查看图片，所以 rollout 里是脚本记录（`custom_tool_call` 及其输出），与网页搜索和终端相同。声明了工具服务的角色，即使网页搜索和终端都没有开启，读取器也接受这些记录。每次工具服务调用和每张查看的图片另有一条 `item_completed` 事件（条目类型分别为 `McpToolCall` 和 `ImageView`），与其他事件一样计入历史字节。
+
+`view_image` 为 `true` 时，工具输出里可以有模型查看的图片：`type` 为 `input_image` 的条目，`image_url` 是图片类型的 `data:` URL（`data:image/<子类型>;base64,…`，子类型由字母、数字和 `.`、`+`、`-` 组成），可以再有一个文本的 `detail`，没有其他键。读取器不解码这些图片：Codex 对各种格式和大小的图片写出什么，内核并不都知道，拒绝其中一张就会让整个会话读不出来。它们的字节和其他工具输出一样计入会话的文本历史，所以请求的上下文容量同样约束它们。它们不是随请求附加的图片：不进入快照的 `image_inputs`，也不计入 `observable_image_bytes` 和单独的图片字节上限，后两者只针对 Controller 附加的图片。这样的角色的快照另有 `viewed_image_count`（查看的图片数）和 `viewed_image_encoded_bytes`（各图片 URL 中逗号之后的字符数之和），按整个文件统计；没有开启图片查看的角色，快照没有这两项。`file://`、`https://` 这样的地址、`data:text/…` 这样不是图片类型的 URL，以及多出其他键的条目，一律拒绝；没有开启图片查看的角色，工具输出里出现任何图片都拒绝，与以前相同。
 
 读取器接受的 rollout 记录种类来自 2026-11-17 用模型 `gpt-6.1-sol` 和 Codex CLI 0.163.0 做的实测，2026-11-19 又在 0.170.0 上用同一模型复查过：这个模型的搜索和终端调用都经过 code-mode 的 `exec` 工具。直接调用工具的模型会写出别的记录（例如 `function_call`、`web_search_call` 或 `local_shell_call`），读取器会拒绝它们，这样的每一轮都会以无效告终。开始一次较长的原生运行之前，先用该运行自己的模型做一次简短的试调用，确认它写出的记录能被接受。
 
