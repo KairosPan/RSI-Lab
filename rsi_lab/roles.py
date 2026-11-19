@@ -853,7 +853,7 @@ class CodexExecutor:
         if not isinstance(effect_id, str) or not effect_id or Path(effect_id).name != effect_id or effect_id in ('.', '..'):
             raise ValueError('Unsafe model effect identity')
         folder = self.calls_root / effect_id
-        extra = {}
+        extra, workspace = {}, None
         image_manifest = images.attachment_manifest(request.get('image_attachments', []))
         loaded_images = []
         for item in image_manifest:
@@ -960,7 +960,7 @@ class CodexExecutor:
         charge = codex_ledger.settle_call(folder, settings, session=session, codex_home=result.get('codex_home'),
             path=result.get('native_session_ref'), thread_id=result.get('provider_thread_id'), stream_usage=usage,
             run_root=self.calls_root.parent, finished=terminal_received is True,
-            dispatched=result.get('dispatched') is not False)
+            dispatched=result.get('dispatched') is not False, workspace=workspace)
         if charge['tokens'] is not None:
             costs['tokens'] = charge['tokens']
         context = None
@@ -991,9 +991,10 @@ class CodexExecutor:
                 result['protocol_valid'] = False
                 result['error'] = 'Native session continuation is unverifiable: ' + str(
                     context.get('native_session_error') or 'missing native session snapshot')
-        if charge['profile_error']:
+        if charge['profile_error'] or charge['images_error']:
             result['protocol_valid'] = False
-            result['error'] = '; '.join(filter(None, (charge['profile_error'], result.get('error'))))
+            result['error'] = '; '.join(filter(None, (charge['profile_error'], charge['images_error'],
+                                                      result.get('error'))))
         return {'status': 'succeeded' if success else 'failed_definite' if execution == 'failed_definite' else 'unknown', 'actual_costs': costs,
                 'response': result.get('response'), 'usage': usage,
                 'usage_complete': result.get('usage_complete', False) and charge['usage_known'],

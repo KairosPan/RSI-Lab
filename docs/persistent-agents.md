@@ -379,6 +379,11 @@ Tool servers for this session, called as tools named mcp__<server>__<tool>: chem
 
 因此，失败的命令出现在 `tool_inputs` 里，不出现在 `commands` 里。
 
+`native_activity` 还从 rollout 记下工具服务调用和查看的图片，各自只在角色有这项工具时出现；没有声明工具服务、没有开启查看图片的角色，回执与以前完全相同：
+
+- 声明了工具服务的角色有 `tool_server_calls`：本次调用在 rollout 中的前 32 次工具服务调用（`McpToolCall` 条目），每次记 `server`、`tool`、`status`、`call_id`、`arguments_sha256` 与 `arguments_excerpt`（参数文本的 SHA-256 和前 200 字符；参数是字符串时就是它本身，否则是按键排序的 JSON）、`result_bytes`（结果按 JSON 编码后的字节数，结果为 `null` 时为 `null`）和 `duration_seconds`（耗时，秒）；其余次数记在 `tool_server_calls_omitted`。`call_id` 就是服务收到的请求里的 `_meta.callId`，可以拿它与服务自己的日志对应。某一项不是应有的类型时记为 `null`。
+- 开启了查看图片的角色有 `images_viewed`：`paths` 是前 32 张查看的图片的路径（`ImageView` 条目的 `path`，Codex 写成 `file://` URL），其余张数记在 `paths_omitted`；`count` 是工具输出中图片条目（`input_image`）的个数，`bytes` 是它们解码后的字节数之和，按 base64 的长度和末尾的 `=` 算出，不解码。调用结束后，每张查看的图片（主调用的和计入本轮的每个子 agent 的，不只列出的 32 张）都必须位于该会话的工作目录或某个可读目录之内，两边都按解析后的路径比较、跟随符号链接，不是本地文件的路径（其他 URL、相对路径）算作在外；有一张不在其中，调用就无效，错误为 `Codex showed images outside the folders this role may read: <n> of <m>`，只给张数，不给路径。
+
 子 agent 记在回执的 `child_threads`。本轮 rollout 中任何一条子 agent 活动记录所指、自己的 rollout 又读得出来的子 agent 各占一项，不论运行是否声明了角色：
 
 - `thread_id`：子 agent 的 thread 身份。
@@ -390,6 +395,7 @@ Tool servers for this session, called as tools named mcp__<server>__<tool>: chem
 - `role`：它自己的 rollout 第一条 `session_meta` 记下的角色（`agent_role`）。声明的角色和 Codex 的内置角色（例如 `explorer`）都这样记下；不带角色派出的子 agent 没有这一项，记为 `null`，不是非空文本时也记为 `null`。`null` 不会使调用无效，也不影响计费。
 - `forked_history`：它是否带着父调用的对话历史开始，即那条 `session_meta` 是否有非空的 `forked_from_id`。
 - `searches`：它在本轮做的网页搜索的搜索词，保留前 20 条，每条截到 200 字符，超出的条数记在 `searches_omitted`。它在早先轮次的搜索不计入。
+- `tool_server_calls`、`tool_server_calls_omitted`（声明了工具服务时）和 `images_viewed`（开启了查看图片时）：它本轮的工具服务调用和查看的图片，形状与主调用的相同，取自它自己的 rollout 中计入本轮的那些轮次：事件按其 turn 身份取，不带 turn 身份的工具输出按位置取，即这些轮次的 `turn_context` 之后、下一条 `turn_context` 之前的记录。它在早先轮次和继承来的父调用历史中的记录不计入。
 
 子 agent 的 rollout 读不出来时，它不在 `child_threads` 里，调用的用量记为未知（见下文）。
 

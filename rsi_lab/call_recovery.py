@@ -267,12 +267,13 @@ def recover_codex_receipt(effect, packet_bytes, calls_root, *, interruption_atte
     # terminal event the journal holds is recovered here.
     charge = codex_ledger.settle_call(folder, settings, session=session, codex_home=binding['codex_home'],
         path=native_path, thread_id=thread_id, stream_usage=usage, run_root=root.parent,
-        finished=len(terminals) == 1)
+        finished=len(terminals) == 1, workspace=workspace)
     if charge['tokens'] is not None:
         costs['tokens'] = charge['tokens']
-    if charge['profile_error']:
+    findings = [finding for finding in (charge['profile_error'], charge['images_error']) if finding]
+    if findings:
         protocol_valid = False
-    messages = ([charge['profile_error']] if charge['profile_error'] else []) + errors
+    messages = findings + errors
     latest = read_journal(journal_path)
     if (latest['durable_seq'] != capture['durable_seq'] or latest['head_hash'] != capture['head_hash']
             or latest['gaps']):

@@ -24,8 +24,9 @@ from rsi_lab.interruption import ATTESTATION_SCHEMA, certify_interruption
 from rsi_lab.journal import JournalWriter
 from rsi_lab.store import digest, encode
 from tests.v2.liveness_support import open_run
-from tests.v2.native_fixtures import (PAPERS, PLAIN, PROFILE, R, ROLES, SEARCH, TERMINAL, TERMINAL_AND_SEARCH,
-                                      TOOL_SERVERS, WITH_ROLES, WITH_TOOL_SERVERS, tool_call, turn_context, usage_row)
+from tests.v2.native_fixtures import (PAPERS, PLAIN, PNG, PROFILE, R, ROLES, SEARCH, TERMINAL, TERMINAL_AND_SEARCH,
+                                      TOOL_SERVERS, WITH_ROLES, WITH_TOOL_SERVERS, tool_call, turn_context, usage_row,
+                                      viewed_image)
 from tests.v2.test_native_executor import RESERVATION, RESPONSE, config_form
 from tests.v2.test_native_transport import NATIVE_ACTIVITY, NATIVE_STREAM, THREAD
 from tests.v2.test_session_context import fixture
@@ -266,6 +267,19 @@ class NativeRecoveryTests(unittest.TestCase):
         self.assertFalse(receipt['protocol_valid'])
         self.assertEqual(receipt['error'], 'Permission profile was not in force')
         self.assertEqual(receipt['actual_costs']['tokens'], 107171)
+
+    def test_a_call_that_viewed_an_image_outside_its_folders_is_recovered_invalid(self):
+        settings = {**TERMINAL_AND_SEARCH, 'view_image': True}
+        outside = 'Codex showed images outside the folders this role may read: 1 of 1'
+        for where, error in ((self.workspace / 'plot.png', None), (self.root / 'plot.png', outside)):
+            with self.subTest(where=where):
+                self.write_call(settings, turn=self.this_turn() + viewed_image('exec-2222', str(where), PNG,
+                                                                                turn='t2'))
+                receipt = self.recover(settings)
+                self.assertEqual(receipt['status'], 'succeeded')
+                self.assertEqual((receipt['protocol_valid'], receipt['error']), (error is None, error))
+                self.assertEqual(receipt['native_activity']['images_viewed']['paths'], ['file://' + str(where)])
+                self.assertEqual(receipt['actual_costs']['tokens'], 107171)
 
     def test_a_native_writer_is_quiet_only_when_what_ran_under_it_was_stopped(self):
         for options in ({'descendants_stopped': False}, {'saved': False}):

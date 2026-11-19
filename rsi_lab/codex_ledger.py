@@ -8,30 +8,42 @@ to a rollout of its own, found by its exact thread id as an owned rollout is
 (no scanning); its rows name the parent thread as ``session_id`` and the
 parent's turn as ``root_turn_id``.
 
-The same bytes say what the call did: its tool calls, its compactions, the last
-account snapshot and the permission profile of its last turn context. A
-sub-agent's own rollout says what it was and did: its role, whether it started
-with the parent's history, the model and effort of its turn, and its web
-searches. ``settle_call`` turns all this into what the receipt of a call that
-has ended says, for the executor and for recovery alike; a turn cut off before
-its terminal event is never charged. Nothing here runs Codex or writes anything.
+The same bytes say what the call did: its tool calls, its tool server calls,
+the images it viewed, its compactions, the last account snapshot and the
+permission profile of its last turn context. A sub-agent's own rollout says
+what it was and did: its role, whether it started with the parent's history,
+the model and effort of its turn, its web searches, tool server calls and
+viewed images. ``settle_call`` turns all this into what the receipt of a call
+that has ended says, for the executor and for recovery alike; a turn cut off
+before its terminal event is never charged. Nothing here runs Codex or writes
+anything.
 """
 from __future__ import annotations
 
 import json
 import os
 from pathlib import Path
+import urllib.parse
 
 from . import native as native_tools, transport
-from .session_context import THREAD_ID
-from .store import digest
+from .session_context import THREAD_ID, TOOL_OUTPUT_KINDS, VIEWED_IMAGE_URL
+from .store import digest, encode
 
 COUNTERS = ('input_tokens', 'output_tokens', 'cached_input_tokens')
 # The record field that holds each tool call's input text.
 TOOL_CALLS = {'custom_tool_call': 'input', 'function_call': 'arguments'}
 MAX_TOOL_INPUTS = 32
 MAX_SEARCHES = 20
+MAX_TOOL_SERVER_CALLS = 32
+MAX_IMAGE_PATHS = 32
 EXCERPT_CHARS = 200
+# What a receipt records of tool server calls and of viewed images, each only for a role with that tool.
+TOOL_SERVER_RECORDS = ('tool_server_calls', 'tool_server_calls_omitted')
+IMAGE_RECORDS = ('images_viewed',)
+# Every viewed image's path, which read_turn and read_child also return for the check of the folders those images
+# lie in. No receipt records it.
+IMAGE_PATHS = 'image_view_paths'
+IMAGES_OUTSIDE = 'Codex showed images outside the folders this role may read: {outside} of {viewed}'
 
 
 class LedgerUnavailable(ValueError):
@@ -105,6 +117,79 @@ def _search_query(item):
     return item['query'] if searched else None
 
 
+def _duration(value):
+    """The seconds of an ``McpToolCall`` item's ``duration``, ``{'secs': int, 'nanos': int}``; else ``None``."""
+    secs, nanos = (value.get('secs'), value.get('nanos')) if isinstance(value, dict) else (None, None)
+    if type(secs) is not int or type(nanos) is not int or secs < 0 or not 0 <= nanos < 10 ** 9:
+        return None
+    return secs + nanos / 1e9
+
+
+def _tool_server_call(item):
+    """What a receipt records of one ``McpToolCall`` item: its argument text (the string itself, else its JSON with
+    sorted keys) hashed whole and cut to ``EXCERPT_CHARS``, the size of its result and its duration. ``call_id`` is
+    the item's ``id``, the ``_meta.callId`` the server received. A field of the wrong type is ``None``."""
+    arguments = item.get('arguments')
+    text = arguments if isinstance(arguments, str) else json.dumps(arguments, ensure_ascii=False, sort_keys=True)
+    result = item.get('result')
+    try:
+        size = len(encode(result)) if isinstance(result, dict) else None
+    except ValueError:                      # A value JSON cannot carry, such as NaN or a lone surrogate.
+        size = None
+    return {'server': _text(item.get('server')), 'tool': _text(item.get('tool')), 'status': _text(item.get('status')),
+            'call_id': _text(item.get('id')), 'arguments_sha256': digest(text.encode('utf-8', 'surrogatepass')),
+            'arguments_excerpt': text[:EXCERPT_CHARS], 'result_bytes': size,
+            'duration_seconds': _duration(item.get('duration'))}
+
+
+def _image_bytes(image):
+    """The decoded size of a viewed image's base64 data URL, from its length and padding alone; 0 for any other."""
+    url = image.get('image_url')
+    if not isinstance(url, str) or VIEWED_IMAGE_URL.match(url) is None:
+        return 0
+    payload = url.split(',', 1)[1]
+    return max(0, 3 * len(payload) // 4 - payload[-2:].count('='))
+
+
+def _tools_and_images(items, outputs):
+    """The tool server calls and viewed images of a thread in one call, from its completed ``items`` and its tool
+    ``outputs`` that count.
+
+    ``tool_server_calls`` records the first ``MAX_TOOL_SERVER_CALLS`` ``McpToolCall`` items, the rest counted in
+    ``tool_server_calls_omitted``. ``images_viewed`` keeps the ``path`` of the first ``MAX_IMAGE_PATHS``
+    ``ImageView`` items (``None`` when not text), counts the rest in ``paths_omitted``, and gives the ``count`` of
+    ``input_image`` items in the outputs and their decoded ``bytes``. ``IMAGE_PATHS`` holds every path.
+    """
+    calls = [item for item in items if item.get('type') == 'McpToolCall']
+    paths = [_text(item.get('path')) for item in items if item.get('type') == 'ImageView']
+    images = [entry for output in outputs if isinstance(output, list) for entry in output
+              if isinstance(entry, dict) and entry.get('type') == 'input_image']
+    return {'tool_server_calls': [_tool_server_call(item) for item in calls[:MAX_TOOL_SERVER_CALLS]],
+            'tool_server_calls_omitted': max(0, len(calls) - MAX_TOOL_SERVER_CALLS),
+            'images_viewed': {'paths': paths[:MAX_IMAGE_PATHS], 'paths_omitted': max(0, len(paths) - MAX_IMAGE_PATHS),
+                              'count': len(images), 'bytes': sum(_image_bytes(image) for image in images)},
+            IMAGE_PATHS: paths}
+
+
+def _completed_item(kind, payload):
+    """The item of an ``item_completed`` event when it is an object, else ``None``."""
+    item = payload.get('item') if kind == 'event_msg' and payload.get('type') == 'item_completed' else None
+    return item if isinstance(item, dict) else None
+
+
+def _in_turns(records, turns):
+    """The records that lie after a ``turn_context`` of one of ``turns`` and before the next ``turn_context``: a
+    sub-agent's records of the turns counted for a call, found by position for those that carry no turn id."""
+    inside, kept = False, []
+    for kind, payload in records:
+        if kind == 'turn_context':
+            turn = payload.get('turn_id')
+            inside = isinstance(turn, str) and turn in turns
+        elif inside:
+            kept.append((kind, payload))
+    return kept
+
+
 def _account(limits):
     primary = limits.get('primary') if isinstance(limits.get('primary'), dict) else {}
     credits = limits.get('credits') if isinstance(limits.get('credits'), dict) else {}
@@ -127,7 +212,9 @@ def read_turn(path, *, thread_id, prefix_bytes):
     ``tool_calls`` counts ``custom_tool_call`` and ``function_call`` records; ``tool_inputs`` hashes the input of
     the first ``MAX_TOOL_INPUTS`` and keeps its first ``EXCERPT_CHARS`` characters. ``account`` is the last
     ``rate_limits`` snapshot and ``profile`` the ``permission_profile`` of the last ``turn_context``, each
-    ``None`` when absent.
+    ``None`` when absent. ``tool_server_calls``, ``tool_server_calls_omitted``, ``images_viewed`` and every viewed
+    image's path (``IMAGE_PATHS``) are those of ``_tools_and_images``, from the ``item_completed`` events and the
+    tool outputs after the prefix.
 
     ``LedgerUnavailable`` is raised when the bytes after the prefix are not whole JSON records starting on a
     record boundary, or a usage row belongs to another thread or session, names no turn or has invalid counters.
@@ -135,10 +222,13 @@ def read_turn(path, *, thread_id, prefix_bytes):
     _identity(thread_id, 'the session thread')
     if type(prefix_bytes) is not int or prefix_bytes < 0:
         raise LedgerUnavailable('the prefix must be a byte count')
-    rows, children, tool_inputs = [], [], []
+    rows, children, tool_inputs, items, outputs = [], [], [], [], []
     tool_calls = compactions = 0
     account = profile = None
     for kind, payload in _records(_read(path), prefix_bytes):
+        item = _completed_item(kind, payload)
+        if item is not None:
+            items.append(item)
         if kind == 'token_usage_record':
             if payload.get('thread_id') != thread_id or payload.get('session_id') != thread_id:
                 raise LedgerUnavailable('a usage row belongs to another thread')
@@ -155,13 +245,14 @@ def read_turn(path, *, thread_id, prefix_bytes):
             tool_calls += 1
             if len(tool_inputs) < MAX_TOOL_INPUTS:
                 tool_inputs.append(_tool_input(payload))
+        elif kind == 'response_item' and payload.get('type') in TOOL_OUTPUT_KINDS:
+            outputs.append(payload.get('output'))
         elif kind == 'event_msg' and payload.get('type') == 'token_count':
             if isinstance(payload.get('rate_limits'), dict):
                 account = _account(payload['rate_limits'])
-        elif kind == 'event_msg' and payload.get('type') == 'item_completed':
-            item = payload.get('item')
+        elif item is not None:
             # Any kind: a sub-agent started in an earlier turn may be addressed again in this one.
-            if isinstance(item, dict) and item.get('type') == 'SubAgentActivity':
+            if item.get('type') == 'SubAgentActivity':
                 child = item.get('agent_thread_id')
                 entry = next((known for known in children if known['thread_id'] == child), None)
                 if entry is None:
@@ -174,7 +265,7 @@ def read_turn(path, *, thread_id, prefix_bytes):
     return {'rows': rows, 'turn_ids': list(dict.fromkeys(row['turn_id'] for row in rows)), 'requests': len(rows),
             **{name: sum(row[name] for row in rows) for name in COUNTERS}, 'children': children,
             'tool_calls': tool_calls, 'tool_inputs': tool_inputs, 'tool_inputs_omitted': tool_calls - len(tool_inputs),
-            'compactions': compactions, 'account': account, 'profile': profile}
+            'compactions': compactions, 'account': account, 'profile': profile, **_tools_and_images(items, outputs)}
 
 
 def _rollout_of(codex_home, thread_id):
@@ -217,8 +308,11 @@ def read_child(codex_home, child_thread_id, *, parent_thread_id, root_turn_ids):
     when it is text, else ``None``. ``searches`` are the queries of the child's web searches in this call:
     ``item_completed`` events whose item is an ``Extension`` of kind ``web.search`` or a ``WebSearch``, with a
     text ``query``, and whose ``turn_id`` is the child's own turn of a counted row. The first ``MAX_SEARCHES``
-    are kept, each cut to ``EXCERPT_CHARS`` characters, and the rest are counted in ``searches_omitted``. None
-    of these makes the rollout unreadable.
+    are kept, each cut to ``EXCERPT_CHARS`` characters, and the rest are counted in ``searches_omitted``.
+    ``tool_server_calls``, ``tool_server_calls_omitted``, ``images_viewed`` and every viewed image's path
+    (``IMAGE_PATHS``) are those of ``_tools_and_images``, from the ``item_completed`` events whose ``turn_id`` is
+    such a turn and from the tool outputs, which carry no turn id, that lie after a ``turn_context`` of such a turn
+    and before the next ``turn_context``. None of these makes the rollout unreadable.
     """
     _identity(child_thread_id, 'the sub-agent thread')
     _identity(parent_thread_id, 'the parent thread')
@@ -233,22 +327,27 @@ def read_child(codex_home, child_thread_id, *, parent_thread_id, root_turn_ids):
                and payload.get('session_id') == parent_thread_id and payload.get('root_turn_id') in root_turn_ids]
     rows = [_counters(payload.get('usage')) for payload in counted]
     turns = {turn for turn in (payload.get('turn_id') for payload in counted) if isinstance(turn, str) and turn}
-    searches, context = [], {}
+    searches, items, context = [], [], {}
     for kind, payload in records:
         turn = payload.get('turn_id')
-        if kind == 'event_msg' and payload.get('type') == 'item_completed' and isinstance(turn, str) and turn in turns:
-            query = _search_query(payload.get('item'))
+        item = _completed_item(kind, payload)
+        if item is not None and isinstance(turn, str) and turn in turns:
+            items.append(item)
+            query = _search_query(item)
             if query is not None:
                 searches.append(query[:EXCERPT_CHARS])
         elif kind == 'turn_context' and isinstance(turn, str) and turn in turns:
             context = payload
+    outputs = [payload.get('output') for kind, payload in _in_turns(records, turns)
+               if kind == 'response_item' and payload.get('type') in TOOL_OUTPUT_KINDS]
     role, forked = meta.get('agent_role'), meta.get('forked_from_id')
     return {'thread_id': child_thread_id, 'rollout_ref': str(rollout.resolve()), 'rollout_sha256': digest(raw),
             'requests': len(rows), **{name: sum(row[name] for row in rows) for name in COUNTERS},
             'role': role if isinstance(role, str) and role else None,
             'forked_history': isinstance(forked, str) and forked != '',
             'model': _text(context.get('model')), 'effort': _text(context.get('effort')),
-            'searches': searches[:MAX_SEARCHES], 'searches_omitted': max(0, len(searches) - MAX_SEARCHES)}
+            'searches': searches[:MAX_SEARCHES], 'searches_omitted': max(0, len(searches) - MAX_SEARCHES),
+            **_tools_and_images(items, outputs)}
 
 
 def _settled(source, tokens, reason, turn=None, children=()):
@@ -362,8 +461,47 @@ def _profile_in_force(profile, *, run_root, codex_home):
     return {Path(run_root).resolve(), Path(codex_home).resolve()} <= denied
 
 
+def _resolved(path):
+    """``path`` resolved, symbolic links followed, else ``None`` when it cannot be."""
+    try:
+        return Path(path).resolve()
+    except (OSError, ValueError, RuntimeError):
+        return None
+
+
+def _image_file(path):
+    """The local file an ``ImageView`` item's ``path`` names, resolved; ``None`` when it names none.
+
+    Codex writes a ``file://`` URL with an empty host, whose path is percent-decoded; a plain absolute path is taken
+    as it is, never decoded, since ``%`` is a character of a file name. Anything else names no local file: another
+    scheme, a host, a query or a fragment, a relative path, a value that is not text.
+    """
+    if not isinstance(path, str):
+        return None
+    if path.startswith('file://'):
+        rest = path[len('file://'):]
+        if not rest.startswith('/') or '?' in rest or '#' in rest:
+            return None
+        try:
+            path = os.fsdecode(urllib.parse.unquote_to_bytes(rest))
+        except ValueError:                  # Text that is not UTF-8, such as a lone surrogate.
+            return None
+    return _resolved(path) if path.startswith('/') else None
+
+
+def _images_outside(paths, *, workspace, roots):
+    """How many of the viewed images at ``paths`` lie outside the ``workspace`` and the readable ``roots``.
+
+    Both sides are compared resolved, so a symbolic link in the workspace to a file elsewhere lies outside. Without
+    a ``workspace`` every image lies outside; a path that names no local file (``_image_file``) does too.
+    """
+    places = [] if workspace is None else [place for place in map(_resolved, (workspace, *roots)) if place is not None]
+    files = [_image_file(path) for path in paths]
+    return sum(not (file is not None and any(file.is_relative_to(place) for place in places)) for file in files)
+
+
 def settle_call(folder, settings, *, session, codex_home, path, thread_id, stream_usage, run_root, finished,
-                dispatched=True):
+                dispatched=True, workspace=None):
     """What one ended call is charged, and what its receipt says of its tokens, its native tools and its confinement.
 
     The executor and recovery both settle a call here, so a call gets the same receipt from either. ``folder`` is the
@@ -377,6 +515,10 @@ def settle_call(folder, settings, *, session, codex_home, path, thread_id, strea
     ``tokens`` is what is charged, ``None`` when unknown, and ``usage_known`` is false then. ``profile_error`` is
     ``'Permission profile was not in force'`` when the terminal is on, the call was ``dispatched`` and its last turn
     did not run under the managed offline profile that denies ``run_root`` and ``codex_home``; else ``None``.
+    ``images_error`` is ``None`` unless image viewing is on. With it on, every image the call viewed, the turn's and
+    each readable sub-agent's (every ``ImageView`` path counted for ``images_viewed``, beyond those listed too), must
+    lie in the session's ``workspace`` or one of the terminal's readable roots, compared resolved
+    (``_images_outside``); when any does not, it is ``IMAGES_OUTSIDE`` with how many of how many, never a path.
     ``receipt`` holds ``token_source``, ``token_reason`` (only when unknown), ``stream_usage`` and ``ledger`` for every
     call. ``ledger`` adds up the usage rows read, the turn's and its readable children's (``requests`` and the
     counters, a lower bound when the usage is unknown), and names the turns whose rows those are (``turn_ids``, the
@@ -385,8 +527,10 @@ def settle_call(folder, settings, *, session, codex_home, path, thread_id, strea
     when anything is on, ``native_capabilities`` (``native.receipt_form`` of the settings: each declared sub-agent
     role by its description and the SHA-256 of its instructions), ``native_activity``
     (``transport.stream_activity`` of ``folder`` with the turn's tool calls, tool inputs, compactions and
-    ``provider_requests``) and ``child_threads``, the readable sub-agents as ``settle`` lists them. That activity
-    is recorded only: Codex's own tool calls charge no ``tool_calls``.
+    ``provider_requests``) and ``child_threads``, the readable sub-agents as ``settle`` lists them. With tool
+    servers declared, ``native_activity`` and each ``child_threads`` entry also hold ``TOOL_SERVER_RECORDS``, and
+    with image viewing on ``IMAGE_RECORDS``; other receipts hold neither, and none holds ``IMAGE_PATHS``. That
+    activity is recorded only: Codex's own tool calls charge no ``tool_calls``.
     """
     resumed = session is not None and bool(session.get('provider_thread_id'))
     prefix = ((session or {}).get('context_manifest') or {}).get('native_prefix') or {}
@@ -394,6 +538,8 @@ def settle_call(folder, settings, *, session, codex_home, path, thread_id, strea
                    prefix_bytes=prefix.get('prefix_bytes') if resumed else 0, resumed=resumed,
                    stream_usage=stream_usage, children_possible=settings['subagents'] is not None, finished=finished)
     turn = spent['turn'] or {}
+    viewing = settings.get('view_image', False)
+    recorded = (TOOL_SERVER_RECORDS if native_tools.tool_servers(settings) else ()) + (IMAGE_RECORDS if viewing else ())
     receipt = {'token_source': spent['source'],
                'token_reason': spent['reason'] if spent['source'] == 'unknown' else None,
                'stream_usage': stream_usage, 'ledger': {**{name: spent[name] for name in ('requests',) + COUNTERS},
@@ -401,13 +547,22 @@ def settle_call(folder, settings, *, session, codex_home, path, thread_id, strea
     if dispatched and spent['turn'] is not None:
         receipt['account_snapshot'] = turn['account']
     if native_tools.any_on(settings):
+        unrecorded = set(TOOL_SERVER_RECORDS + IMAGE_RECORDS + (IMAGE_PATHS,)) - set(recorded)
         receipt.update(native_capabilities=native_tools.receipt_form(settings),
                        native_activity={**transport.stream_activity(folder),
                            **{name: turn.get(name) for name in ('tool_calls', 'tool_inputs', 'tool_inputs_omitted',
                                                                 'compactions')},
-                           'provider_requests': turn.get('requests')},
-                       child_threads=spent['children'])
+                           'provider_requests': turn.get('requests'), **{name: turn.get(name) for name in recorded}},
+                       child_threads=[{key: value for key, value in child.items() if key not in unrecorded}
+                                      for child in spent['children']])
     confined = (settings['terminal'] is None or not dispatched
                 or _profile_in_force(turn.get('profile'), run_root=run_root, codex_home=codex_home))
+    images_error = None
+    if viewing:
+        paths = [*turn.get(IMAGE_PATHS, ()), *(path for child in spent['children'] for path in child[IMAGE_PATHS])]
+        roots = (settings['terminal'] or {}).get('readable_roots', ())       # Image viewing needs the terminal.
+        outside = _images_outside(paths, workspace=workspace, roots=roots)
+        images_error = IMAGES_OUTSIDE.format(outside=outside, viewed=len(paths)) if outside else None
     return {'tokens': spent['tokens'], 'usage_known': spent['source'] != 'unknown',
-            'profile_error': None if confined else 'Permission profile was not in force', 'receipt': receipt}
+            'profile_error': None if confined else 'Permission profile was not in force',
+            'images_error': images_error, 'receipt': receipt}

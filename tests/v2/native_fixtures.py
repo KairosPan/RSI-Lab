@@ -7,6 +7,7 @@ Those of tool server calls and viewed images follow the record shapes Codex
 0.170.0 wrote in the spikes of the round-two design. No Codex or model
 process is run.
 """
+import base64
 import hashlib
 import sys
 
@@ -47,6 +48,8 @@ MCP_ITEM = {'type': 'mcp_tool_call', 'server': 'chem', 'tool': 'lookup', 'argume
             'error': None, 'status': 'completed'}
 # The same call's result as the rollout's McpToolCall item holds it.
 MCP_RESULT = {'content': [{'type': 'text', 'text': 'similarity 0.42'}], 'isError': False}
+# A viewed image as the image tool returns it: a PNG of 68 bytes as a base64 data URL.
+PNG = 'data:image/png;base64,' + base64.b64encode(b'\x89PNG\r\n\x1a\n' + bytes(60)).decode()
 
 # A skills folder of one skill, plot-check, and the frozen form it gives. The root in WITH_SKILLS is invented and need
 # not exist for validate; skill_folder() writes the same skill into a temporary folder for what reads a folder.

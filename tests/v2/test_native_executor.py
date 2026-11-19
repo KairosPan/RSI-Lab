@@ -22,12 +22,12 @@ from unittest.mock import patch
 
 from rsi_lab import input_view, native, packets, roles, transport
 from rsi_lab.session_context import read_native_snapshot
-from rsi_lab.store import digest
+from rsi_lab.store import digest, encode
 from tests.v2.liveness_support import Scripted, none, open_run
-from tests.v2.native_fixtures import (CHECK_PY, CHEM, PLAIN, PROFILE, R, ROLES, SEARCH, SKILL_MD, TERMINAL,
-                                      TERMINAL_AND_SUBAGENTS, TOOL_SERVERS, WITH_ROLES, WITH_SKILLS, WITH_TOOL_SERVERS,
-                                      account, child_rollout, here, sub_agent_started, tool_call, turn_context,
-                                      usage_row)
+from tests.v2.native_fixtures import (CHECK_PY, CHEM, MCP_RESULT, PLAIN, PNG, PROFILE, R, ROLES, SEARCH, SKILL_MD,
+                                      TERMINAL, TERMINAL_AND_SUBAGENTS, TOOL_SERVERS, VIEW_IMAGE, WITH_ROLES,
+                                      WITH_SKILLS, WITH_TOOL_SERVERS, account, child_rollout, here, mcp_call,
+                                      sub_agent_started, tool_call, turn_context, usage_row, viewed_image)
 from tests.v2.test_session_context import THREAD, fixture
 
 CHILD = '33333333-3333-3333-3333-333333333333'
@@ -116,10 +116,12 @@ class NativeExecutorTests(unittest.TestCase):
 
     def execute(self, *, settings, rollout=CONFINED_TURN, child=None, stream_usage=STREAM_USAGE, resumed=False,
                 packet_settings=SAME, transport_extra=None, stream_items=(), workspace_files=(), profile=None,
-                finished=True, answer=json.dumps(RESPONSE), arrange=None, alter=None):
+                finished=True, answer=json.dumps(RESPONSE), arrange=None, alter=None, child_records=None):
         """Prepare a Lab turn under ``packet_settings`` (``settings`` unless given) and run it through the Controller
         with the executor, which sees ``settings`` in the Effect. Returns the executor's receipt; a ``ValueError``
         it raises is raised here. ``profile(run_root, codex_home, workspace)`` replaces the confined profile.
+        ``child`` holds the usage rows of the sub-agent ``CHILD``'s rollout, and ``child_records(workspace)`` the
+        records that follow them.
         ``answer`` is the text of the turn's last message. A call that is not ``finished`` was killed before its
         answer and terminal event (``UNFINISHED``). ``arrange(store)`` runs once the Effect is prepared, before
         it is dispatched. ``alter(dispatching, raw)`` returns the Effect and packet the executor is handed."""
@@ -179,7 +181,8 @@ class NativeExecutorTests(unittest.TestCase):
                 stream.write((b'' if resumed else fixture(workspace)) + records(workspace)[1])
             if child is not None:
                 (sessions / ('rollout-fixture-' + CHILD + '.jsonl')).write_bytes(
-                    child_rollout(CHILD, THREAD, child, cwd=workspace))
+                    child_rollout(CHILD, THREAD, child, cwd=workspace)
+                    + (b'' if child_records is None else child_records(workspace)))
             result = {'response': RESPONSE, 'usage': stream_usage, 'usage_complete': True, 'error': None,
                       'protocol_valid': True, 'parse_error': None, 'execution_status': 'succeeded',
                       'terminal_received': True, 'stream_complete': True, 'wall_seconds': .1, 'returncode': 0,
@@ -698,6 +701,86 @@ class NativeExecutorTests(unittest.TestCase):
                                   'effort': None, 'requests': 1, 'input_tokens': 22828, 'output_tokens': 37,
                                   'cached_input_tokens': 0, 'role': None, 'forked_history': True, 'searches': [],
                                   'searches_omitted': 0})
+
+    def test_receipts_carry_the_records_only_for_roles_that_have_the_tool(self):
+        servers = {'chem': here(CHEM)}
+        script = 'text(await tools.mcp__chem__lookup({query:"CCO"}));'
+
+        def lead(*, child=False, call=False, image=False):
+            def rollout(profile, cwd):
+                return b'', (turn_context('t1', profile, cwd=cwd)
+                             + (sub_agent_started(CHILD, '/root/a') if child else b'')
+                             + (tool_call('c1', script) + mcp_call('exec-1111', 'chem', 'lookup', {'query': 'CCO'},
+                                                                   turn='t1') if call else b'')
+                             + (viewed_image('exec-2222', str(cwd / 'plot.png'), PNG, turn='t1') if image else b'')
+                             + usage_row(THREAD, 't1', 't1', 10, 1))
+            return rollout
+
+        def child_records(workspace):
+            return (turn_context('c1', cwd=workspace)
+                    + mcp_call('exec-c1', 'chem', 'lookup', {'query': 'CCO'}, turn='c1', thread=CHILD)
+                    + viewed_image('exec-c2', str(workspace / 'fit.png'), PNG, turn='c1', thread=CHILD))
+        arguments = json.dumps({'query': 'CCO'}, ensure_ascii=False, sort_keys=True)
+
+        def called(call_id):
+            return {'server': 'chem', 'tool': 'lookup', 'status': 'completed', 'call_id': call_id,
+                    'arguments_sha256': digest(arguments.encode()), 'arguments_excerpt': arguments,
+                    'result_bytes': len(encode(MCP_RESULT)), 'duration_seconds': 0.000439666}
+
+        def viewed(name):
+            return {'paths': ['file://' + str(self.workspace() / name)], 'paths_omitted': 0, 'count': 1, 'bytes': 68}
+        records = ('tool_server_calls', 'tool_server_calls_omitted', 'images_viewed')
+        cases = {'tool servers': ({'settings': {**SEARCH, 'tool_servers': servers}, 'rollout': lead(call=True)},
+                                  records[:2]),
+                 'image viewing': ({'settings': VIEW_IMAGE, 'rollout': lead(image=True)}, records[2:]),
+                 'neither': ({'settings': TERMINAL_AND_SUBAGENTS, 'rollout': PARENT_WITH_CHILD, 'child': CHILD_ROWS},
+                             ()),
+                 'both, with a sub-agent': ({'settings': {**TERMINAL_AND_SUBAGENTS, 'view_image': True,
+                                                          'tool_servers': servers},
+                                             'rollout': lead(child=True, call=True, image=True), 'child': CHILD_ROWS,
+                                             'child_records': child_records}, records)}
+        for case, (arguments_of_call, recorded) in cases.items():
+            with self.subTest(case=case), patch.dict(os.environ, {'CHEM_API_KEY': 'invented-secret-4f1c'}):
+                receipt = self.execute(**arguments_of_call)
+                self.assertEqual((receipt['status'], receipt['error']), ('succeeded', None))
+                self.assertTrue(receipt['protocol_valid'])
+                activity = receipt['native_activity']
+                self.assertEqual({name for name in records if name in activity}, set(recorded))
+                if 'tool_server_calls' in recorded:
+                    self.assertEqual((activity['tool_server_calls'], activity['tool_server_calls_omitted']),
+                                     ([called('exec-1111')], 0))
+                if 'images_viewed' in recorded:
+                    self.assertEqual(activity['images_viewed'], viewed('plot.png'))
+                for entry in receipt['child_threads']:
+                    self.assertEqual({name for name in records if name in entry}, set(recorded))
+                    self.assertNotIn('image_view_paths', entry)
+                    if recorded == records:
+                        self.assertEqual((entry['tool_server_calls'], entry['tool_server_calls_omitted'],
+                                          entry['images_viewed']), ([called('exec-c1')], 0, viewed('fit.png')))
+                self.assertEqual(len(receipt['child_threads']), 1 if 'child' in arguments_of_call else 0)
+
+    def test_a_viewed_image_outside_the_folders_the_role_may_read_makes_the_call_invalid(self):
+        def viewing(where):
+            def rollout(profile, cwd):
+                return b'', (turn_context('t1', profile, cwd=cwd) + viewed_image('exec-2222', str(where(cwd)), PNG,
+                                                                                  turn='t1')
+                             + usage_row(THREAD, 't1', 't1', 10, 1))
+            return rollout
+        # The session's role files lie beside its workspace, in the run root the terminal is denied.
+        outside = viewing(lambda cwd: cwd.parent / 'roles' / 'plot.png')
+        receipt = self.execute(settings=VIEW_IMAGE, rollout=outside)
+        self.assertEqual(receipt['status'], 'succeeded')
+        self.assertFalse(receipt['protocol_valid'])
+        self.assertEqual(receipt['error'], 'Codex showed images outside the folders this role may read: 1 of 1')
+        self.assertEqual((receipt['token_source'], receipt['actual_costs']['tokens']), ('ledger', 11))
+        # Joined with the other finding of the settlement.
+        receipt = self.execute(settings=VIEW_IMAGE, rollout=outside, profile=lambda *places: None)
+        self.assertFalse(receipt['protocol_valid'])
+        self.assertEqual(receipt['error'], 'Permission profile was not in force; Codex showed images outside the '
+                                           'folders this role may read: 1 of 1')
+        receipt = self.execute(settings=VIEW_IMAGE, rollout=viewing(lambda cwd: cwd / 'plot.png'))
+        self.assertTrue(receipt['protocol_valid'])
+        self.assertIsNone(receipt['error'])
 
     def dispatch_refused_roles(self, *, arrange=None, alter=None):
         """Dispatch a Lab call whose Effect declares ``ROLES`` through the Controller, the executor and the real

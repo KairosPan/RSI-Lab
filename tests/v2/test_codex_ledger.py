@@ -3,22 +3,45 @@
 Synthetic rollouts built from tests/v2/native_fixtures.py in a temporary Codex
 home; no Codex or model process is run.
 """
+import base64
+import hashlib
 import itertools
+import json
 from pathlib import Path
 import shutil
 import tempfile
 import unittest
+import urllib.parse
 
 from rsi_lab import codex_ledger
-from rsi_lab.store import digest
-from tests.v2.native_fixtures import (PROFILE, account, child_rollout, collab, compacted, frame, sub_agent_activity,
-    sub_agent_started, tool_call, turn_context, usage_row, web_search)
+from rsi_lab.store import digest, encode
+from tests.v2.native_fixtures import (MCP_RESULT, PNG, PROFILE, TERMINAL, VIEW_IMAGE, account, child_rollout, collab,
+    compacted, frame, mcp_call, sub_agent_activity, sub_agent_meta, sub_agent_started, tool_call, turn_context,
+    usage_row, viewed_image, web_search)
 from tests.v2.test_session_context import OTHER, THREAD, fixture
 
 CHILD = '33333333-3333-3333-3333-333333333333'
 EARLIER_CHILD = '44444444-4444-4444-4444-444444444444'
 # A child whose one row belongs to the parent's turn t1: counted whenever its rollout can be read.
 CHILD_ROLLOUT = child_rollout(CHILD, THREAD, [('c1', 't1', 5, 1)])
+ARGS = json.dumps({'query': 'CCO'}, ensure_ascii=False, sort_keys=True)
+# A viewed JPEG of 3,003 bytes; PNG is one of 68.
+JPEG = 'data:image/jpeg;base64,' + base64.b64encode(b'\xff\xd8\xff' + bytes(3000)).decode()
+NO_IMAGES = {'paths': [], 'paths_omitted': 0, 'count': 0, 'bytes': 0}
+OUTSIDE = 'Codex showed images outside the folders this role may read: '
+
+
+def viewed_at(path, *, turn='t1', thread=THREAD):
+    """An ``ImageView`` event whose ``path`` is ``path`` exactly as given, without the image tool's output. A path
+    that UTF-8 cannot carry, such as one holding a lone surrogate, is written as a JSON escape."""
+    return (json.dumps({'timestamp': '2000-01-01T00:00:00Z', 'type': 'event_msg', 'payload': {
+        'type': 'item_completed', 'thread_id': thread, 'turn_id': turn,
+        'item': {'type': 'ImageView', 'id': 'exec-view', 'path': path}}}) + '\n').encode()
+
+
+def file_url(path):
+    """``path`` as Codex writes it in an ``ImageView`` item: a ``file://`` URL, percent-encoded."""
+    return 'file://' + urllib.parse.quote(str(path))
 
 
 class CodexLedgerTests(unittest.TestCase):
@@ -220,7 +243,8 @@ class CodexLedgerTests(unittest.TestCase):
         self.assertEqual(got, {'thread_id': CHILD, 'rollout_ref': str(path.resolve()), 'rollout_sha256': digest(raw),
                                'requests': 1, 'input_tokens': 5, 'output_tokens': 1, 'cached_input_tokens': 0,
                                'role': None, 'forked_history': True, 'model': None, 'effort': None, 'searches': [],
-                               'searches_omitted': 0})
+                               'searches_omitted': 0, 'tool_server_calls': [], 'tool_server_calls_omitted': 0,
+                               'images_viewed': NO_IMAGES, 'image_view_paths': []})
 
     def test_children_are_taken_from_every_sub_agent_activity_of_the_turn(self):
         # A sub-agent started in an earlier turn and addressed again in this one writes rows under this turn.
@@ -368,6 +392,164 @@ class CodexLedgerTests(unittest.TestCase):
                 got = codex_ledger.settle(codex_home=self.home, path=self.write(raw), thread_id=THREAD,
                                           prefix_bytes=prefix, resumed=resumed, stream_usage=stream)
                 self.assertEqual((got['source'], got['tokens'], got['turn']), ('unknown', None, None))
+
+    def test_the_lead_records_its_tool_server_calls(self):
+        # A call before the prefix belongs to an earlier call of the session.
+        first = (fixture(self.cwd) + mcp_call('exec-1110', 'chem', 'lookup', {'query': 'C'}, turn='t0')
+                 + usage_row(THREAD, 't0', 't0', 10, 1))
+        raw = (first + mcp_call('exec-1111', 'chem', 'lookup', {'query': 'CCO'}, turn='t1')
+               + mcp_call('exec-1112', 'papers', 'fetch', {'doi': '10.0000/invented'}, turn='t1', status='failed',
+                          result=None)
+               + usage_row(THREAD, 't1', 't1', 10, 1))
+        turn = codex_ledger.read_turn(self.write(raw), thread_id=THREAD, prefix_bytes=len(first))
+        self.assertEqual(turn['tool_server_calls'][0], {
+            'server': 'chem', 'tool': 'lookup', 'status': 'completed', 'call_id': 'exec-1111',
+            'arguments_sha256': hashlib.sha256(ARGS.encode()).hexdigest(), 'arguments_excerpt': ARGS,
+            'result_bytes': len(encode(MCP_RESULT)), 'duration_seconds': 0.000439666})
+        self.assertEqual((turn['tool_server_calls'][1]['result_bytes'], turn['tool_server_calls_omitted']), (None, 0))
+        self.assertEqual([(call['call_id'], call['server'], call['status']) for call in turn['tool_server_calls']],
+                         [('exec-1111', 'chem', 'completed'), ('exec-1112', 'papers', 'failed')])
+        self.assertEqual((turn['images_viewed'], turn['image_view_paths']), (NO_IMAGES, []))
+
+    def test_more_calls_than_the_limit_are_counted_not_kept(self):
+        long = {'query': 'C' * 300}
+        raw = fixture(self.cwd) + mcp_call('exec-long', 'chem', 'lookup', long, turn='t1') + b''.join(
+            mcp_call('exec-%02d' % number, 'chem', 'lookup', {'query': 'CCO'}, turn='t1') for number in range(34))
+        turn = codex_ledger.read_turn(self.write(raw), thread_id=THREAD, prefix_bytes=0)
+        self.assertEqual(codex_ledger.MAX_TOOL_SERVER_CALLS, 32)
+        self.assertEqual((len(turn['tool_server_calls']), turn['tool_server_calls_omitted']), (32, 3))
+        self.assertEqual([call['call_id'] for call in turn['tool_server_calls']],
+                         ['exec-long'] + ['exec-%02d' % number for number in range(31)])
+        text = json.dumps(long, ensure_ascii=False, sort_keys=True)
+        self.assertEqual({key: turn['tool_server_calls'][0][key] for key in ('arguments_sha256', 'arguments_excerpt')},
+                         {'arguments_sha256': hashlib.sha256(text.encode()).hexdigest(),
+                          'arguments_excerpt': text[:200]})
+        self.assertTrue(all(len(call['arguments_excerpt']) <= 200 for call in turn['tool_server_calls']))
+
+    def test_a_tool_server_call_field_of_the_wrong_type_is_none(self):
+        # Arguments that are already text are hashed as they are.
+        odd = {'type': 'McpToolCall', 'id': 7, 'server': ['chem'], 'tool': None, 'arguments': '{"query":"CCO"}',
+               'status': 1, 'result': 'similarity 0.42', 'duration': [0, 439666]}
+        raw = fixture(self.cwd) + frame('event_msg', {'type': 'item_completed', 'thread_id': THREAD, 'turn_id': 't1',
+                                                      'item': odd})
+        [call] = codex_ledger.read_turn(self.write(raw), thread_id=THREAD, prefix_bytes=0)['tool_server_calls']
+        self.assertEqual(call, {'server': None, 'tool': None, 'status': None, 'call_id': None,
+                                'arguments_sha256': hashlib.sha256(b'{"query":"CCO"}').hexdigest(),
+                                'arguments_excerpt': '{"query":"CCO"}', 'result_bytes': None,
+                                'duration_seconds': None})
+        durations = {(1, 500000000): 1.5, (True, 0): None, (0, 1.5): None, (-1, 0): None, (0, 10 ** 9): None,
+                     ('0', 0): None}
+        for (secs, nanos), seconds in durations.items():
+            with self.subTest(secs=secs, nanos=nanos):
+                raw = fixture(self.cwd) + mcp_call('exec-1', 'chem', 'lookup', {}, turn='t1', duration=(secs, nanos))
+                [call] = codex_ledger.read_turn(self.write(raw), thread_id=THREAD, prefix_bytes=0)['tool_server_calls']
+                self.assertEqual(call['duration_seconds'], seconds)
+
+    def test_viewed_images_are_listed_with_their_count_and_bytes(self):
+        raw = (fixture(self.cwd) + viewed_image('exec-2221', '/w/plot.png', PNG, turn='t1')
+               + viewed_image('exec-2222', '/w/fit.jpg', JPEG, turn='t1') + usage_row(THREAD, 't1', 't1', 10, 1))
+        turn = codex_ledger.read_turn(self.write(raw), thread_id=THREAD, prefix_bytes=0)
+        self.assertEqual(turn['images_viewed'], {'paths': ['file:///w/plot.png', 'file:///w/fit.jpg'],
+                                                 'paths_omitted': 0, 'count': 2, 'bytes': 68 + 3003})
+        self.assertEqual((turn['tool_server_calls'], turn['tool_server_calls_omitted']), ([], 0))
+
+    def test_more_viewed_images_than_the_limit_are_counted_not_kept(self):
+        raw = fixture(self.cwd) + b''.join(viewed_image('exec-%02d' % number, '/w/plot-%02d.png' % number, PNG,
+                                                        turn='t1') for number in range(34))
+        turn = codex_ledger.read_turn(self.write(raw), thread_id=THREAD, prefix_bytes=0)
+        self.assertEqual(codex_ledger.MAX_IMAGE_PATHS, 32)
+        self.assertEqual(turn['images_viewed'], {'paths': ['file:///w/plot-%02d.png' % number for number in range(32)],
+                                                 'paths_omitted': 2, 'count': 34, 'bytes': 34 * 68})
+        # Every path is kept for the check of the folders it lies in, never for a receipt.
+        self.assertEqual(len(turn['image_view_paths']), 34)
+
+    def test_a_child_records_only_this_calls_turns(self):
+        def turn_of(turn, tag, thread=CHILD):
+            return (turn_context(turn) + mcp_call('exec-' + tag, 'chem', 'lookup', {'query': tag}, turn=turn,
+                                                  thread=thread)
+                    + viewed_image('exec-v' + tag, '/w/%s.png' % tag, PNG, turn=turn, thread=thread))
+        # Forked from the lead's history, which holds the lead's own records of t1; then an earlier call's turn c0.
+        history = frame('session_meta', {'id': THREAD, 'cwd': str(self.cwd)}) + turn_of('t1', 'lead', THREAD)
+        self.write_child(sub_agent_meta(CHILD, THREAD, forked=True) + history + turn_of('c0', 'c0')
+                         + turn_of('c1', 'c1') + usage_row(CHILD, 'c0', 't0', 3, 1, session=THREAD)
+                         + usage_row(CHILD, 'c1', 't1', 5, 1, session=THREAD))
+        child = codex_ledger.read_child(self.home, CHILD, parent_thread_id=THREAD, root_turn_ids=['t1'])
+        self.assertEqual(([c['call_id'] for c in child['tool_server_calls']], child['images_viewed']['count']),
+                         (['exec-c1'], 1))
+        self.assertEqual(child['images_viewed'], {'paths': ['file:///w/c1.png'], 'paths_omitted': 0, 'count': 1,
+                                                  'bytes': 68})
+        self.assertEqual((child['tool_server_calls_omitted'], child['image_view_paths']), (0, ['file:///w/c1.png']))
+
+    def settle_call(self, records, settings, **options):
+        """``settle_call`` of a fresh session call whose turn adds ``records`` and one usage row to the base rollout;
+        its folder holds an empty stream."""
+        folder = self.root / 'call'
+        folder.mkdir(exist_ok=True)
+        (folder / 'events.jsonl').write_text('')
+        path = self.write(fixture(self.cwd) + records + usage_row(THREAD, 't1', 't1', 10, 1))
+        return codex_ledger.settle_call(folder, settings, session={'id': 'session'}, codex_home=self.home, path=path,
+                                        thread_id=THREAD, stream_usage=None, run_root=self.root, finished=True,
+                                        **options)
+
+    def test_every_viewed_image_must_lie_in_a_folder_the_role_may_read(self):
+        readable, elsewhere = self.root / 'data', self.root / 'elsewhere'
+        readable.mkdir(); elsewhere.mkdir()
+        (elsewhere / 'secret.png').write_bytes(b'')
+        (self.cwd / 'link.png').symlink_to(elsewhere / 'secret.png')
+        settings = {**VIEW_IMAGE, 'terminal': {'readable_roots': [str(readable)]}}
+        inside = file_url(self.cwd / 'plot.png')
+        cases = {'in the workspace': ([inside], None),
+                 'percent-encoded in the workspace': ([file_url(self.cwd / 'my plot.png')], None),
+                 'a plain absolute path in the workspace': ([str(self.cwd / 'plot.png')], None),
+                 'in a readable root': ([file_url(readable / 'figures' / 'a.png')], None),
+                 'outside both': ([inside, file_url(elsewhere / 'secret.png')], '1 of 2'),
+                 'a symlink in the workspace to outside': ([file_url(self.cwd / 'link.png')], '1 of 1'),
+                 'a percent-encoded way out': ([file_url(self.cwd) + '/%2E%2E/elsewhere/secret.png'], '1 of 1'),
+                 'a plain path is not percent-decoded': (
+                     [str(elsewhere) + '/%2E%2E/' + self.cwd.name + '/plot.png'], '1 of 1'),
+                 'another scheme': (['https://images.example.org/plot.png'], '1 of 1'),
+                 'a file URL with a host': (['file://images.example.org' + urllib.parse.quote(str(self.cwd))
+                                             + '/plot.png'], '1 of 1'),
+                 'a file URL with a fragment': ([inside + '#/../../elsewhere/secret.png'], '1 of 1'),
+                 'a relative path': (['plot.png'], '1 of 1'), 'not text': ([7], '1 of 1'),
+                 'a lone surrogate': ([inside[:-len('.png')] + '\ud800.png',
+                                       str(self.cwd / 'plot\ud800.png')], '2 of 2'),
+                 'a percent-encoded null byte': ([file_url(self.cwd) + '/plot%00.png'], '1 of 1'),
+                 'the last of more than are listed': ([inside] * 33 + [file_url(elsewhere / 'secret.png')],
+                                                      '1 of 34')}
+        for case, (paths, counts) in cases.items():
+            with self.subTest(case=case):
+                got = self.settle_call(b''.join(viewed_at(path) for path in paths), settings, workspace=self.cwd)
+                self.assertEqual(got['images_error'], None if counts is None else OUTSIDE + counts)
+                self.assertEqual(got['receipt']['native_activity']['images_viewed']['paths'],
+                                 [path if isinstance(path, str) else None for path in paths[:32]])
+        # Without the workspace no folder is known, and every viewed image counts as outside.
+        self.assertEqual(self.settle_call(viewed_at(inside) * 2, settings)['images_error'], OUTSIDE + '2 of 2')
+        self.assertIsNone(self.settle_call(b'', settings)['images_error'])
+
+    def test_a_sub_agents_viewed_images_are_checked_too(self):
+        settings = {**VIEW_IMAGE, 'subagents': {'max_concurrent': 3}}
+        outside = file_url(self.root / 'elsewhere' / 'secret.png')
+        # The sub-agent's earlier turn c0 is not this call's and is not checked.
+        self.write_child(child_rollout(CHILD, THREAD, [('c0', 't0', 3, 1), ('c1', 't1', 5, 1)])
+                         + viewed_at(outside, turn='c0', thread=CHILD)
+                         + viewed_at(file_url(self.cwd / 'plot.png'), turn='c1', thread=CHILD)
+                         + viewed_at(outside, turn='c1', thread=CHILD))
+        got = self.settle_call(sub_agent_started(CHILD, '/root/a') + viewed_at(file_url(self.cwd / 'fit.png')),
+                               settings, workspace=self.cwd)
+        self.assertEqual(got['images_error'], OUTSIDE + '1 of 3')
+        [entry] = got['receipt']['child_threads']
+        self.assertEqual(entry['images_viewed']['paths'], [file_url(self.cwd / 'plot.png'), outside])
+        self.assertNotIn('image_view_paths', entry)
+
+    def test_a_role_without_image_viewing_gets_no_images_error(self):
+        outside = viewed_at(file_url(self.root / 'elsewhere' / 'secret.png'))
+        for settings in (TERMINAL, {**TERMINAL, 'subagents': {'max_concurrent': 3}}):
+            for options in ({'workspace': self.cwd}, {}):
+                with self.subTest(settings=settings, options=options):
+                    got = self.settle_call(outside, settings, **options)
+                    self.assertIsNone(got['images_error'])
+                    self.assertNotIn('images_viewed', got['receipt']['native_activity'])
 
 
 if __name__ == '__main__':
