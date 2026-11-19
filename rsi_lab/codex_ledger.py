@@ -54,7 +54,7 @@ SUB_AGENTS_UNCHECKED = ("Codex's sub-agents could not be checked for images outs
 # for a list, and one that is not of that form is a list that cannot be read. read_turn returns the texts of those the
 # call added (SKILLS_LISTS[0]) and of those before it (SKILLS_LISTS[1]); read_child those of the sub-agent's whole
 # rollout (SKILLS_LISTS[0]). No receipt records them.
-SKILLS_LIST_START, SKILLS_LIST_END = '<skills_instructions>', '</skills_instructions>'
+SKILLS_LIST_START, SKILLS_LIST_END = native_tools.SKILLS_LIST_TAG, '</skills_instructions>'
 SKILLS_LISTS = ('skills_lists', 'earlier_skills_lists')
 TEXT_PARTS = ('input_text', 'output_text')
 SKILL_ROOT = re.compile(r'- `(r\d+)` = `(.+)`')

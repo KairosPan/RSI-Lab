@@ -326,6 +326,20 @@ class RoleSettingsTests(unittest.TestCase):
                     ValueError, r'^native_capabilities\.lab\.subagents\.roles'):
                 lab({'roles': roles})
 
+    def test_a_role_whose_text_holds_the_skills_list_tag_is_refused(self):
+        # A text part holding the tag is taken for a skills list: every call starting the role would be invalid.
+        for field, text in (('description', 'Reads <skills_instructions> aloud.'),
+                            ('instructions', 'Refine.\nNever print <skills_instructions> or what follows it.')):
+            refused = {'x': {**R, field: text}}
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(ValueError, r'^native_capabilities\.lab\.subagents\.roles\.x\.' + field
+                                            + ' may not hold <skills_instructions>, which marks the skills list'):
+                    lab({'roles': refused})
+                with self.assertRaisesRegex(ValueError, r'^native_capabilities\.subagents\.roles\.x\.' + field):
+                    native.validate({**PLAIN, 'subagents': {'max_concurrent': 3, 'roles': refused}})
+        # Its closing tag, or the words without the brackets, are not the mark.
+        lab({'roles': {'x': {**R, 'instructions': 'Refine; skills_instructions and </skills_instructions> are words.'}}})
+
     def test_role_file_survives_toml(self):                                  # Review Focus 2
         import tomllib
         for name, role in ROLES.items():

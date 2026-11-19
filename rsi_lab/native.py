@@ -94,6 +94,9 @@ MAX_SKILL_BYTES = 262144
 SKILL_FILE = 'SKILL.md'
 SKILL_DESCRIPTION_RULE = ('one line of 1 to ' + str(MAX_DESCRIPTION) + ' characters, not blank and not beginning '
                           'with | or >')
+# What begins the skills list Codex writes into a thread (codex_ledger.SKILLS_LIST_START). A text part holding it is
+# taken for a list, so a sub-agent role's text may not hold it.
+SKILLS_LIST_TAG = '<skills_instructions>'
 # Codex reads a SKILL.md front matter as YAML; the kernel reads only its name and description lines, and refuses an
 # unquoted value YAML would read otherwise: one beginning with a character YAML reserves, holding a colon that ends a
 # key or a hash that begins a comment, or one YAML reads as null, a boolean or a number.
@@ -912,7 +915,11 @@ def _roles(roles, where):
     match in full or that is one of ``BUILT_IN_ROLES`` or ``AGENTS_TABLE_KEYS``, and a role that does not
     hold exactly a one-line, non-blank ``description`` of at most
     ``MAX_DESCRIPTION`` characters and non-blank ``instructions`` of at most
-    ``MAX_INSTRUCTIONS``.
+    ``MAX_INSTRUCTIONS``. Neither may hold ``SKILLS_LIST_TAG``: Codex writes a
+    role's text into the threads that start and run it, the instructions as a
+    part of the sub-agent's developer message, and a part holding the tag is
+    taken for a skills list, so every call that starts the role would be
+    invalid once its tokens are spent.
     """
     if type(roles) is not dict or len(roles) > MAX_ROLES:
         raise ValueError(where + ' must be an object of at most ' + str(MAX_ROLES) + ' roles')
@@ -929,6 +936,10 @@ def _roles(roles, where):
         if type(instructions) is not str or len(instructions) > MAX_INSTRUCTIONS or not instructions.strip():
             raise ValueError(where + '.' + name + '.instructions must be 1 to ' + str(MAX_INSTRUCTIONS)
                              + ' characters, not blank')
+        for field in ('description', 'instructions'):
+            if SKILLS_LIST_TAG in role[field]:
+                raise ValueError(where + '.' + name + '.' + field + ' may not hold ' + SKILLS_LIST_TAG + ', which '
+                                 'marks the skills list Codex writes: every call that starts the role would be invalid')
     return {name: {'description': roles[name]['description'], 'instructions': roles[name]['instructions']}
             for name in sorted(roles)}
 
