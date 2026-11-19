@@ -1,4 +1,5 @@
-"""Per-role switches for Codex's own tools: web search, a confined terminal, sub-agents, image viewing and tool servers.
+"""Per-role switches for Codex's own tools: web search, a confined terminal, sub-agents, image viewing, tool servers
+and skills.
 
 A run config may carry ``native_capabilities`` keyed by role. Each role's entry
 is read into one settings object in normal form::
@@ -12,7 +13,9 @@ is read into one settings object in normal form::
                              'env': {variable: str, ...}, 'env_from': [variable, ...],
                              'tool_timeout_seconds': 1..3600}
                           | {'description': str, 'url': str, 'headers': {header: str, ...},
-                             'token_from': variable, 'tool_timeout_seconds': 1..3600}, ...}}
+                             'token_from': variable, 'tool_timeout_seconds': 1..3600}, ...},
+     'skills': {'root': absolute directory,
+                'frozen': {name: {'description': str, 'files': {relative path: sha256, ...}}, ...}}}
 
 ``roles`` holds the named sub-agent roles declared to Codex for this role's
 sessions, in name order. It is present only when at least one is declared, so
@@ -28,6 +31,14 @@ resolved, and reaches a URL server at ``url``. ``token_from`` and
 ``token_from`` name environment variables whose values are read at call time;
 the settings hold only the names.
 
+``skills`` is present only when a skills folder is declared, which needs the
+terminal. A config declares it as ``{'root': absolute directory}``; when the run
+is initialised ``freeze_skills`` reads the folder once, stores every file in the
+run store and replaces the entry with its frozen form: the root resolved and,
+in name order, each skill's description and its files' SHA-256 in path order.
+Only the frozen form is accepted, so later changes to the folder never reach
+the run.
+
 A run without the block, and a role absent from it, has everything off.
 """
 from __future__ import annotations
@@ -39,6 +50,8 @@ import os
 from pathlib import Path
 import re
 import urllib.parse
+
+from .store import digest
 
 
 ROLES = ('lab', 'meta', 'literature')
@@ -68,6 +81,16 @@ ENV_NAME = re.compile('[A-Za-z_][A-Za-z0-9_]{0,127}')
 LOOPBACK_HOSTS = ('localhost', '127.0.0.1', '::1')
 HEADER_NAME = re.compile("[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}")
 MAX_HEADER_VALUE = 1024
+# Skills: 1 to MAX_SKILLS per role, each a folder of at most MAX_SKILL_FILES files and MAX_SKILL_BYTES bytes in all.
+SKILL_NAME = re.compile('[a-z][a-z0-9_-]{0,31}')
+MAX_SKILLS = 16
+MAX_SKILL_FILES = 16
+MAX_SKILL_BYTES = 262144
+SKILL_FILE = 'SKILL.md'
+SKILL_DESCRIPTION_RULE = ('one line of 1 to ' + str(MAX_DESCRIPTION) + ' characters, not blank and not beginning '
+                          'with | or >')
+SHA256 = re.compile('[0-9a-f]{64}')
+BLOCK_REFUSAL = 'native_capabilities must be an object keyed by lab, meta or literature'
 # Shared temporary folders the terminal's commands may neither read nor write;
 # each is denied when it exists as a directory on this machine.
 SHARED_TEMP_FOLDERS = ('/tmp', '/private/tmp', '/var/tmp', '/private/var/tmp')
@@ -88,21 +111,98 @@ def capabilities(config):
     ``tool_servers`` object. Readable roots must be absolute existing
     directories and are stored resolved, each once. A local tool server's
     command must be an existing executable file and is stored as given.
-    Anything else raises ``ValueError``.
+    ``skills`` must already be frozen (``freeze_skills``); its folder is not
+    consulted. Anything else raises ``ValueError``.
     """
     block = config.get('native_capabilities', {})
     if type(block) is not dict or set(block) - set(ROLES):
-        raise ValueError('native_capabilities must be an object keyed by lab, meta or literature')
+        raise ValueError(BLOCK_REFUSAL)
     return {role: _role(role, block.get(role, {})) for role in ROLES}
 
 
 def validate(settings):
     """A checked copy of one normal-form settings object; ``None`` is everything off.
 
-    Only the shape is checked: readable roots and tool server commands must be
-    absolute, but the filesystem is not consulted.
+    Only the shape is checked: readable roots, tool server commands and the
+    skills root must be absolute, but the filesystem is not consulted.
     """
     return dict(OFF) if settings is None else _shape(settings, 'native_capabilities')
+
+
+def freeze_skills(block, put=None):
+    """A copy of a run config's ``native_capabilities`` block in which every role's ``skills`` is frozen.
+
+    Each role's ``{'root': folder}`` is read once with ``read_skills`` and
+    becomes ``{'root': folder resolved, 'frozen': {name: {'description': str,
+    'files': {relative path: sha256}}}}``. ``put(raw)`` stores each file's
+    bytes and returns their SHA-256; with ``None`` nothing is stored. Nothing
+    is stored for a folder that is refused. An entry already frozen is read
+    again from its root and must give the same skills, else it has changed
+    since it was frozen.
+
+    A block that is not an object is refused as ``capabilities`` refuses it.
+    Other malformed entries are returned as given, for ``capabilities`` to refuse.
+    The block given is not changed.
+    """
+    if type(block) is not dict:
+        raise ValueError(BLOCK_REFUSAL)
+    frozen_block = dict(block)
+    for role in ROLES:
+        entry = block.get(role)
+        skills = entry.get('skills') if type(entry) is dict else None
+        if type(skills) is not dict or 'root' not in skills or set(skills) - {'root', 'frozen'}:
+            continue
+        where = 'native_capabilities.' + role + '.skills'
+        read = read_skills(skills['root'], where)
+        frozen = {name: {'description': skill['description'],
+                         'files': {path: hashlib.sha256(raw).hexdigest() for path, raw in skill['files'].items()}}
+                  for name, skill in read.items()}
+        if 'frozen' in skills and skills['frozen'] != frozen:
+            raise ValueError(where + ' changed since it was frozen: the folder ' + skills['root']
+                             + ' no longer holds the skills the run stored')
+        for name, skill in read.items():
+            for path, raw in skill['files'].items():
+                if put is not None and put(raw) != frozen[name]['files'][path]:
+                    raise ValueError(where + '.' + name + ': the store did not name ' + path + ' by its SHA-256')
+        frozen_block[role] = {**entry, 'skills': {'root': str(Path(skills['root']).resolve()), 'frozen': frozen}}
+    return frozen_block
+
+
+def read_skills(root, where='native_capabilities.skills'):
+    """The skills of the folder ``root`` read in full: ``{name: {'description': str, 'files': {path: bytes}}}``.
+
+    ``root`` is the absolute path of an existing directory. Every entry whose
+    name begins with ``.`` is skipped, at every level. The others at the top are
+    1 to ``MAX_SKILLS`` directories named by ``SKILL_NAME``, each holding
+    ``SKILL.md`` and any supporting files: regular files only, at most
+    ``MAX_SKILL_FILES`` of them and ``MAX_SKILL_BYTES`` bytes in all, with no
+    symbolic link anywhere. ``SKILL.md`` begins with front matter whose ``name``
+    is the folder's and whose ``description`` ``_is_skill_description`` accepts
+    (``_front_matter``). Skills are in name order, files in path order, each
+    path relative with ``/`` between its parts.
+
+    Raises ``ValueError`` with a message beginning with ``where``.
+    """
+    if type(root) is not str or not os.path.isabs(root) or not os.path.isdir(root):
+        raise ValueError(where + '.root must be the absolute path of an existing directory: ' + repr(root))
+    with os.scandir(root) as scanned:
+        entries = sorted((entry for entry in scanned if not entry.name.startswith('.')), key=lambda e: e.name)
+    if not 1 <= len(entries) <= MAX_SKILLS:
+        raise ValueError(where + ' must hold 1 to ' + str(MAX_SKILLS) + ' skills: ' + root + ' holds '
+                         + str(len(entries)))
+    skills = {}
+    for entry in entries:
+        if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
+            raise ValueError(where + ' may hold only skill folders, and no symbolic link: ' + repr(entry.name))
+        if not SKILL_NAME.fullmatch(entry.name):
+            raise ValueError(where + ' folder names must match ' + SKILL_NAME.pattern + ': ' + repr(entry.name))
+        skill_where = where + '.' + entry.name
+        files = _skill_files(entry.path, skill_where)
+        if SKILL_FILE not in files:
+            raise ValueError(skill_where + ' must hold ' + SKILL_FILE)
+        skills[entry.name] = {'description': _front_matter(files[SKILL_FILE], entry.name, skill_where),
+                              'files': files}
+    return skills
 
 
 def any_on(settings):
@@ -142,6 +242,11 @@ def secret_variables(settings):
 def unset_variables(settings, environ):
     """Those of ``secret_variables(settings)`` that are unset or empty in ``environ``, sorted."""
     return [name for name in secret_variables(settings) if not environ.get(name)]
+
+
+def declared_skills(settings):
+    """The frozen skills of normal-form settings by name; empty when no skills folder is declared."""
+    return settings['skills']['frozen'] if 'skills' in settings else {}
 
 
 def instruction(settings):
@@ -290,7 +395,9 @@ def receipt_form(settings):
     ``description`` and ``instructions_sha256``, the SHA-256 of its UTF-8
     instructions, instead of the instructions, and each local tool server holds
     ``env_names``, the names of its ``env`` in key order, instead of ``env``.
-    Settings without roles or local servers come back equal to their normal form.
+    ``skills`` names each declared skill by the ``store.digest`` of its files
+    mapping. Settings without roles, local servers or skills come back equal to
+    their normal form.
     """
     settings = validate(settings)
     roles = declared_roles(settings)
@@ -303,6 +410,8 @@ def receipt_form(settings):
     for name in local_servers(settings):
         server = settings['tool_servers'][name]
         server['env_names'] = list(server.pop('env'))
+    if 'skills' in settings:
+        settings['skills'] = {name: digest(skill['files']) for name, skill in declared_skills(settings).items()}
     return settings
 
 
@@ -449,7 +558,9 @@ def _shape(settings, where):
     if 'tool_servers' in settings:
         shaped['tool_servers'] = _tool_servers(settings['tool_servers'], where + '.tool_servers')
     if 'skills' in settings:
-        raise ValueError(where + '.skills is not supported yet')
+        if terminal is None:
+            raise ValueError(where + '.skills is accepted only for a role whose terminal is on')
+        shaped['skills'] = _skills(settings['skills'], where + '.skills')
     return shaped
 
 
@@ -628,3 +739,132 @@ def _roles(roles, where):
                              + ' characters, not blank')
     return {name: {'description': roles[name]['description'], 'instructions': roles[name]['instructions']}
             for name in sorted(roles)}
+
+
+def _skills(skills, where):
+    """Frozen skills in normal form: a new object, skills in name order, each skill's files in path order.
+
+    Refuses an entry not frozen with the run, a ``root`` that is not an absolute
+    path, no skill or more than ``MAX_SKILLS``, a name ``SKILL_NAME`` does not
+    match in full, a description ``_is_skill_description`` refuses, and files
+    that do not include ``SKILL.md`` or number more than ``MAX_SKILL_FILES``,
+    whose paths ``_is_skill_path`` refuses or whose hashes are not 64 lowercase
+    hexadecimal characters. Sizes are checked only when the folder is read.
+    """
+    if type(skills) is not dict or 'root' not in skills or set(skills) - {'root', 'frozen'}:
+        raise ValueError(where + ' must be an object holding root, the absolute path of the skills folder')
+    if 'frozen' not in skills:
+        raise ValueError(where + ' must be frozen with the run: init reads the folder at root once and stores it')
+    root, frozen = skills['root'], skills['frozen']
+    if type(root) is not str or not os.path.isabs(root):
+        raise ValueError(where + '.root must be an absolute path')
+    if type(frozen) is not dict or not 1 <= len(frozen) <= MAX_SKILLS:
+        raise ValueError(where + '.frozen must be an object of 1 to ' + str(MAX_SKILLS) + ' skills')
+    for name, skill in frozen.items():
+        if type(name) is not str or not SKILL_NAME.fullmatch(name):
+            raise ValueError(where + '.frozen names must match ' + SKILL_NAME.pattern + ': ' + repr(name))
+        skill_where = where + '.frozen.' + name
+        if type(skill) is not dict or set(skill) != {'description', 'files'}:
+            raise ValueError(skill_where + ' must hold exactly description and files')
+        if not _is_skill_description(skill['description']):
+            raise ValueError(skill_where + '.description must be ' + SKILL_DESCRIPTION_RULE)
+        files = skill['files']
+        if type(files) is not dict or SKILL_FILE not in files or len(files) > MAX_SKILL_FILES:
+            raise ValueError(skill_where + '.files must be an object of at most ' + str(MAX_SKILL_FILES)
+                             + ' files that includes ' + SKILL_FILE)
+        for path, sha256 in files.items():
+            if not _is_skill_path(path):
+                raise ValueError(skill_where + '.files paths must be relative, with no empty part and no part '
+                                 'beginning with .: ' + repr(path))
+            if type(sha256) is not str or not SHA256.fullmatch(sha256):
+                raise ValueError(skill_where + '.files.' + path + ' must be a SHA-256 of 64 lowercase hexadecimal '
+                                 'characters')
+    return {'root': root,
+            'frozen': {name: {'description': frozen[name]['description'],
+                              'files': {path: frozen[name]['files'][path] for path in sorted(frozen[name]['files'])}}
+                       for name in sorted(frozen)}}
+
+
+def _is_skill_description(text):
+    """Whether ``text`` is a skill's description: a description ``_is_description`` accepts that does not begin
+    with ``|`` or ``>``, which in YAML begin block text."""
+    return _is_description(text) and text[0] not in '|>'
+
+
+def _is_skill_path(path):
+    """Whether ``path`` names a skill's file: parts joined by ``/``, none empty and none beginning with ``.``.
+
+    That refuses an absolute path, ``.`` and ``..``, and hidden files and folders, which are never read.
+    """
+    return type(path) is str and all(part and not part.startswith('.') for part in path.split('/'))
+
+
+def _skill_files(folder, where):
+    """The files of one skill folder by relative path, in path order, each read in full.
+
+    Entries whose names begin with ``.`` are skipped. A symbolic link, anything
+    that is neither a regular file nor a directory, more than
+    ``MAX_SKILL_FILES`` files or more than ``MAX_SKILL_BYTES`` bytes is refused.
+    No file is read beyond the bytes left.
+    """
+    paths, pending = [], ['']
+    while pending:
+        prefix = pending.pop()
+        with os.scandir(os.path.join(folder, prefix)) as scanned:
+            for entry in scanned:
+                if entry.name.startswith('.'):
+                    continue
+                path = prefix + entry.name
+                if entry.is_symlink():
+                    raise ValueError(where + ' may not hold a symbolic link: ' + repr(path))
+                if entry.is_dir(follow_symlinks=False):
+                    pending.append(path + '/')
+                elif entry.is_file(follow_symlinks=False):
+                    paths.append(path)
+                else:
+                    raise ValueError(where + ' may hold only regular files and folders: ' + repr(path))
+                if len(paths) > MAX_SKILL_FILES:
+                    raise ValueError(where + ' may hold at most ' + str(MAX_SKILL_FILES) + ' files')
+    files, left = {}, MAX_SKILL_BYTES
+    for path in sorted(paths):
+        with open(os.path.join(folder, path), 'rb') as stream:
+            files[path] = stream.read(left + 1)
+        left -= len(files[path])
+        if left < 0:
+            raise ValueError(where + ' may hold at most ' + str(MAX_SKILL_BYTES) + ' bytes')
+    return files
+
+
+def _front_matter(raw, name, where):
+    """The description the front matter of a skill's ``SKILL.md`` gives, checked; its ``name`` must be ``name``.
+
+    The file begins with a line ``---`` and its front matter ends at the next.
+    The ``name`` and ``description`` lines in it are read as ``key: value``:
+    the value stripped and one pair of matching surrounding quotes removed.
+    Each may be given once.
+    """
+    try:
+        lines = raw.decode('utf-8').split('\n')
+    except UnicodeDecodeError:
+        raise ValueError(where + '.' + SKILL_FILE + ' must be UTF-8 text') from None
+    ends = [index for index, line in enumerate(lines) if line.strip() == '---']
+    if ends[:1] != [0] or len(ends) < 2:
+        raise ValueError(where + '.' + SKILL_FILE + ' must begin with front matter between two lines ---')
+    values = {}
+    for line in lines[1:ends[1]]:
+        key, colon, value = line.partition(':')
+        if key not in ('name', 'description') or not colon or value[:1] not in ('', ' ', '\t'):
+            continue
+        if key in values:
+            raise ValueError(where + '.' + SKILL_FILE + ' front matter gives ' + key + ' more than once')
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in '"\'':
+            value = value[1:-1]
+        values[key] = value
+    if values.get('name') != name:
+        raise ValueError(where + '.' + SKILL_FILE + ' front matter must give the name ' + name
+                         + ', the name of its folder')
+    if not _is_skill_description(values.get('description')):
+        raise ValueError(where + '.' + SKILL_FILE + ' front matter must give a description that is '
+                         + SKILL_DESCRIPTION_RULE)
+    return values['description']

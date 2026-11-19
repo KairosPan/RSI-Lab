@@ -185,7 +185,7 @@ Scientific Memory 的领域身份及经验解释继续通过 `scientific_identit
 
 ### 工具服务与查看图片
 
-每个角色还可以声明两项可选设置：`tool_servers`，Codex 在调用中可以使用的工具服务（MCP 服务器）；`view_image`，让模型查看图片文件。不写、`view_image` 为 `false` 或 `tool_servers` 为空对象时，这一项不进入保存的设置，设置与没有这两项之前完全相同。
+每个角色还可以声明两项可选设置：`tool_servers`，Codex 在调用中可以使用的工具服务（MCP 服务器）；`view_image`，让模型查看图片文件。不写、`view_image` 为 `false` 或 `tool_servers` 为空对象时，这一项不进入保存的设置，设置与没有这两项之前完全相同。下面的例子还声明了技能文件夹 `skills`，见[技能](#技能)。
 
 ```json
 "native_capabilities": {
@@ -201,7 +201,8 @@ Scientific Memory 的领域身份及经验解释继续通过 `scientific_identit
                  "url": "https://papers.example.org/mcp",
                  "token_from": "PAPERS_TOKEN",
                  "headers": {"X-Client": "rsi-lab"}}
-    }
+    },
+    "skills": {"root": "/data/research-skills"}
   }
 }
 ```
@@ -222,6 +223,51 @@ Codex 每次调用工具服务都会把 thread 与会话的身份、模型和 Co
 URL 服务和网页搜索一样是一条出口：终端没有网络，但角色读得到的任何内容都可以写进工具调用的参数，离开本机。所以声明了 URL 服务的角色，同样不能读得到私有数据和凭证，见上一节。
 
 `view_image` 只有在该角色开启终端时才能为 `true`，否则配置被拒绝。查看图片只能读终端命令读得到的地方，即工作目录和可读目录；看到的图片同样只是线索。
+
+### 技能
+
+`skills` 为一个角色声明一个技能文件夹。运行配置里只写文件夹的位置：`"skills": {"root": "/data/research-skills"}`。`root` 必须是已存在目录的绝对路径，按解析后的路径保存；它本身可以是符号链接。
+
+文件夹里每个技能占一个子文件夹，其中必须有 `SKILL.md`，其余是辅助文件，可以放在下级目录里：
+
+```
+/data/research-skills/
+  plot-check/
+    SKILL.md
+    scripts/check.py
+```
+
+`SKILL.md` 以 front matter 开头：第一行是 `---`，到下一行 `---` 为止。
+
+```markdown
+---
+name: plot-check
+description: Checks a plot before it is reported.
+---
+Open the plot and check its axes and units.
+```
+
+front matter 中以 `name:` 和 `description:` 开头的行按 `key: value` 读取：值去掉首尾空白，再去掉一对首尾相同的引号（所以 `description: "Checks: axes."` 读作 `Checks: axes.`）；每个键只能出现一次，其余各行不读取。`name` 必须等于子文件夹的名称。`description` 是一行 1 到 300 个字符、不全是空白，不能以 `|` 或 `>` 开头（YAML 的多行写法）。
+
+限制：
+
+- 每个角色 1 到 16 个技能；空文件夹被拒绝。
+- 技能名称（即子文件夹名称）匹配 `[a-z][a-z0-9_-]{0,31}`。文件夹的顶层只能是技能子文件夹，不能有普通文件。
+- 每个技能最多 16 个文件，合计不超过 262,144 字节，`SKILL.md` 也计在内。
+- 只能是普通文件和目录；`root` 之下任何位置出现符号链接都被拒绝，命名管道之类的特殊文件同样。
+- 名称以 `.` 开头的项在每一层都被跳过，不读取、不计数、不保存，例如 Finder 的 `.DS_Store` 或 `.git`。
+
+`skills` 只在该角色开启终端时接受，否则配置被拒绝：模型要用终端读技能的文件。
+
+`init` 把文件夹读取一次。任何一项不符合，`init` 拒绝这个运行配置，不创建运行，错误信息以 `native_capabilities.<角色>.skills` 开头。符合时，每个文件的内容存进运行根目录的对象存储（`objects/<内容的 SHA-256>`），保存的设置里按名称顺序记下每个技能的 `description` 和它的文件，文件按相对路径的顺序，每个只记 SHA-256：
+
+```json
+"skills": {"root": "/data/research-skills",
+           "frozen": {"plot-check": {"description": "Checks a plot before it is reported.",
+                                     "files": {"SKILL.md": "<SHA-256>", "scripts/check.py": "<SHA-256>"}}}}
+```
+
+此后修改、增删甚至删除这个文件夹，都影响不到这次运行，运行用的是存下的副本。Runtime 只接受这种冻结后的形式：没有 `frozen` 的 `skills`（例如不经 `init`、直接交给 Controller 的运行配置）在启动时被拒绝，错误中写明 `must be frozen with the run`。运行配置里已经写了 `frozen` 时，`init` 仍从 `root` 重新读取，读到的必须与之完全相同，否则拒绝，错误中写明 `changed since it was frozen`。回执里的 `skills` 只记每个技能的名称和它的文件表（路径到 SHA-256 的对象）的 hash。
 
 ### Codex 命令的变化
 

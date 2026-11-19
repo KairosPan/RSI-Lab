@@ -5,6 +5,7 @@ The rollout builders return complete records shaped as the live probe of
 tests/v2/test_session_context.py, whose ``frame`` they use and re-export.
 No Codex or model process is run.
 """
+import hashlib
 import sys
 
 from tests.v2.test_session_context import frame
@@ -37,10 +38,28 @@ LOCAL_SERVER_ONLY = {'web_search': False, 'terminal': None, 'subagents': None, '
 URL_SERVER_ONLY = {'web_search': False, 'terminal': None, 'subagents': None, 'tool_servers': {'papers': PAPERS}}
 VIEW_IMAGE = {**TERMINAL, 'view_image': True}
 
+# A skills folder of one skill, plot-check, and the frozen form it gives. The root in WITH_SKILLS is invented and need
+# not exist for validate; skill_folder() writes the same skill into a temporary folder for what reads a folder.
+SKILL_MD = (b'---\nname: plot-check\ndescription: Checks a plot before it is reported.\n---\n'
+            b'Open the plot and check its axes and units.\n')
+CHECK_PY = b'print("axes checked")\n'
+PLOT_CHECK = {'description': 'Checks a plot before it is reported.',
+              'files': {'SKILL.md': hashlib.sha256(SKILL_MD).hexdigest(),
+                        'scripts/check.py': hashlib.sha256(CHECK_PY).hexdigest()}}
+WITH_SKILLS = {**TERMINAL, 'skills': {'root': '/data/research-skills', 'frozen': {'plot-check': PLOT_CHECK}}}
+
 
 def here(server):
     """A local tool server whose command is this interpreter, an executable file ``capabilities`` accepts."""
     return {**server, 'command': sys.executable}
+
+
+def skill_folder(root):
+    """``root`` made a skills folder holding plot-check: ``SKILL.md`` and ``scripts/check.py``. Returns ``root``."""
+    (root / 'plot-check' / 'scripts').mkdir(parents=True)
+    (root / 'plot-check' / 'SKILL.md').write_bytes(SKILL_MD)
+    (root / 'plot-check' / 'scripts' / 'check.py').write_bytes(CHECK_PY)
+    return root
 
 
 def PROFILE(run_root, codex_home, workspace):

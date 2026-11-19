@@ -17,8 +17,10 @@ from rsi_lab.controller import Controller
 from rsi_lab.runtime import Runtime
 from rsi_lab.store import Store
 from tests.v2.liveness_support import BUDGETS
-from tests.v2.native_fixtures import (CHEM, PAPERS, PLAIN, R, ROLES, SEARCH, TERMINAL, URL_SERVER_ONLY, VIEW_IMAGE,
-                                      WITH_ROLES, WITH_TOOL_SERVERS, here)
+from rsi_lab.store import digest
+from tests.v2.native_fixtures import (CHECK_PY, CHEM, PAPERS, PLAIN, PLOT_CHECK, R, ROLES, SEARCH, SKILL_MD, TERMINAL,
+                                      URL_SERVER_ONLY, VIEW_IMAGE, WITH_ROLES, WITH_SKILLS, WITH_TOOL_SERVERS, here,
+                                      skill_folder)
 
 INVALID = {'lab': {'shell': True}}
 EXAMPLE = Path(__file__).resolve().parents[2] / 'examples' / 'native-capabilities-run.json'
@@ -444,6 +446,246 @@ class ToolServerSettingsTests(unittest.TestCase):
                                        'args': CHEM['args'], 'env_names': ['CHEM_MODE'], 'env_from': ['CHEM_API_KEY'],
                                        'tool_timeout_seconds': 300})
         self.assertEqual(got['papers'], PAPERS)
+
+
+def skill_text(name, description='Checks a plot before it is reported.'):
+    """The SKILL.md of a skill whose front matter gives ``name`` and the line ``description: <description>``."""
+    return ('---\nname: ' + name + '\ndescription: ' + description + '\n---\nUse it.\n').encode()
+
+
+def add_skill(root, name, text=None):
+    """A skill folder ``name`` in ``root`` holding only SKILL.md: ``text``, else ``skill_text(name)``."""
+    (root / name).mkdir()
+    (root / name / 'SKILL.md').write_bytes(skill_text(name) if text is None else text)
+
+
+def sha(raw):
+    return hashlib.sha256(raw).hexdigest()
+
+
+class SkillSettingsTests(unittest.TestCase):
+    """A declared skills folder: how it is read and frozen into the run, its limits, its normal form and receipt."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix='rsi-skills-'))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def lab_skills(self, root):
+        """The Lab's skills as capabilities reads them once a Lab block with the terminal and the skills folder
+        ``root``, given as is, is frozen."""
+        block = native.freeze_skills({'lab': {'terminal': True, 'skills': {'root': root}}})
+        return native.capabilities({'native_capabilities': block})['lab']['skills']
+
+    def test_freezing_stores_every_file_and_records_its_hash(self):
+        root, stored = skill_folder(self.tmp / 'skills'), {}
+        def put(raw):
+            stored[hashlib.sha256(raw).hexdigest()] = raw
+            return hashlib.sha256(raw).hexdigest()
+        block = native.freeze_skills({'lab': {'terminal': True, 'skills': {'root': str(root)}}}, put)
+        self.assertEqual(block['lab']['skills'], {'root': str(root.resolve()), 'frozen': {'plot-check': PLOT_CHECK}})
+        self.assertEqual(sorted(stored.values()), sorted([SKILL_MD, CHECK_PY]))
+        self.assertEqual(native.capabilities({'native_capabilities': block})['lab'],
+                         {**TERMINAL, 'skills': block['lab']['skills']})
+        self.assertEqual(list(block['lab']['skills']['frozen']['plot-check']['files']), ['SKILL.md', 'scripts/check.py'])
+
+    def test_freezing_leaves_everything_else_as_given(self):
+        root = str(skill_folder(self.tmp / 'skills'))
+        for block in ([], None, 'lab'):
+            with self.subTest(block=block), self.assertRaisesRegex(
+                    ValueError, '^native_capabilities must be an object keyed by lab, meta or literature$'):
+                native.freeze_skills(block)
+        # Malformed entries pass through unchanged, for capabilities to refuse.
+        others = {'lab': {'terminal': True}, 'meta': {'skills': 'on'}, 'literature': [],
+                  'planner': {'skills': {'root': root}}}
+        self.assertEqual(native.freeze_skills(others), others)
+        for skills in ('on', {}, {'root': root, 'extra': 1}):
+            block = native.freeze_skills({'lab': {'terminal': True, 'skills': skills}})
+            self.assertEqual(block, {'lab': {'terminal': True, 'skills': skills}})
+            with self.subTest(skills=skills), self.assertRaisesRegex(ValueError, '^native_capabilities.lab.skills'):
+                native.capabilities({'native_capabilities': block})
+        given = {'lab': {'terminal': True, 'skills': {'root': root}}, 'meta': {'web_search': True}}
+        frozen = native.freeze_skills(given)
+        self.assertEqual(given, {'lab': {'terminal': True, 'skills': {'root': root}}, 'meta': {'web_search': True}})
+        self.assertEqual(frozen['meta'], {'web_search': True})
+
+    def test_later_changes_to_the_folder_do_not_reach_the_run(self):
+        root, stored = skill_folder(self.tmp / 'skills'), []
+        def put(raw):
+            stored.append(raw)
+            return hashlib.sha256(raw).hexdigest()
+        block = native.freeze_skills({'lab': {'terminal': True, 'skills': {'root': str(root)}}})
+        settings = native.capabilities({'native_capabilities': block})
+        # An unchanged folder freezes to the same entry, and its files are stored again for the new run.
+        self.assertEqual(native.freeze_skills(block, put), block)
+        self.assertEqual(sorted(stored), sorted([SKILL_MD, CHECK_PY]))
+        (root / 'plot-check' / 'scripts' / 'check.py').write_bytes(b'print("changed")\n')
+        self.assertEqual(native.capabilities({'native_capabilities': block}), settings)
+        with self.assertRaisesRegex(ValueError, '^native_capabilities.lab.skills.*changed since it was frozen'):
+            native.freeze_skills(block)
+        shutil.rmtree(root)
+        self.assertEqual(native.capabilities({'native_capabilities': block}), settings)
+
+    def test_the_kernel_refuses_an_unfrozen_entry_and_skills_without_a_terminal(self):
+        root = str(skill_folder(self.tmp / 'skills'))
+        with self.assertRaisesRegex(ValueError, '^native_capabilities.lab.skills.*must be frozen with the run'):
+            lab_from({'terminal': True, 'skills': {'root': root}})
+        with self.assertRaisesRegex(ValueError, '^native_capabilities.skills.*must be frozen with the run'):
+            native.validate({**TERMINAL, 'skills': {'root': root}})
+        block = native.freeze_skills({'lab': {'web_search': True, 'skills': {'root': root}}})
+        with self.assertRaisesRegex(ValueError, '^native_capabilities.lab.skills'):
+            native.capabilities({'native_capabilities': block})
+        with self.assertRaisesRegex(ValueError, '^native_capabilities.skills'):
+            native.validate({**SEARCH, 'skills': WITH_SKILLS['skills']})
+
+    def test_folder_limits_refuse_the_run(self):
+        room = native.MAX_SKILL_BYTES - len(SKILL_MD) - len(CHECK_PY)
+        elsewhere = self.tmp / 'elsewhere'
+        add_skill(self.tmp, 'elsewhere')
+        def plot(root, name='SKILL.md'):
+            return root / 'plot-check' / name
+        def front(old, new):
+            return lambda root: plot(root).write_bytes(SKILL_MD.replace(old, new))
+        def link_file(root):
+            (root / 'plot-check' / 'scripts' / 'check.py').unlink()
+            (root / 'plot-check' / 'scripts' / 'check.py').symlink_to(elsewhere / 'SKILL.md')
+        def only_hidden(root):
+            shutil.rmtree(root / 'plot-check')
+            (root / '.DS_Store').write_bytes(b'x')
+        cases = {
+            'an empty folder': lambda root: shutil.rmtree(root / 'plot-check'),
+            'only hidden entries': only_hidden,
+            '17 skills': lambda root: [add_skill(root, 's%02d' % i) for i in range(16)],
+            '17 files in one skill': lambda root: [plot(root, 'f%02d' % i).write_bytes(b'x') for i in range(15)],
+            '262,145 bytes in one skill': lambda root: plot(root, 'data.bin').write_bytes(b'x' * (room + 1)),
+            'a folder named Plot': lambda root: add_skill(root, 'Plot'),
+            'a 33-character name': lambda root: add_skill(root, 'a' * 33),
+            'another name in the front matter': front(b'name: plot-check', b'name: plot'),
+            'no name in the front matter': front(b'name: plot-check\n', b''),
+            'a name given twice': front(b'name: plot-check\n', b'name: plot-check\nname: plot-check\n'),
+            'no SKILL.md': lambda root: plot(root).unlink(),
+            'no front matter': lambda root: plot(root).write_bytes(b'Open the plot.\n'),
+            'unclosed front matter': lambda root: plot(root).write_bytes(SKILL_MD.replace(b'\n---\nOpen', b'\nOpen')),
+            'SKILL.md not UTF-8': front(b'reported.', b'reported \xff.'),
+            'a blank description': front(b'Checks a plot before it is reported.', b'   '),
+            'an empty quoted description': front(b'Checks a plot before it is reported.', b'""'),
+            'no description': front(b'description: Checks a plot before it is reported.\n', b''),
+            'block text': front(b'Checks a plot before it is reported.', b'>\n  Checks a plot.'),
+            'literal block text': front(b'Checks a plot before it is reported.', b'|'),
+            'a 301-character description': front(b'Checks a plot before it is reported.', b'd' * 301),
+            'a symlinked file': link_file,
+            'a symlinked skill folder': lambda root: (root / 'elsewhere').symlink_to(elsewhere, target_is_directory=True),
+            'a regular file at the top level': lambda root: (root / 'README.md').write_bytes(b'Skills.\n'),
+            'a named pipe in a skill': lambda root: os.mkfifo(plot(root, 'pipe')),
+        }
+        for index, (case, change) in enumerate(cases.items()):
+            root = skill_folder(self.tmp / ('case-%02d' % index))
+            change(root)
+            with self.subTest(case=case), self.assertRaisesRegex(ValueError, '^native_capabilities.lab.skills'):
+                self.lab_skills(str(root))
+        # A refused folder stores nothing, not even the skills read before the one refused.
+        root, stored = skill_folder(self.tmp / 'partly'), []
+        add_skill(root, 'a-first')
+        front(b'Checks a plot before it is reported.', b'>')(root)
+        with self.assertRaisesRegex(ValueError, '^native_capabilities.lab.skills.plot-check'):
+            native.freeze_skills({'lab': {'terminal': True, 'skills': {'root': str(root)}}},
+                                 lambda raw: stored.append(raw) or sha(raw))
+        self.assertEqual(stored, [])
+        for root in ('research-skills', str(self.tmp / 'missing'), str(elsewhere / 'SKILL.md'), 7):
+            with self.subTest(root=root), self.assertRaisesRegex(ValueError, '^native_capabilities.lab.skills.root'):
+                self.lab_skills(root)
+
+    def test_the_limits_themselves_are_accepted(self):
+        root = skill_folder(self.tmp / 'skills')
+        for name in ['s%02d' % i for i in range(12)] + ['a' * 32, 'b_-9']:
+            add_skill(root, name)
+        add_skill(root, 'quoted', skill_text('quoted', '"Checks: axes."'))
+        (root / 'b_-9' / 'SKILL.md').write_bytes(skill_text('b_-9', "'" + 'd' * 300 + "'"))
+        plot = root / 'plot-check'
+        for i in range(13):
+            (plot / ('f%02d' % i)).write_bytes(b'x')
+        (plot / 'data.bin').write_bytes(b'x' * (native.MAX_SKILL_BYTES - len(SKILL_MD) - len(CHECK_PY) - 13))
+        for hidden in (root / '.DS_Store', plot / '.DS_Store', plot / 'scripts' / '.cache'):
+            hidden.write_bytes(b'\0' * native.MAX_SKILL_BYTES)
+        (plot / '.git').mkdir()
+        (plot / '.git' / 'config').write_bytes(b'[core]\n')
+        frozen = self.lab_skills(str(root))['frozen']
+        self.assertEqual(len(frozen), native.MAX_SKILLS)
+        self.assertEqual(list(frozen), sorted(frozen))
+        self.assertEqual(frozen['quoted']['description'], 'Checks: axes.')
+        self.assertEqual(frozen['b_-9']['description'], 'd' * 300)
+        files = frozen['plot-check']['files']
+        self.assertEqual(len(files), native.MAX_SKILL_FILES)
+        self.assertEqual(list(files), sorted(files))
+        self.assertEqual(files['SKILL.md'], PLOT_CHECK['files']['SKILL.md'])
+        self.assertFalse([path for path in files if '.DS_Store' in path or '.git' in path or '.cache' in path])
+        self.assertEqual(native.read_skills(str(root))['plot-check']['files']['scripts/check.py'], CHECK_PY)
+
+    def test_the_frozen_form_is_checked_without_the_filesystem(self):
+        self.assertEqual(native.validate(WITH_SKILLS), WITH_SKILLS)          # The root need not exist.
+        other = {'description': 'Another.', 'files': {'scripts/z.py': sha(b'z'), 'SKILL.md': sha(b'a')}}
+        got = native.validate({**TERMINAL, 'skills': {'root': '/data/research-skills',
+                                                      'frozen': {'z-skill': other, 'plot-check': PLOT_CHECK}}})
+        self.assertEqual(list(got['skills']['frozen']), ['plot-check', 'z-skill'])
+        self.assertEqual(list(got['skills']['frozen']['z-skill']['files']), ['SKILL.md', 'scripts/z.py'])
+        def with_skill(**skill):
+            return {'root': '/data/research-skills', 'frozen': {'plot-check': {**PLOT_CHECK, **skill}}}
+        def with_files(**files):
+            return with_skill(files={**PLOT_CHECK['files'], **files})
+        bad = ['on', {}, {'frozen': WITH_SKILLS['skills']['frozen']}, {**WITH_SKILLS['skills'], 'extra': 1},
+               {**WITH_SKILLS['skills'], 'root': 'research-skills'}, {**WITH_SKILLS['skills'], 'root': 7},
+               {'root': '/data/research-skills', 'frozen': {}}, {'root': '/data/research-skills', 'frozen': []},
+               {'root': '/data/research-skills', 'frozen': {'s%02d' % i: PLOT_CHECK for i in range(17)}},
+               {'root': '/data/research-skills', 'frozen': {'Plot': PLOT_CHECK}},
+               {'root': '/data/research-skills', 'frozen': {'a' * 33: PLOT_CHECK}},
+               {'root': '/data/research-skills', 'frozen': {'-x': PLOT_CHECK}},
+               {'root': '/data/research-skills', 'frozen': {'plot-check': 'skill'}},
+               {'root': '/data/research-skills', 'frozen': {'plot-check': {'files': PLOT_CHECK['files']}}},
+               with_skill(extra=1), with_skill(description=''), with_skill(description='a\nb'),
+               with_skill(description='> folded'), with_skill(description='| literal'),
+               with_skill(description='d' * 301), with_skill(description=7),
+               with_skill(files={}), with_skill(files=[]), with_skill(files={'scripts/check.py': sha(CHECK_PY)}),
+               with_files(**{'f%02d' % i: sha(b'x') for i in range(15)}),
+               *[with_files(**{path: sha(b'x')}) for path in ('../x', '/abs', 'a//b', './x', '.hidden', 'a/.git/x',
+                                                              'a/', 'a/..', '')],
+               with_files(**{'x': sha(b'x').upper()}), with_files(**{'x': sha(b'x')[:63]}), with_files(**{'x': 7})]
+        for skills in bad:
+            with self.subTest(skills=skills), self.assertRaisesRegex(ValueError, '^native_capabilities.skills'):
+                native.validate({**TERMINAL, 'skills': skills})
+
+    def test_declared_skills_are_read_from_normal_form_settings(self):
+        self.assertEqual(native.declared_skills(WITH_SKILLS), {'plot-check': PLOT_CHECK})
+        for settings in (TERMINAL, native.OFF, VIEW_IMAGE, WITH_TOOL_SERVERS):
+            with self.subTest(settings=settings):
+                self.assertEqual(native.declared_skills(settings), {})
+
+    def test_init_freezes_the_folder_into_the_run(self):
+        root = skill_folder(self.tmp / 'skills')
+        home, codex_home = self.tmp / 'home', self.tmp / 'codex-home'
+        home.mkdir()
+        codex_home.mkdir()
+        path = self.tmp / 'config.json'
+        path.write_text(json.dumps({'budgets': BUDGETS, 'native_capabilities': {
+            'lab': {'terminal': True, 'skills': {'root': str(root)}}}}))
+        ledger = str(self.tmp / 'ledger')
+        printed = io.StringIO()
+        with mock.patch.dict(os.environ, {'HOME': str(home), 'CODEX_HOME': str(codex_home)}):
+            with contextlib.redirect_stdout(io.StringIO()):
+                main(['--root', ledger, '--run', 'r', 'init', '--config', str(path)])
+            (root / 'plot-check' / 'scripts' / 'check.py').write_bytes(b'print("changed")\n')
+            with contextlib.redirect_stdout(printed):
+                main(['--root', ledger, '--run', 'r', 'features'])
+        store = Store(ledger)
+        self.addCleanup(store.close)
+        skills = store.run('r')['config']['native_capabilities']['lab']['skills']
+        self.assertEqual(skills, {'root': str(root.resolve()), 'frozen': {'plot-check': PLOT_CHECK}})
+        for name, raw in (('SKILL.md', SKILL_MD), ('scripts/check.py', CHECK_PY)):
+            self.assertEqual(store.read_blob(PLOT_CHECK['files'][name]), raw)
+        self.assertEqual(json.loads(printed.getvalue())['native_capabilities']['lab'], {**TERMINAL, 'skills': skills})
+
+    def test_receipt_form_names_skills_by_hash(self):
+        self.assertEqual(native.receipt_form(WITH_SKILLS)['skills'], {'plot-check': digest(PLOT_CHECK['files'])})
+        self.assertEqual(native.receipt_form(WITH_SKILLS)['terminal'], TERMINAL['terminal'])
+        self.assertEqual(WITH_SKILLS['skills']['frozen'], {'plot-check': PLOT_CHECK})   # The settings given are kept.
 
 
 if __name__ == '__main__':
